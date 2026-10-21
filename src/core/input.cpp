@@ -78,6 +78,12 @@ constexpr std::uint64_t kHeadDirectedLocomotionMaxAgeMs = 100;
 MovementOrientation g_active_movement_orientation = MovementOrientation::Head;
 int g_active_movement_hand = 0;
 bool g_movement_settings_initialized = false;
+Vec3 g_last_controller_forward{};
+std::uint64_t g_controller_heading_epoch = 0;
+int g_controller_heading_hand = -1;
+bool g_have_controller_heading = false;
+bool g_controller_vertical = false;
+bool g_controller_rearm_required = false;
 // Latest IK arm targets (mutex: render writer, game-thread reader).
 std::mutex g_arm_mutex;
 ArmTarget g_arm_target[2];  // 0 left, 1 right
@@ -905,10 +911,19 @@ void InputPollFrame(void* base_space, const float head_pos[3],
   const bool left_stick_neutral =
       std::hypot(pad_input.left.stick_x, pad_input.left.stick_y) <= 0.15f;
   if (!g_movement_settings_initialized || left_stick_neutral) {
-    g_active_movement_orientation = cfg.movement_orientation;
-    g_active_movement_hand = cfg.movement_controller == MovementController::Left ? 0 :
+    const auto next_orientation = cfg.movement_orientation;
+    const int next_hand = cfg.movement_controller == MovementController::Left ? 0 :
         cfg.movement_controller == MovementController::Right ? 1 :
         cfg.dominant_hand_left ? 1 : 0;
+    if (!g_movement_settings_initialized ||
+        next_orientation != g_active_movement_orientation ||
+        next_hand != g_active_movement_hand) {
+      g_have_controller_heading = false;
+      g_controller_vertical = false;
+      g_controller_rearm_required = false;
+    }
+    g_active_movement_orientation = next_orientation;
+    g_active_movement_hand = next_hand;
     g_movement_settings_initialized = true;
   }
   // IK arms on: weapon-hand buttons must not fire canned attacks.
@@ -935,10 +950,23 @@ void InputPollFrame(void* base_space, const float head_pos[3],
           std::lock_guard<std::mutex> lock(g_roomscale_mutex);
           tracking_basis = g_roomscale_basis;
         }
-        reference_valid = hand_samples[hand].valid && tracking_basis.valid &&
+        const bool tracked = hand_samples[hand].valid && tracking_basis.valid &&
             tracking_basis.space_epoch == space_epoch && now >= tracking_basis.published_ms &&
             now - tracking_basis.published_ms <= kHeadDirectedLocomotionMaxAgeMs;
-        if (reference_valid) {
+        if (!tracked) {
+          g_have_controller_heading = false;
+          g_controller_vertical = false;
+          g_controller_rearm_required = true;
+          reference_valid = false;
+        } else {
+          if (g_controller_heading_epoch != space_epoch ||
+              g_controller_heading_hand != hand) {
+            g_have_controller_heading = false;
+            g_controller_vertical = false;
+            g_controller_rearm_required = true;
+            g_controller_heading_epoch = space_epoch;
+            g_controller_heading_hand = hand;
+          }
           const HandSample& sample = hand_samples[hand];
           const Vec3 tracking_forward = BladeDirection(sample.quat[0], sample.quat[1],
                                                         sample.quat[2], sample.quat[3]);
@@ -947,9 +975,26 @@ void InputPollFrame(void* base_space, const float head_pos[3],
                    VScale(tracking_basis.tracking_up, tracking_forward.y)),
               VScale(tracking_basis.tracking_forward, -tracking_forward.z));
           const float planar = std::hypot(world_forward.x, world_forward.z);
-          reference_valid = FiniteVec(world_forward) && planar > 0.2f;
-          if (reference_valid)
-            reference_forward = {world_forward.x / planar, 0.0f, world_forward.z / planar};
+          if (!FiniteVec(world_forward) || !std::isfinite(planar)) {
+            g_have_controller_heading = false;
+            g_controller_vertical = false;
+            g_controller_rearm_required = true;
+            reference_valid = false;
+          } else {
+            if (planar >= 0.3f) {
+              g_last_controller_forward =
+                  {world_forward.x / planar, 0.0f, world_forward.z / planar};
+              g_have_controller_heading = true;
+              g_controller_vertical = false;
+              if (left_stick_neutral) g_controller_rearm_required = false;
+            } else if (planar <= 0.2f) {
+              g_controller_vertical = true;
+            }
+            const bool may_reuse = g_have_controller_heading &&
+                (g_controller_vertical || planar >= 0.2f);
+            reference_valid = may_reuse && !g_controller_rearm_required;
+            if (reference_valid) reference_forward = g_last_controller_forward;
+          }
         }
       }
       VrHeading heading;

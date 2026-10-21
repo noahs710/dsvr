@@ -156,13 +156,19 @@ int main() {
   CHECK(locomotion_publishes == 1 && locomotion_epoch == 9);
   CHECK(VDot(locomotion_head,turned_forward) > .999f);
   CHECK(VDot(locomotion_native,{.04822187f,0,.99883664f}) > .999f);
+  CHECK(CameraApplyFirstPerson(follow.data(),.70710678f,0,0,.70710678f,.12f,1.35f,.04f,
+      1.6f,1,0,0,1.4f,1.1f));
+  CameraPublishHeadDirectedLocomotion(9);
+  CHECK(locomotion_publishes == 2 && VDot(locomotion_head,turned_forward) > .999f);
   const auto invalid_before_bad_native = locomotion_invalidations;
   Put(model,0x38,std::numeric_limits<float>::quiet_NaN());
   CameraPublishHeadDirectedLocomotion(9);
   CHECK(locomotion_invalidations == invalid_before_bad_native + 1);
   Put(model,0x38,root[2]);
+  CHECK(CameraApplyFirstPerson(follow.data(),0,0,0,1,.12f,1.35f,.04f,
+      1.6f,1,0,0,1.4f,1.1f));
   CameraPublishHeadDirectedLocomotion(9);
-  CHECK(locomotion_publishes == 2);
+  CHECK(locomotion_publishes == 3);
   const auto locomotion_invalidations_before = locomotion_invalidations;
 
   const float suspended_root[12]={1,0,0,1,0,1,0,2,0,0,1,3};

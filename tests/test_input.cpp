@@ -195,10 +195,11 @@ void HeadDirectedLocomotion() {
     room_basis.valid = true;
     dsvr::InputPublishRoomscaleBasis(room_basis);
     dsvr::InputPublishHeadDirectedLocomotion({0, 0, 1}, {0, 0, 1}, 1);
-    left_stick_x = 0.5f;
     const float room_start[3] = {0.0f, 1.6f, 0.0f};
     const float room_forward[3] = {0.0f, 1.6f, -0.2f};
     dsvr::InputPollFrame(base, room_start, 1, 1900000000);
+    left_stick_x = 0.5f;
+    dsvr::InputPollFrame(base, room_start, 1, 1925000000);
     dsvr::InputPollFrame(base, room_forward, 1, 1950000000);
     dsvr::VirtualPadState room_pad{};
     Expect(dsvr::InputLatestPad(room_pad) && room_pad.thumb_lx > 0 &&
@@ -250,7 +251,30 @@ void MovementReferenceFrames() {
            "head scanning does not change travel direction with a fixed controller heading");
     head_quat[1] = 0.0f;
     head_quat[3] = 1.0f;
-    dsvr::InputPublishHeadDirectedLocomotion({0, 0, 1}, {0, 0, 1}, 1);
+    left_quat[0] = 0.70710678f;
+    left_quat[1] = left_quat[2] = 0.0f;
+    left_quat[3] = 0.70710678f;
+    dsvr::InputPollFrame(base, kHead, 1, 2406000000);
+    Expect(dsvr::InputLatestPad(pad) && pad.thumb_lx == controller_heading_x &&
+           std::abs(pad.thumb_ly) < 2,
+           "near-vertical controller aim retains the last stable planar heading");
+    left_pose_valid = false;
+    dsvr::InputPollFrame(base, kHead, 1, 2406500000);
+    Expect(dsvr::InputLatestPad(pad) && pad.thumb_lx == 0 && pad.thumb_ly == 0,
+           "controller tracking loss immediately neutralizes movement");
+    left_pose_valid = true;
+    left_quat[0] = 0.0f;
+    left_quat[1] = 0.70710678f;
+    left_quat[3] = 0.70710678f;
+    dsvr::InputPollFrame(base, kHead, 1, 2406800000);
+    Expect(dsvr::InputLatestPad(pad) && pad.thumb_lx == 0 && pad.thumb_ly == 0,
+           "controller reacquisition requires neutral rearm");
+    left_stick_y = 0;
+    dsvr::InputPollFrame(base, kHead, 1, 2407000000);
+    left_stick_y = 1;
+    dsvr::InputPollFrame(base, kHead, 1, 2407100000);
+    Expect(dsvr::InputLatestPad(pad) && pad.thumb_lx == controller_heading_x,
+           "controller movement resumes after valid heading and neutral rearm");
     Expect(dsvr::InputTakeTurnYaw() == 0,
            "controller-relative movement changes locomotion only, not turn yaw");
 
@@ -268,16 +292,35 @@ void MovementReferenceFrames() {
 
     left_stick_y = 0;
     dsvr::InputPollFrame(base, kHead, 1, 2415000000);
-    config.movement_controller = dsvr::MovementController::Left;
-    left_pose_valid = false;
+    config.movement_controller = dsvr::MovementController::NonDominant;
+    config.dominant_hand_left = false;
     dsvr::InputPollFrame(base, kHead, 1, 2416000000);
     left_stick_y = 1;
+    dsvr::InputPollFrame(base, kHead, 1, 2417000000);
+    Expect(dsvr::InputLatestPad(pad) && pad.thumb_lx < -32000,
+           "non-dominant reference resolves to left controller for right-handed mode");
+    left_stick_y = 0;
+    dsvr::InputPollFrame(base, kHead, 1, 2418000000);
+    config.dominant_hand_left = true;
+    dsvr::InputPollFrame(base, kHead, 1, 2419000000);
+    left_stick_y = 1;
     dsvr::InputPollFrame(base, kHead, 1, 2420000000);
+    Expect(dsvr::InputLatestPad(pad) && pad.thumb_lx > 32000,
+           "non-dominant reference resolves to right controller after neutral hand change");
+
+    left_stick_y = 0;
+    dsvr::InputPollFrame(base, kHead, 1, 2421000000);
+    config.movement_controller = dsvr::MovementController::Left;
+    left_pose_valid = false;
+    dsvr::InputPollFrame(base, kHead, 1, 2422000000);
+    left_stick_y = 1;
+    dsvr::InputPollFrame(base, kHead, 1, 2423000000);
     Expect(dsvr::InputLatestPad(pad) && pad.thumb_ly == 0 && pad.thumb_lx == 0,
            "lost selected controller neutralizes movement without HMD fallback");
     left_pose_valid = true;
     left_stick_x = left_stick_y = 0;
     config.movement_orientation = dsvr::MovementOrientation::Head;
+    config.dominant_hand_left = false;
     dsvr::InputPollFrame(base, kHead, 1, 2425000000);
 }
 

@@ -276,7 +276,7 @@ Native observation and operator-guided headset qualification follow separately; 
 
 ## 7. Research and implementation discipline
 
-- Each investigation must name a concrete missing fact, evidence to collect, and next callsite/consumer to inspect. If a bounded static pass cannot resolve it, use focused native observation instead of another unbounded name search.
+- Each investigation must name a concrete missing fact, evidence to collect, and next callsite/consumer to inspect. For native-evidence blockers, pin Ghidra analysis to `C:\\Tools\\DarkSoulsRemaster_De\\analysis-full\\DSRFull.gpr` (read-only primary). First use `npx -y rea-agents@4.0.1` against the exact target; if its provider yields no useful observations, use targeted REA MCP Ghidra probes. The sibling `analysis-full-attack\\DSRFull.gpr` is a repair workspace only; never use it as the primary source. Do not repeat broad name searches; pursue concrete callers, xrefs, instructions and data-flow until the evidence question is answered or the environment blocks the tool.
 - Preserve findings and failed hypotheses so subsequent work does not repeat them. Record game-build identity and evidence paths alongside every binding decision.
 - Keep integration changes narrow. The long `PoseUpdateDetour` should publish the committed pose to the combat owner; native contact lifecycle belongs in `combat_runtime`, not an expanding render/IK hook.
 - Do not claim guaranteed discovery dates for unknown native contracts. The obligation is to pursue and test the working integration, and to keep incomplete requirements open until demonstrated.

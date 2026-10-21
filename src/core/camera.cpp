@@ -142,6 +142,9 @@ float g_last_yaw = 0.0f;  // last stable head yaw (pole continuity)
 Vec3 g_last_right{1, 0, 0};    // written right vector (vertical-look fallback)
 Vec3 g_tracking_head{0, 0, 0};  // calibrated camera anchor shared with IK
 Vec3 g_head_right{1, 0, 0}, g_head_up{0, 1, 0}, g_head_fwd{0, 0, 1};
+std::uint64_t g_planar_heading_epoch = 0;
+Vec3 g_last_planar_heading{0, 0, 1};
+bool g_have_planar_heading = false;
 Vec3 g_last_player{0, 0, 0};
 bool g_have_last_player = false;
 int g_turn_logs = 0;
@@ -497,7 +500,20 @@ void CameraPublishHeadDirectedLocomotion(std::uint64_t space_epoch) {
     InputInvalidateHeadDirectedLocomotion();
     return;
   }
-  InputPublishHeadDirectedLocomotion(g_head_fwd, native_forward, space_epoch);
+  if (g_planar_heading_epoch != space_epoch) {
+    g_planar_heading_epoch = space_epoch;
+    g_have_planar_heading = false;
+  }
+  const float planar = std::hypot(g_head_fwd.x, g_head_fwd.z);
+  if (std::isfinite(planar) && planar > 0.2f) {
+    g_last_planar_heading = {g_head_fwd.x / planar, 0.0f, g_head_fwd.z / planar};
+    g_have_planar_heading = true;
+  }
+  if (!g_have_planar_heading) {
+    InputInvalidateHeadDirectedLocomotion();
+    return;
+  }
+  InputPublishHeadDirectedLocomotion(g_last_planar_heading, native_forward, space_epoch);
   RoomscaleBasis roomscale{};
   roomscale.tracking_right = HeadTranslationFromReference(
       {1, 0, 0}, g_q0, g_right0, g_up0, g_fwd0, 1.0f);
