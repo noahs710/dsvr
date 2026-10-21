@@ -1,4 +1,5 @@
 #include "config.h"
+#include "logging.h"
 
 #include <windows.h>
 
@@ -99,6 +100,7 @@ void Apply(Config& c, std::string_view section_raw, std::string_view key_raw,
       c.smooth_turn_speed_dps = Clamp(f, 30.0f, 360.0f);
     if (k == "head_directed_move" && ParseBool(value, b))
       c.head_directed_move = b;
+
     if (k == "headlook_enabled" && ParseBool(value, b))
       c.headlook_enabled = b;
     if (k == "mono_screen_fov_deg" && ParseFloat(value, f))
@@ -116,6 +118,11 @@ void Apply(Config& c, std::string_view section_raw, std::string_view key_raw,
   } else if (s == "controls") {
     bool b;
     int i;
+    if (k == "movement_orientation") {
+      const auto v = ToLower(Trim(value));
+      if (v == "head") c.movement_orientation = MovementOrientation::Head;
+      else if (v == "controller") c.movement_orientation = MovementOrientation::Controller;
+    }
     if ((k == "dominant_hand_left" || k == "left_handed") &&
         ParseBool(value, b))
       c.dominant_hand_left = b;
@@ -131,6 +138,12 @@ void Apply(Config& c, std::string_view section_raw, std::string_view key_raw,
         c.movement_reference = MovementReference::LeftHand;
       if (v == "right_hand" || v == "right-hand")
         c.movement_reference = MovementReference::RightHand;
+    }
+    if (k == "movement_controller") {
+      const auto v = ToLower(Trim(value));
+      if (v == "non_dominant") c.movement_controller = MovementController::NonDominant;
+      else if (v == "left") c.movement_controller = MovementController::Left;
+      else if (v == "right") c.movement_controller = MovementController::Right;
     }
     if (k == "play_style") {
       std::string v = ToLower(Trim(value));
@@ -262,6 +275,10 @@ bool ConfigLoad(const wchar_t* toml_path, Config& out) {
   if (_wfopen_s(&f, toml_path, L"r") != 0 || !f) return false;
   char line[1024];
   std::string section;
+  bool orientation_seen = false;
+  bool controller_seen = false;
+  bool invalid_movement_setting = false;
+  bool legacy_axis_bypass_seen = false;
   while (fgets(line, sizeof(line), f)) {
     std::string_view v(line);
     if (auto p = v.find('#'); p != std::string_view::npos)
@@ -278,9 +295,39 @@ bool ConfigLoad(const wchar_t* toml_path, Config& out) {
     std::string val = Trim(std::string_view(t.data() + eq + 1));
     if (val.size() >= 2 && val.front() == '"' && val.back() == '"')
       val = val.substr(1, val.size() - 2);
+    const auto normalized_section = ToLower(Trim(section));
+    const auto normalized_key = ToLower(Trim(key));
+    if (normalized_section == "vr" && normalized_key == "head_directed_move") {
+      bool legacy_enabled = true;
+      if (ParseBool(val, legacy_enabled) && !legacy_enabled)
+        legacy_axis_bypass_seen = true;
+    }
+    if (normalized_section == "controls" && normalized_key == "movement_orientation") {
+      orientation_seen = true;
+      const auto mode = ToLower(Trim(val));
+      invalid_movement_setting |= mode != "head" && mode != "controller";
+    }
+    if (normalized_section == "controls" && normalized_key == "movement_controller") {
+      controller_seen = true;
+      const auto hand = ToLower(Trim(val));
+      invalid_movement_setting |= hand != "non_dominant" && hand != "left" && hand != "right";
+    }
     Apply(out, section, key, val);
   }
   fclose(f);
+  if (legacy_axis_bypass_seen)
+    DSVR_WARN("Config: head_directed_move=false is retired; movement now uses the selected Head/Controller orientation");
+  if (invalid_movement_setting) return false;
+  if (!orientation_seen) {
+    out.movement_orientation = out.movement_reference == MovementReference::Head
+        ? MovementOrientation::Head : MovementOrientation::Controller;
+  }
+  if (!controller_seen) {
+    out.movement_controller = out.movement_reference == MovementReference::LeftHand
+        ? MovementController::Left
+        : out.movement_reference == MovementReference::RightHand
+            ? MovementController::Right : MovementController::NonDominant;
+  }
   return true;
 }
 
@@ -316,9 +363,6 @@ bool ConfigSave(const wchar_t* toml_path, const Config& c) {
   fprintf(f, "smooth_turn = %s\n", c.smooth_turn ? "true" : "false");
   fprintf(f, "smooth_turn_speed_dps = %s\n",
           FmtFloat(c.smooth_turn_speed_dps).c_str());
-  fprintf(f, "# Head-directed locomotion maps the left stick to the applied HMD heading; false preserves native axes.\n");
-  fprintf(f, "head_directed_move = %s\n",
-          c.head_directed_move ? "true" : "false");
   fprintf(f, "# headlook_enabled = true makes HMD rotation drive the camera (P3 test)\n");
   fprintf(f, "headlook_enabled = %s\n", c.headlook_enabled ? "true" : "false");
   fprintf(f, "# mono_screen_fov_deg: virtual cinema screen width in mono mode\n");
@@ -338,10 +382,12 @@ bool ConfigSave(const wchar_t* toml_path, const Config& c) {
   fprintf(f, "[controls]\n");
   fprintf(f, "dominant_hand = \"%s\"\n",
           c.dominant_hand_left ? "left" : "right");
-  const char* movement_reference =
-      c.movement_reference == MovementReference::LeftHand ? "left_hand" :
-      c.movement_reference == MovementReference::RightHand ? "right_hand" : "head";
-  fprintf(f, "movement_reference = \"%s\"\n", movement_reference);
+  fprintf(f, "movement_orientation = \"%s\"\n",
+          c.movement_orientation == MovementOrientation::Controller ? "controller" : "head");
+  const char* movement_controller =
+      c.movement_controller == MovementController::Left ? "left" :
+      c.movement_controller == MovementController::Right ? "right" : "non_dominant";
+  fprintf(f, "movement_controller = \"%s\"\n", movement_controller);
   fprintf(f, "play_style = \"%s\"\n", c.play_style.c_str());
   fprintf(f, "hotkeys_enabled = %s\n", c.hotkeys_enabled ? "true" : "false");
   fprintf(f, "# xr_input_enabled = true turns on OpenXR controller actions + pad bridge\n");
@@ -419,6 +465,11 @@ bool ConfigValid(const Config& c) {
       (c.movement_reference == MovementReference::Head ||
        c.movement_reference == MovementReference::LeftHand ||
        c.movement_reference == MovementReference::RightHand) &&
+      (c.movement_orientation == MovementOrientation::Head ||
+       c.movement_orientation == MovementOrientation::Controller) &&
+      (c.movement_controller == MovementController::NonDominant ||
+       c.movement_controller == MovementController::Left ||
+       c.movement_controller == MovementController::Right) &&
       c.loader_chain_proxy.find_first_of("\r\n\"") == std::string::npos &&
       (c.motion_blur_original.empty() ||
        (c.motion_blur_original.size() <= 4 &&

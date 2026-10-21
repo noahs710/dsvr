@@ -33,6 +33,8 @@ int main() {
   CHECK(!c.observer_only);
   CHECK(c.render_scale_percent == 100);
   CHECK(c.snap_turn_degrees == 45);
+  CHECK(c.movement_orientation == dsvr::MovementOrientation::Head);
+  CHECK(c.movement_controller == dsvr::MovementController::NonDominant);
   CHECK(c.eye_height == 1.65f);
   CHECK(c.forward_offset_m == 0.0f && !c.hide_player_model);
   CHECK(c.hide_head);
@@ -67,6 +69,7 @@ int main() {
   CHECK(c.render_scale_percent == 150);
   CHECK(c.frame_limit_fps == 144);
   CHECK(c.snap_turn_degrees == 30);
+  CHECK(c.movement_orientation == dsvr::MovementOrientation::Head);
   CHECK(!c.head_directed_move);
   CHECK(c.eye_height == 1.8f);
   CHECK(c.world_scale == 1.2f);
@@ -133,6 +136,27 @@ int main() {
   CHECK(dsvr::ConfigLoad(path.c_str(), c));
   CHECK(c.play_style == "standing");
 
+  // Legacy movement_reference values migrate unless canonical keys are present.
+  {
+    FILE* f = nullptr;
+    CHECK(_wfopen_s(&f, path.c_str(), L"w") == 0 && f);
+    fputs("[controls]\nmovement_reference = \"left_hand\"\n", f);
+    fclose(f);
+    CHECK(dsvr::ConfigLoad(path.c_str(), c));
+    CHECK(c.movement_orientation == dsvr::MovementOrientation::Controller);
+    CHECK(c.movement_controller == dsvr::MovementController::Left);
+    CHECK(_wfopen_s(&f, path.c_str(), L"w") == 0 && f);
+    fputs("[controls]\nmovement_orientation = \"controller\"\nmovement_controller = \"right\"\nmovement_reference = \"head\"\n", f);
+    fclose(f);
+    CHECK(dsvr::ConfigLoad(path.c_str(), c));
+    CHECK(c.movement_orientation == dsvr::MovementOrientation::Controller);
+    CHECK(c.movement_controller == dsvr::MovementController::Right);
+    CHECK(_wfopen_s(&f, path.c_str(), L"w") == 0 && f);
+    fputs("[controls]\nmovement_orientation = \"invalid\"\n", f);
+    fclose(f);
+    CHECK(!dsvr::ConfigLoad(path.c_str(), c));
+  }
+
   // ConfigSave -> ConfigLoad round-trip (GUI persists through this path).
   {
     dsvr::Config want;
@@ -142,6 +166,8 @@ int main() {
     want.render_scale_percent = 125;
     want.loader_chain_proxy = "other.dll";
     want.dominant_hand_left = true;
+    want.movement_orientation = dsvr::MovementOrientation::Controller;
+    want.movement_controller = dsvr::MovementController::Right;
     want.play_style = "roomscale";
     want.vignette_strength = 0.25f;
     want.offline_only_ack = true;
@@ -172,6 +198,8 @@ int main() {
     CHECK(got.observer_only);
     CHECK(got.loader_chain_proxy == "other.dll");
     CHECK(got.dominant_hand_left && got.play_style == "roomscale");
+    CHECK(got.movement_orientation == dsvr::MovementOrientation::Controller);
+    CHECK(got.movement_controller == dsvr::MovementController::Right);
     CHECK(got.vignette_strength == 0.25f && got.offline_only_ack);
     CHECK(got.sanctuary_override && got.menu_distance_m == 2.5f);
     CHECK(got.menu_reading_fov_deg == 70.0f);

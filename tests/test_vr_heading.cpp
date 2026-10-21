@@ -218,6 +218,8 @@ int main() {
     CHECK(diagonal.valid && Near(diagonal.stick_x, -0.4f) &&
           Near(diagonal.stick_y, 0.3f));
     CHECK(Near(std::hypot(diagonal.stick_x, diagonal.stick_y), 0.5f));
+    diagonal = heading.CandidateLocomotion(1, 1, {0, 0, 1});
+    CHECK(diagonal.valid && Near(std::hypot(diagonal.stick_x, diagonal.stick_y), 1.0f));
     auto centre = heading.CandidateLocomotion(0, 0, {-1, 0, 0});
     CHECK(centre.valid && Near(centre.stick_x, 0) && Near(centre.stick_y, 0));
     CHECK(VNear(heading.BodyBasis().f, 0, 0, 1));

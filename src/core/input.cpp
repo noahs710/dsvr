@@ -75,6 +75,9 @@ struct HeadDirectedLocomotion {
 std::mutex g_locomotion_mutex;
 HeadDirectedLocomotion g_head_directed_locomotion{};
 constexpr std::uint64_t kHeadDirectedLocomotionMaxAgeMs = 100;
+MovementOrientation g_active_movement_orientation = MovementOrientation::Head;
+int g_active_movement_hand = 0;
+bool g_movement_settings_initialized = false;
 // Latest IK arm targets (mutex: render writer, game-thread reader).
 std::mutex g_arm_mutex;
 ArmTarget g_arm_target[2];  // 0 left, 1 right
@@ -372,13 +375,10 @@ void ResetRoomscaleState() {
 bool UpdateRoomscaleInput(VrPadInput& pad, Vec3 head, std::uint64_t epoch,
                           long long predicted_time_ns, const Config& cfg,
                           bool sanctuary) {
-  const bool stick_moving = std::hypot(pad.left.stick_x, pad.left.stick_y) > 0.15f;
-  const bool right_stick_moving =
-      std::hypot(pad.right.stick_x, pad.right.stick_y) > 0.15f;
   const bool allowed = cfg.vr_enabled && cfg.headlook_enabled &&
       cfg.play_style == "roomscale" && !sanctuary && !ModMenuCapturesInput() &&
-      !CalibrationCapturesInput() && !g_capture_rearm && !stick_moving &&
-      !right_stick_moving && epoch && predicted_time_ns > 0 && FiniteVec(head);
+      !CalibrationCapturesInput() && !g_capture_rearm && epoch &&
+      predicted_time_ns > 0 && FiniteVec(head);
   const auto now = GetTickCount64();
   std::lock_guard<std::mutex> lock(g_roomscale_mutex);
   if (!allowed) { ResetRoomscaleLocked(); return false; }
@@ -902,54 +902,67 @@ void InputPollFrame(void* base_space, const float head_pos[3],
   }
 
   pad_input.dominant_left = cfg.dominant_hand_left;
+  const bool left_stick_neutral =
+      std::hypot(pad_input.left.stick_x, pad_input.left.stick_y) <= 0.15f;
+  if (!g_movement_settings_initialized || left_stick_neutral) {
+    g_active_movement_orientation = cfg.movement_orientation;
+    g_active_movement_hand = cfg.movement_controller == MovementController::Left ? 0 :
+        cfg.movement_controller == MovementController::Right ? 1 :
+        cfg.dominant_hand_left ? 1 : 0;
+    g_movement_settings_initialized = true;
+  }
   // IK arms on: weapon-hand buttons must not fire canned attacks.
   pad_input.suppress_weapon_attacks = cfg.arm_ik_enabled;
-  if (cfg.head_directed_move && !sanctuary) {
+  if (!sanctuary) {
     HeadDirectedLocomotion locomotion{};
     {
       std::lock_guard<std::mutex> lock(g_locomotion_mutex);
       locomotion = g_head_directed_locomotion;
     }
     const auto now = GetTickCount64();
-    if (locomotion.valid && locomotion.space_epoch == space_epoch &&
+    const bool fresh = locomotion.valid && locomotion.space_epoch == space_epoch &&
         now >= locomotion.published_ms &&
-        now - locomotion.published_ms <= kHeadDirectedLocomotionMaxAgeMs) {
-      // Hand references are yaw offsets from the same-frame HMD pose, then
-      // applied to the already-validated native-frame head heading. This
-        // changes only stick axes; it never rotates the game's body frame.
-        Vec3 reference_forward = locomotion.head_forward;
-        if (cfg.movement_reference != MovementReference::Head) {
-          const int hand = cfg.movement_reference == MovementReference::LeftHand ? 0 : 1;
-          float view_quat[4]{};
-        if (hand_samples[hand].valid &&
-              ReadHeadOrientation((XrSpace)base_space,
-                                  (XrTime)predicted_display_time, view_quat)) {
-          const Vec3 view_forward = BladeDirection(view_quat[0], view_quat[1],
-                                                    view_quat[2], view_quat[3]);
+        now - locomotion.published_ms <= kHeadDirectedLocomotionMaxAgeMs;
+    if (!fresh) {
+      pad_input.left.stick_x = pad_input.left.stick_y = 0.0f;
+    } else {
+      Vec3 reference_forward = locomotion.head_forward;
+      bool reference_valid = true;
+      if (g_active_movement_orientation == MovementOrientation::Controller) {
+        const int hand = g_active_movement_hand;
+        RoomscaleBasis tracking_basis{};
+        {
+          std::lock_guard<std::mutex> lock(g_roomscale_mutex);
+          tracking_basis = g_roomscale_basis;
+        }
+        reference_valid = hand_samples[hand].valid && tracking_basis.valid &&
+            tracking_basis.space_epoch == space_epoch && now >= tracking_basis.published_ms &&
+            now - tracking_basis.published_ms <= kHeadDirectedLocomotionMaxAgeMs;
+        if (reference_valid) {
           const HandSample& sample = hand_samples[hand];
-          const Vec3 hand_forward = BladeDirection(sample.quat[0], sample.quat[1],
-                                                    sample.quat[2], sample.quat[3]);
-          const float view_planar = std::hypot(view_forward.x, view_forward.z);
-          const float hand_planar = std::hypot(hand_forward.x, hand_forward.z);
-          if (view_planar > 0.2f && hand_planar > 0.2f) {
-            // OpenXR forward is -Z; game-forward is +Z, so the shared
-            // tracking-to-game reflection reverses the relative yaw sign.
-            const float relative_yaw = -PlanarYawDelta(view_forward, hand_forward);
-            VrHeading selected;
-            if (selected.SeedOnce(locomotion.head_forward) &&
-                selected.ApplyTurn(relative_yaw))
-              reference_forward = selected.BodyBasis().f;
-          }
+          const Vec3 tracking_forward = BladeDirection(sample.quat[0], sample.quat[1],
+                                                        sample.quat[2], sample.quat[3]);
+          const Vec3 world_forward = VAdd(
+              VAdd(VScale(tracking_basis.tracking_right, tracking_forward.x),
+                   VScale(tracking_basis.tracking_up, tracking_forward.y)),
+              VScale(tracking_basis.tracking_forward, -tracking_forward.z));
+          const float planar = std::hypot(world_forward.x, world_forward.z);
+          reference_valid = FiniteVec(world_forward) && planar > 0.2f;
+          if (reference_valid)
+            reference_forward = {world_forward.x / planar, 0.0f, world_forward.z / planar};
         }
       }
       VrHeading heading;
-      if (heading.SeedOnce(reference_forward)) {
-        const auto candidate = heading.CandidateLocomotion(
-            pad_input.left.stick_x, pad_input.left.stick_y, locomotion.native_forward);
-        if (candidate.valid) {
-          pad_input.left.stick_x = candidate.stick_x;
-          pad_input.left.stick_y = candidate.stick_y;
-        }
+      const auto candidate = reference_valid && heading.SeedOnce(reference_forward)
+          ? heading.CandidateLocomotion(pad_input.left.stick_x,
+                                        pad_input.left.stick_y,
+                                        locomotion.native_forward)
+          : VrLocomotionCandidate{};
+      if (candidate.valid) {
+        pad_input.left.stick_x = candidate.stick_x;
+        pad_input.left.stick_y = candidate.stick_y;
+      } else {
+        pad_input.left.stick_x = pad_input.left.stick_y = 0.0f;
       }
     }
   }

@@ -393,14 +393,18 @@ void SettingsPanel() {
   ImGui::EndDisabled();
   if(!ui.installed)ImGui::TextDisabled("Native UI hook unavailable for this session.");
   ImGui::Separator();
-  g_dirty|=ImGui::Checkbox("Head-directed movement",&g_draft.head_directed_move);
-  static const char* movement_references[] = {"Head", "Left Hand", "Right Hand"};
-  int movement_reference = static_cast<int>(g_draft.movement_reference);
-  ImGui::BeginDisabled(!g_draft.head_directed_move);
-  if (ImGui::Combo("Movement reference", &movement_reference,
-                   movement_references, 3)) {
-    g_draft.movement_reference =
-        static_cast<MovementReference>(movement_reference);
+  static const char* movement_modes[] = {"Head", "Controller"};
+  int movement_mode = static_cast<int>(g_draft.movement_orientation);
+  if (ImGui::Combo("Movement orientation", &movement_mode, movement_modes, 2)) {
+    g_draft.movement_orientation = static_cast<MovementOrientation>(movement_mode);
+    g_dirty = true;
+  }
+  static const char* movement_controllers[] = {"Non-dominant", "Left", "Right"};
+  int movement_controller = static_cast<int>(g_draft.movement_controller);
+  ImGui::BeginDisabled(g_draft.movement_orientation != MovementOrientation::Controller);
+  if (ImGui::Combo("Controller reference", &movement_controller,
+                   movement_controllers, 3)) {
+    g_draft.movement_controller = static_cast<MovementController>(movement_controller);
     g_dirty = true;
   }
   ImGui::EndDisabled();

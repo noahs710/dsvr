@@ -84,13 +84,18 @@ class VrHeading {
     return {{c, 0, -s}, {0, 1, 0}, {s, 0, c}};
   }
   VrLocomotionCandidate CandidateLocomotion(float stick_x, float stick_y,
-                                            Vec3 native_forward) const {
+                                              Vec3 native_forward) const {
     if (!ready_ || !std::isfinite(stick_x) || !std::isfinite(stick_y)) return {};
     VrHeading native;
     if (!native.SeedOnce(native_forward)) return {};
     const Basis own = BodyBasis(), movement = native.BodyBasis();
     const Vec3 desired = VAdd(VScale(own.r, stick_x), VScale(own.f, stick_y));
-    return {VDot(desired, movement.r), VDot(desired, movement.f), true};
+    float x = VDot(desired, movement.r);
+    float y = VDot(desired, movement.f);
+    const float magnitude = std::hypot(x, y);
+    if (!std::isfinite(magnitude)) return {};
+    if (magnitude > 1.0f) { x /= magnitude; y /= magnitude; }
+    return {x, y, true};
   }
 
  private:

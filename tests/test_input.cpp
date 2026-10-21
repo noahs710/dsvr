@@ -140,7 +140,7 @@ void ResetRoomscaleTestControls() {
 void HeadDirectedLocomotion() {
     const XrSpace base = reinterpret_cast<XrSpace>(100);
     dsvr::VirtualPadState pad{};
-    config.head_directed_move = true;
+    config.movement_orientation = dsvr::MovementOrientation::Head;
     sanctuary = false;
     left_stick_x = 0;
     left_stick_y = 1;
@@ -149,18 +149,25 @@ void HeadDirectedLocomotion() {
     dsvr::InputPublishHeadDirectedLocomotion({1, 0, 0}, {0, 0, 1}, 1);
     dsvr::InputPollFrame(base, kHead, 1, 1800000000);
     Expect(dsvr::InputLatestPad(pad) && pad.thumb_lx > 32000 && pad.thumb_ly == 0,
-           "head-directed movement rotates forward stick into the native movement frame");
+           "head orientation rotates forward stick into the native movement frame");
 
-    config.head_directed_move = false;
+    left_stick_y = 0;
+    config.movement_orientation = dsvr::MovementOrientation::Controller;
+    config.movement_controller = dsvr::MovementController::Left;
+    left_pose_valid = true;
+    dsvr::InputPollFrame(base, kHead, 1, 1805000000);
+    left_pose_valid = false;
+    left_stick_y = 1;
     dsvr::InputPollFrame(base, kHead, 1, 1810000000);
-    Expect(dsvr::InputLatestPad(pad) && pad.thumb_lx == 0 && pad.thumb_ly > 32000,
-           "disabled head-directed movement preserves raw native axes");
+    Expect(dsvr::InputLatestPad(pad) && pad.thumb_lx == 0 && pad.thumb_ly == 0,
+           "controller mode neutralizes translation when its selected reference is unavailable");
+    left_pose_valid = true;
+    config.movement_orientation = dsvr::MovementOrientation::Head;
 
-    config.head_directed_move = true;
     dsvr::InputPublishHeadDirectedLocomotion({1, 0, 0}, {0, 0, 1}, 2);
     dsvr::InputPollFrame(base, kHead, 1, 1820000000);
-    Expect(dsvr::InputLatestPad(pad) && pad.thumb_lx == 0 && pad.thumb_ly > 32000,
-           "a locomotion basis from another tracking epoch is refused");
+    Expect(dsvr::InputLatestPad(pad) && pad.thumb_lx == 0 && pad.thumb_ly == 0,
+           "a locomotion basis from another tracking epoch neutralizes translation");
 
     dsvr::InputPublishHeadDirectedLocomotion({1, 0, 0}, {0, 0, 1}, 1);
     sanctuary = true;
@@ -172,10 +179,9 @@ void HeadDirectedLocomotion() {
     sanctuary = false;
     dsvr::InputInvalidateHeadDirectedLocomotion();
     dsvr::InputPollFrame(base, kHead, 1, 1840000000);
-    Expect(dsvr::InputLatestPad(pad) && pad.thumb_lx == 0 && pad.thumb_ly > 32000,
-           "invalidated locomotion basis falls back to raw native axes");
+    Expect(dsvr::InputLatestPad(pad) && pad.thumb_lx == 0 && pad.thumb_ly == 0,
+           "invalidated locomotion basis neutralizes artificial translation");
     ResetRoomscaleTestControls();
-    config.head_directed_move = false;
     config.vr_enabled = true;
     config.headlook_enabled = true;
     config.play_style = "roomscale";
@@ -188,27 +194,28 @@ void HeadDirectedLocomotion() {
     room_basis.space_epoch = 1;
     room_basis.valid = true;
     dsvr::InputPublishRoomscaleBasis(room_basis);
+    dsvr::InputPublishHeadDirectedLocomotion({0, 0, 1}, {0, 0, 1}, 1);
+    left_stick_x = 0.5f;
     const float room_start[3] = {0.0f, 1.6f, 0.0f};
     const float room_forward[3] = {0.0f, 1.6f, -0.2f};
     dsvr::InputPollFrame(base, room_start, 1, 1900000000);
     dsvr::InputPollFrame(base, room_forward, 1, 1950000000);
     dsvr::VirtualPadState room_pad{};
-    Expect(dsvr::InputLatestPad(room_pad) && room_pad.thumb_ly > 0,
-           "physical forward head displacement drives native locomotion input");
+    Expect(dsvr::InputLatestPad(room_pad) && room_pad.thumb_lx > 0 &&
+           room_pad.thumb_ly > 0,
+           "physical walking remains sampled and composes with simultaneous stick translation");
     dsvr::InputInvalidateFrame();
-    config.head_directed_move = true;
 }
 
 void MovementReferenceFrames() {
     const XrSpace base = reinterpret_cast<XrSpace>(100);
     dsvr::VirtualPadState pad{};
-    Expect(config.movement_reference == dsvr::MovementReference::Head,
-           "head is the default movement reference");
-    config.head_directed_move = true;
-    config.movement_reference = dsvr::MovementReference::LeftHand;
+    Expect(config.movement_orientation == dsvr::MovementOrientation::Head,
+           "head is the default movement orientation");
+    config.movement_orientation = dsvr::MovementOrientation::Controller;
+    config.movement_controller = dsvr::MovementController::Left;
     sanctuary = false;
-    left_stick_x = 0;
-    left_stick_y = 1;
+    left_stick_x = left_stick_y = 0;
     right_stick_value = 0;
     head_quat[0] = head_quat[1] = head_quat[2] = 0;
     head_quat[3] = 1;
@@ -218,31 +225,60 @@ void MovementReferenceFrames() {
     right_quat[0] = right_quat[1] = right_quat[2] = 0;
     right_quat[3] = 1;
     left_pose_valid = true;
+    dsvr::RoomscaleBasis basis{};
+    basis.tracking_right = {1, 0, 0};
+    basis.tracking_up = {0, 1, 0};
+    basis.tracking_forward = {0, 0, 1};
+    basis.native_forward = {0, 0, 1};
+    basis.space_epoch = 1;
+    basis.valid = true;
+    dsvr::InputPublishRoomscaleBasis(basis);
     dsvr::InputPublishHeadDirectedLocomotion({0, 0, 1}, {0, 0, 1}, 1);
+    dsvr::InputPollFrame(base, kHead, 1, 2390000000);
+    left_stick_y = 1;
     dsvr::InputPollFrame(base, kHead, 1, 2400000000);
     Expect(dsvr::InputLatestPad(pad) && pad.thumb_lx < -32000 &&
            std::abs(pad.thumb_ly) < 2,
-           "left-hand reference uses the tracked left grip orientation relative to head yaw");
+           "selected left controller heading steers controller-relative movement");
+    const auto controller_heading_x = pad.thumb_lx;
+    head_quat[1] = 0.70710678f;
+    head_quat[3] = 0.70710678f;
+    dsvr::InputPublishHeadDirectedLocomotion({1, 0, 0}, {0, 0, 1}, 1);
+    dsvr::InputPollFrame(base, kHead, 1, 2405000000);
+    Expect(dsvr::InputLatestPad(pad) && pad.thumb_lx == controller_heading_x &&
+           std::abs(pad.thumb_ly) < 2,
+           "head scanning does not change travel direction with a fixed controller heading");
+    head_quat[1] = 0.0f;
+    head_quat[3] = 1.0f;
+    dsvr::InputPublishHeadDirectedLocomotion({0, 0, 1}, {0, 0, 1}, 1);
     Expect(dsvr::InputTakeTurnYaw() == 0,
-           "hand-directed movement changes only locomotion axes, not body turn yaw");
+           "controller-relative movement changes locomotion only, not turn yaw");
 
-    config.movement_reference = dsvr::MovementReference::RightHand;
+    left_stick_y = 0;
+    dsvr::InputPollFrame(base, kHead, 1, 2407000000);
+    config.movement_controller = dsvr::MovementController::Right;
+    dsvr::InputPollFrame(base, kHead, 1, 2408000000);
     right_quat[1] = -0.70710678f;
     right_quat[3] = 0.70710678f;
+    left_stick_y = 1;
     dsvr::InputPollFrame(base, kHead, 1, 2410000000);
     Expect(dsvr::InputLatestPad(pad) && pad.thumb_lx > 32000 &&
            std::abs(pad.thumb_ly) < 2,
-           "right-hand reference uses the tracked right grip orientation consistently");
+           "explicit right controller reference steers movement after neutral release");
 
-    config.movement_reference = dsvr::MovementReference::LeftHand;
+    left_stick_y = 0;
+    dsvr::InputPollFrame(base, kHead, 1, 2415000000);
+    config.movement_controller = dsvr::MovementController::Left;
     left_pose_valid = false;
+    dsvr::InputPollFrame(base, kHead, 1, 2416000000);
+    left_stick_y = 1;
     dsvr::InputPollFrame(base, kHead, 1, 2420000000);
-    Expect(dsvr::InputLatestPad(pad) && pad.thumb_ly > 32000 &&
-           std::abs(pad.thumb_lx) < 2,
-           "invalid hand orientation safely falls back to the published head frame");
+    Expect(dsvr::InputLatestPad(pad) && pad.thumb_ly == 0 && pad.thumb_lx == 0,
+           "lost selected controller neutralizes movement without HMD fallback");
     left_pose_valid = true;
-    config.movement_reference = dsvr::MovementReference::Head;
     left_stick_x = left_stick_y = 0;
+    config.movement_orientation = dsvr::MovementOrientation::Head;
+    dsvr::InputPollFrame(base, kHead, 1, 2425000000);
 }
 
 void ReferenceChords() {
@@ -361,6 +397,7 @@ void CapturedInput() {
     const XrSpace base = reinterpret_cast<XrSpace>(100);
     config.arm_ik_enabled = false;
     dsvr::InputInvalidateFrame();
+    dsvr::InputPublishHeadDirectedLocomotion({0, 0, 1}, {0, 0, 1}, 1);
     calibration_capture = true;
     left_stick_x = -0.6f;
     left_stick_y = 0.8f;
@@ -597,6 +634,7 @@ int main() {
     sanctuary=false;left_stick_y=0;
     left_stick_x=-.4f;left_stick_y=-.9f;
     dsvr::InputInvalidateFrame();
+    dsvr::InputPublishHeadDirectedLocomotion({0, 0, 1}, {0, 0, 1}, 1);
     dsvr::InputPollFrame(reinterpret_cast<XrSpace>(100), kHead, 1,1910000000);
     Expect(dsvr::InputLatestPad(menu_pad) &&
            !(menu_pad.buttons&(dsvr::kPadDpadUp|dsvr::kPadDpadDown|

@@ -1,11 +1,11 @@
 # Working physical combat, configurable locomotion, embodiment, and comfort
 
-Date: 2026-10-21. Status: **PLANNED — implementation and native/headset acceptance required.**
+Date: 2026-10-21. Status: **IN PROGRESS — L1 settings and reference-frame groundwork; native/headset acceptance still required.**
 
 This plan supersedes the reduced completion scope in
 `.empryo/plans/plan-mvg263vh-qi35s6-t_mvh3zyf7_59650u0t024z_1.md` for these features.
 The earlier offline result is a regression baseline, not completion of the requested product.
-This turn produces a plan only; it does not authorize treating planned behavior as implemented.
+Implementation has begun. Planned behavior remains incomplete until its listed evidence and exit criteria are met.
 
 Revision: movement orientation, head/capsule collision, physical crouching and comfort requirements added. The user explicitly selected **head/controller modes with HMD as the default**. This replaces the earlier HMD-only requirement throughout this plan.
 

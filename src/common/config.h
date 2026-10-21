@@ -4,6 +4,8 @@
 namespace dsvr {
 
 enum class MovementReference : int { Head = 0, LeftHand = 1, RightHand = 2 };
+enum class MovementOrientation : int { Head = 0, Controller = 1 };
+enum class MovementController : int { NonDominant = 0, Left = 1, Right = 2 };
 
 // Human-readable settings (DSVR.toml, next to the game exe).
 // Defaults are safe for first load: VR stays disabled until the user opts in
@@ -40,7 +42,7 @@ struct Config {
   int snap_turn_degrees = 45;  // 15..90
   bool smooth_turn = true;
   float smooth_turn_speed_dps = 240.0f;  // 30..360 deg/s
-  bool head_directed_move = true;        // false preserves native-axis movement
+  bool head_directed_move = true;        // legacy setting; false is ignored and logged on load
   bool headlook_enabled = false;         // HMD orientation drives CameraMan
   float mono_screen_fov_deg = 60.0f;     // virtual screen width (mono mode)
   bool sanctuary_override = false;     // spatial canvas for any menu (F8)
@@ -59,6 +61,8 @@ struct Config {
   // [controls]
   bool dominant_hand_left = false;       // true = left hand holds the weapon
   MovementReference movement_reference = MovementReference::Head;
+  MovementOrientation movement_orientation = MovementOrientation::Head;
+  MovementController movement_controller = MovementController::NonDominant;
   std::string play_style = "standing";   // standing | seated | roomscale
   bool hotkeys_enabled = true;
   int log_marker_vk = 0x78;              // VK_F9: timestamped marker in DSVR.log
