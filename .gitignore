@@ -1,0 +1,43 @@
+# Build outputs
+Testing/
+build/
+dist/
+out/
+.vs/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+*.user
+*.user.osscache
+
+# Binaries + symbols + logs
+*.exe
+*.dll
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+!third_party/**/*.lib
+DSVR.log
+DSVR-*.log
+qx-*.log
+__pycache__/
+*.pyc
+*.dmp
+*.zip
+
+# Game-derived (never commit)
+*-decomp/
+*.sl2
+DSVR.toml
+GyroAim.ini
+
+# OS + editor
+Desktop.ini
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*~

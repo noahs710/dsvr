@@ -1,0 +1,197 @@
+#include "../src/core/calibration_math.h"
+#include <cstdio>
+#include <limits>
+#define CHECK(x) do { if(!(x)){std::printf("FAIL %d: %s\n",__LINE__,#x);return 1;} } while(0)
+namespace {
+dsvr::TrackingFrame Pose() {
+  dsvr::TrackingFrame f;f.sequence=1;f.space_epoch=1;f.captured_ms=1000;
+  f.focused=f.orientation_valid=f.position_valid=true;f.head_pos[1]=1.65f;
+  for(int s=0;s<2;++s) {
+    f.arm[s].valid=true;f.arm[s].pos[0]=s?.72f:-.72f;f.arm[s].pos[1]=1.4f;
+  }
+  return f;
+}
+void Step(dsvr::TrackingFrame& f) { ++f.sequence;f.captured_ms+=50; }
+bool CaptureAtHeight(float height,dsvr::UserCalibration& result) {
+  dsvr::CalibrationCapture capture;auto frame=Pose();
+  frame.head_pos[1]=height;
+  for(int side=0;side<2;++side) {
+    frame.arm[side].pos[0]=side?.7364f:-.7364f;
+    frame.arm[side].pos[1]=height-.2185f;
+    frame.arm[side].quat[1]=.19866933f;
+    frame.arm[side].quat[3]=.98006658f;
+  }
+  capture.Feed(frame,false,true,height,1.65f,result);Step(frame);
+  for(int sample=0;sample<22;++sample) {
+    if(capture.Feed(frame,true,true,height,1.65f,result))return true;
+    Step(frame);
+  }
+  return false;
+}
+}
+int main() {
+  using namespace dsvr;
+  // Identical head-relative poses represent the same arms when sitting or
+  // standing. Floor-to-eye height must not change the shoulder estimate.
+  UserCalibration seated,standing;
+  CHECK(CaptureAtHeight(1.04f,seated) && CaptureAtHeight(1.65f,standing));
+  CHECK(seated.floor_height_measured && standing.floor_height_measured);
+  CHECK(std::fabs(seated.eye_height_m-1.04f)<1e-5f &&
+        std::fabs(standing.eye_height_m-1.65f)<1e-5f);
+  CHECK(std::fabs(seated.shoulder_half_width_m-standing.shoulder_half_width_m)<1e-5f);
+  CHECK(std::fabs(seated.shoulder_half_width_m-.166917f)<1e-5f);
+  CHECK(std::fabs(seated.arm_span_m-standing.arm_span_m)<1e-5f);
+  CHECK(std::fabs(seated.head_to_arm_m-standing.head_to_arm_m)<1e-5f);
+  for(int side=0;side<2;++side) {
+    CHECK(std::fabs(seated.arm_reach_m[side]-standing.arm_reach_m[side])<1e-5f);
+    for(int axis=0;axis<4;++axis)
+      CHECK(std::fabs(seated.neutral_controller[side][axis]-standing.neutral_controller[side][axis])<1e-5f);
+  }
+  CalibrationCapture capture;UserCalibration result;auto f=Pose();
+  // A trigger already held while opening the screen cannot start gameplay.
+  for(int i=0;i<30;++i) { CHECK(!capture.Feed(f,true,false,0,1.65f,result));Step(f); }
+  CHECK(!result.valid && capture.Progress()==0);
+  CHECK(!capture.Feed(f,false,false,0,1.65f,result));Step(f);
+  bool done=false;
+  for(int i=0;i<22 && !done;++i) {
+    // q and -q represent the same rotation; averaging must not cancel them.
+    f.arm[0].quat[3]=(i%2)?-1.f:1.f;
+    done=capture.Feed(f,true,false,0,1.65f,result);Step(f);
+  }
+  CHECK(done && CalibrationValidProfile(result));
+  CHECK(!result.floor_height_measured && std::fabs(result.eye_height_m-1.65f)<1e-5f);
+  CHECK(std::fabs(result.head_to_arm_m-.25f)<1e-5f && std::fabs(result.arm_span_m-1.44f)<1e-5f);
+  CHECK(std::fabs(result.shoulder_half_width_m-.1632f)<1e-5f);
+  CHECK(std::fabs(result.arm_reach_m[0]-.5568f)<1e-5f);
+  CHECK(std::fabs(result.neutral_controller[0][3]-1)<1e-5f);
+
+  capture.Reset();f=Pose();capture.Feed(f,false,true,1.2f,1.65f,result);Step(f);
+  for(int i=0;i<12;++i) { CHECK(!capture.Feed(f,true,true,1.2f,1.65f,result));Step(f); }
+  ++f.space_epoch;  // Never aggregate a pose across a tracking-space change.
+  CHECK(!capture.Feed(f,true,true,1.2f,1.65f,result) && capture.Progress()==0);Step(f);
+  done=false;
+  for(int i=0;i<21 && !done;++i) { done=capture.Feed(f,true,true,1.2f,1.65f,result);Step(f); }
+  CHECK(done && result.floor_height_measured && std::fabs(result.eye_height_m-1.2f)<1e-5f);
+  // GetTickCount64 can repeat across distinct 90/120 Hz frames. Equal clock
+  // ticks are coherent new samples, not a backwards-clock discontinuity.
+  capture.Reset();f=Pose();capture.Feed(f,false,false,0,1.65f,result);
+  done=false;
+  for(int i=1;i<150 && !done;++i) {
+    ++f.sequence;f.captured_ms=1000+static_cast<unsigned>(i*8/16)*16;
+    done=capture.Feed(f,true,false,0,1.65f,result);
+  }
+  CHECK(done && CalibrationValidProfile(result));
+  auto invalid=result;invalid.version=2;CHECK(!CalibrationValidProfile(invalid));
+  invalid=result;invalid.neutral_controller[0][0]=std::numeric_limits<float>::quiet_NaN();
+  CHECK(!CalibrationValidProfile(invalid));
+  capture.Reset();f=Pose();f.arm[1].valid=false;
+  capture.Feed(f,false,false,0,1.65f,result);Step(f);
+  for(int i=0;i<25;++i) { CHECK(!capture.Feed(f,true,false,0,1.65f,result));Step(f); }
+  CHECK(!capture.Ready());
+  // Non-unit head orientation must not silently distort yaw-local geometry.
+  capture.Reset();f=Pose();f.head_quat[3]=2;
+  capture.Feed(f,false,false,0,1.65f,result);Step(f);done=false;
+  for(int i=0;i<22 && !done;++i) {done=capture.Feed(f,true,false,0,1.65f,result);Step(f);}
+  CHECK(!done);
+  // Accepted near-unit tracking quaternions describe rotations, not scale.
+  capture.Reset();f=Pose();f.arm[0].quat[3]=.8f;
+  capture.Feed(f,false,false,0,1.65f,result);Step(f);done=false;
+  for(int i=0;i<22 && !done;++i) {done=capture.Feed(f,true,false,0,1.65f,result);Step(f);}
+  CHECK(done && std::fabs(result.neutral_controller[0][3]-1.f)<1e-5f);
+  capture.Reset();f=Pose();f.head_quat[1]=f.head_quat[3]=std::sqrt(.5f)*.9f;
+  for(auto& arm:f.arm) {const float x=arm.pos[0];arm.pos[0]=0;arm.pos[2]=-x;}
+  capture.Feed(f,false,false,0,1.65f,result);Step(f);done=false;
+  for(int i=0;i<22 && !done;++i) {done=capture.Feed(f,true,false,0,1.65f,result);Step(f);}
+  CHECK(done && std::fabs(result.arm_span_m-1.44f)<1e-5f);
+  // Bounds accepted by individual samples must survive averaging and validation.
+  for(float height:{.7f,2.3f}) {
+    UserCalibration edge;CHECK(CaptureAtHeight(height,edge));
+    CHECK(CalibrationValidProfile(edge) && edge.eye_height_m==height);
+  }
+  // Preserve the measured left/right lateral extensions instead of mirroring
+  // the total span about the head. Shoulder sockets remain explicit estimates.
+  capture.Reset();f=Pose();f.arm[0].pos[0]=-.65f;f.arm[1].pos[0]=.85f;
+  capture.Feed(f,false,false,0,1.65f,result);Step(f);done=false;
+  for(int i=0;i<22 && !done;++i) {done=capture.Feed(f,true,false,0,1.65f,result);Step(f);}
+  CHECK(done && CalibrationValidProfile(result));
+  CHECK(std::fabs(result.arm_reach_m[0]-.48f)<1e-5f);
+  CHECK(std::fabs(result.arm_reach_m[1]-.68f)<1e-5f);
+  auto rejected=[](TrackingFrame frame) {
+    CalibrationCapture c;UserCalibration out;c.Feed(frame,false,false,0,1.65f,out);Step(frame);
+    for(int i=0;i<24;++i) {if(c.Feed(frame,true,false,0,1.65f,out))return false;Step(frame);}
+    return true;
+  };
+  f=Pose();f.arm[0].quat[3]=0;CHECK(rejected(f));
+  f=Pose();f.arm[1].quat[0]=NAN;CHECK(rejected(f));
+  f=Pose();f.head_pos[0]=INFINITY;CHECK(rejected(f));
+  f=Pose();f.arm[0].pos[1]=NAN;CHECK(rejected(f));
+  // Backwards clocks and tracking gaps restart elapsed hold time.
+  capture.Reset();f=Pose();capture.Feed(f,false,false,0,1.65f,result);Step(f);
+  for(int i=0;i<10;++i) {capture.Feed(f,true,false,0,1.65f,result);Step(f);}
+  f.captured_ms-=200;++f.sequence;CHECK(!capture.Feed(f,true,false,0,1.65f,result));
+  CHECK(capture.Progress()==0);
+  f.captured_ms+=151;++f.sequence;CHECK(!capture.Feed(f,true,false,0,1.65f,result));
+  CHECK(capture.Progress()==0);
+  // Grip jitter beyond 5cm or roughly 11.5 degrees cannot finish a hold.
+  for(bool angular:{false,true}) {
+    capture.Reset();f=Pose();capture.Feed(f,false,false,0,1.65f,result);Step(f);done=false;
+    for(int i=0;i<24 && !done;++i) {
+      if(angular) {f.arm[0].quat[0]=std::sin((i&1)?.25f:-.25f);f.arm[0].quat[3]=std::cos(.25f);}
+      else f.arm[0].pos[0]=-.72f+(i&1)*.06f;
+      done=capture.Feed(f,true,false,0,1.65f,result);Step(f);
+    }
+    CHECK(!done);
+  }
+  // Quaternion sign is only a representation change, and 2mm noise is stable.
+  capture.Reset();f=Pose();capture.Feed(f,false,false,0,1.65f,result);Step(f);done=false;
+  for(int i=0;i<24 && !done;++i) {
+    f.arm[0].quat[3]=(i&1)?-1.f:1.f;f.arm[0].pos[0]=-.72f+(i&1)*.002f;
+    done=capture.Feed(f,true,false,0,1.65f,result);Step(f);
+  }
+  CHECK(done && CalibrationValidProfile(result));
+  UserCalibration bounds;bounds.valid=true;bounds.eye_height_m=.7f;
+  bounds.head_to_arm_m=.08f;bounds.shoulder_half_width_m=.1f;bounds.arm_span_m=.7f;
+  bounds.arm_reach_m[0]=.2f;bounds.arm_reach_m[1]=1.05f;CHECK(CalibrationValidProfile(bounds));
+  bounds.eye_height_m=2.3f;bounds.head_to_arm_m=.6f;
+  bounds.shoulder_half_width_m=.3f;bounds.arm_span_m=2.5f;CHECK(CalibrationValidProfile(bounds));
+  bounds.arm_reach_m[1]=1.051f;CHECK(!CalibrationValidProfile(bounds));bounds.arm_reach_m[1]=1.05f;
+  bounds.shoulder_half_width_m=.301f;CHECK(!CalibrationValidProfile(bounds));bounds.shoulder_half_width_m=.3f;
+  bounds.arm_reach_m[0]=.199f;CHECK(!CalibrationValidProfile(bounds));
+  bounds.arm_reach_m[0]=.2f;bounds.neutral_controller[1][3]=0;CHECK(!CalibrationValidProfile(bounds));
+  // IK reach scaling guards unmeasurable asymmetry; the stored profile
+  // keeps the raw measured reaches untouched.
+  UserCalibration asym;asym.arm_reach_m[0]=.50f;asym.arm_reach_m[1]=.62f;
+  CHECK(std::fabs(CalibrationReachForScale(asym,0)-.53f)<1e-5f);
+  CHECK(std::fabs(CalibrationReachForScale(asym,1)-.59f)<1e-5f);
+  CHECK(asym.arm_reach_m[0]==.50f && asym.arm_reach_m[1]==.62f);
+  UserCalibration sym;sym.arm_reach_m[0]=sym.arm_reach_m[1]=.55f;
+  CHECK(CalibrationReachForScale(sym,0)==.55f && CalibrationReachForScale(sym,1)==.55f);
+  UserCalibration mild;mild.arm_reach_m[0]=.54f;mild.arm_reach_m[1]=.56f;
+  CHECK(CalibrationReachForScale(mild,0)==.54f && CalibrationReachForScale(mild,1)==.56f);
+  CHECK(CalibrationReachForScale(mild,7)==.55f);
+  // Diagnostics expose the measured pose geometry behind Ready().
+  { CalibrationCapture diag;UserCalibration out;auto pose=Pose();
+    diag.Feed(pose,false,false,0,1.65f,out);
+    CHECK(std::fabs(diag.LastSpanM()-1.44f)<1e-3f);
+    CHECK(std::fabs(diag.LastPlaneM()-.25f)<1e-3f);
+    CHECK(diag.LastHandsValid() && diag.Ready()); }
+  // Relaxed A pose: arms down-out (hands ~0.45m below head height,
+  // narrower than a full T) must also capture; hands at the hips must not.
+  {
+    CalibrationCapture a;UserCalibration out;auto pose=Pose();
+    pose.arm[0].pos[0]=-.55f;pose.arm[1].pos[0]=.55f;
+    pose.arm[0].pos[1]=1.20f;pose.arm[1].pos[1]=1.20f; // head 1.65, plane .45
+    a.Feed(pose,false,false,0,1.65f,out);Step(pose);
+    bool done=false;
+    for(int i=0;i<22 && !done;++i){done=a.Feed(pose,true,false,0,1.65f,out);Step(pose);}
+    CHECK(done && CalibrationValidProfile(out));
+    CHECK(std::fabs(out.arm_span_m-1.10f)<1e-3f);
+    CalibrationCapture hips;auto hip=Pose();
+    hip.arm[0].pos[0]=-.20f;hip.arm[1].pos[0]=.20f;
+    hip.arm[0].pos[1]=.95f;hip.arm[1].pos[1]=.95f; // plane .70, span .40
+    hips.Feed(hip,false,false,0,1.65f,out);Step(hip);
+    for(int i=0;i<22;++i){CHECK(!hips.Feed(hip,true,false,0,1.65f,out));Step(hip);}
+    CHECK(!hips.Ready());
+  }
+  std::puts("PASS stable T/A-pose capture, manager-independent range/timing/jitter/quaternion contracts and asymmetric reaches");
+}

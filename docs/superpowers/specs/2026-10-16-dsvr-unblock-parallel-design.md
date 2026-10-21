@@ -1,0 +1,212 @@
+# DSVR - unblock the five native features in parallel tracks
+
+- **Date:** 16 October 2026
+- **Status:** Approved design; awaiting written-spec review (no implementation yet)
+- **Follows:** user direction 2026-10-16 - "Unblock as much as possible and
+  get those features built as well", build order chosen by the user: all
+  parallel; parallel design (five isolated tracks, one integrator, no
+  unproven native writes) approved by the user.
+- **Build under test:** `0.16.0-render-host-preview` (offline gate 62/62
+  CTest, doctor pass). Headset verdicts follow
+  [VERIFICATION_RUNBOOK.md](../../VERIFICATION_RUNBOOK.md); offline tests
+  never certify headset behaviour.
+
+## 1. Context (verified in source and decompilation corpus)
+
+| Area | Current truth | Key files |
+|---|---|---|
+| Motion blur | No blur field in Config; unknown config keys are ignored. Installer lifecycle already has ConfigLoad -> mutate -> ConfigSave on install and a restore point before DLL deletion on uninstall. No native blur target is identified. | `src/common/config.h`, `src/common/config.cpp`, `src/setup/setup.cpp` |
+| UI suppression | `hide_ui_in_vr` is parsed and saved but has no native consumer. The menu correctly states native suppression is not yet bound. Model hiding in presence is the existing guarded native-write pattern. | `src/common/config.h`, `src/core/presence.cpp`, `src/core/mod_menu.cpp` |
+| True stereo | Stereo math and the XR eye-frame API pass offline tests but have no production caller; production submits one mono image to both eyes. Draw boundary, XR-to-native pose mapping, and active-camera ownership are unproven. | `src/core/xr.cpp`, `src/core/xr_stereo_frame.h`, `src/core/stereo_render.h`, `src/core/render.cpp` |
+| AFR | No implementation. The runbook requires true stereo first; alternating a mono copy would prove nothing about per-eye freshness. | `docs/VERIFICATION_RUNBOOK.md`, `src/core/mod_menu.cpp` |
+| Physical combat | Equipment read is bound, read-only, and signature-gated. Damage, shield contact, and parry deliberately have no substitute; the limitation text says exactly that. No qualified contact/damage ABI exists yet. | `src/core/combat_native.cpp`, `src/core/combat_math.h`, `src/core/weapon_grip.cpp` |
+
+Repo invariants this design must not break:
+
+- No fake stereo (no offset or duplicated mono sold as stereo) and no
+  combat substitutes (no HP edits, no canned attacks) ship as features.
+- Every native write is pinned-build verified, signature-gated, executed
+  on the game thread through guarded access, and refused in observer mode.
+- Capability text in the Home menu states the truth at all times; a track
+  changes it only when its binding is proven, never on hope.
+- New behaviour ships behind a default-off flag until its headset gate
+  passes; mono remains the fallback path.
+- Formal versions still belong to the R1/R2/R3 gates in `README.md`; this
+  spec mints no version.
+
+## 2. Goals, decomposition, and non-goals
+
+### Goals
+
+Build all five blocked areas in parallel tracks that cannot corrupt each
+other, integrate them one at a time through a single integrator, and keep
+every claim honest until its headset gate passes:
+
+1. **T1 Motion blur** - reversible enforcement with installer lifecycle.
+2. **T2 UI suppression** - VR-only native UI hide that theater reverses.
+3. **T3 True stereo** - production caller for the existing eye-frame API.
+4. **T4 AFR** - experimental alternating-eye mode on the real stereo path.
+5. **T5 Physical combat** - tracked contact classification now; attributed
+   damage only behind a qualified native ABI.
+
+### Decomposition rule
+
+This is five sub-projects, not one change. Each track gets its own new
+files and tests and its own red -> green cycle. Tracks do not edit each
+other's files. Shared files (`src/common/config.*`, `src/setup/setup.cpp`,
+`src/core/mod_menu.cpp`, CMake lists) are edited only by the integrator,
+in track order T1, T2, T3, T4, T5, one integration at a time, with the
+full offline gate green after each.
+
+### Non-goals
+
+- No headset-driven development in this spec; headset acceptance stays in
+  the verification runbook and happens after offline integration.
+- No changes to the decompilation corpus at
+  `C:\Tools\DarkSoulsRemaster_De` (read-only reference).
+- No new formal release, package identity, or R-gate claim.
+- No settings-UI redesign beyond the capability/status text each track
+  is responsible for.
+
+## 3. Shared contracts (every track)
+
+- **Config:** each track declares its new keys in its own section of the
+  spec (section 4); the integrator adds them to Config load/save/valid in
+  one pass per track. Defaults keep current behaviour (features off).
+- **Gating discipline:** native targets are resolved through pinned-build
+  verification plus signature/vtable checks, following the existing
+  guarded-read/write pattern used for equipment and model hiding. Any
+  mismatch refuses the feature for the session and logs the refusal once;
+  it never guesses an offset.
+- **Threading:** native writes happen on the game/render thread that owns
+  the target. Worker threads (calibration, logging) perform no native or
+  filesystem writes outside their existing ownership.
+- **Error handling:** a refused or failed binding degrades to the mono,
+  non-suppressed, non-damaging behaviour and one clear log line. Partial
+  application (one eye, one hand, forced-but-unrestored value) is a bug,
+  not a state: tracks must roll back their own partial work.
+- **Testing:** each track first adds a test that fails for the missing
+  behaviour, then implements until it passes, then the integrator runs
+  the full gate (`pwsh -File tools\auto_verify.ps1`). A track is not
+  integrated on a red full gate.
+- **Capability text:** integrator updates Rendering/Diagnostics/Combat
+  panel text only when the track's binding is compiled in and gated;
+  wording distinguishes "available", "experimental (default off)", and
+  "not yet bound".
+
+## 4. Tracks
+
+### T1 - Motion-blur enforcement (hybrid, two steps)
+
+- **Step 1 (build now, no hooks):** Config gains
+  `force_disable_motion_blur` (default off) plus a recorded-original
+  value owned by Setup. Install with the flag on records the game's
+  current blur preference, forces it off, and uninstall restores the
+  recorded original before deleting DLLs. The original is stored in
+  `DSVR.toml` as `motion_blur_original`, written only by Setup (never by
+  the GUI or the core DLL), so uninstall can restore it even though
+  `DSVR.toml` itself is preserved. Doctor reports original,
+  forced, and current values as three distinct facts. Double install is
+  idempotent (the forced value is never recorded as the original).
+- **Step 2 (only after qualification):** an in-process, build-verified
+  guarded write that survives in-game settings changes. Step 2 does not
+  begin until the blur field and its encoding are qualified on the
+  pinned build (Steam 1.03.1, build 10943698); the runtime constant
+  buffer field seen in the corpus is not assumed to be an off-switch.
+- **Tests:** config round-trip, original -> forced -> restored state
+  machine over fake file bytes, double-install idempotence, missing-file
+  default, bad-build refusal, observer-mode write block.
+- **Headset gate:** blur visibly absent in VR with the flag on, present
+  after uninstall, across a settings-menu visit. Until then the verdict
+  stays UNVERIFIED and the menu keeps its current wording.
+
+### T2 - Native UI suppression
+
+- **Build now:** qualify the pinned HUD/UI draw target offline from the
+  existing GPU capture and corpus, following the model-hiding pattern.
+  Deliver a gated adapter that refuses unknown builds, plus fixture
+  tests for refusal and for theater reversal logic (state machine only).
+- **Ships when qualified:** `hide_ui_in_vr` hides native UI in immersive
+  VR only; theater (F8) restores it; the DSVR menu remains reachable in
+  both modes. Flatscreen presentation is out of scope and unchanged.
+- **Tests:** gate refusal on signature mismatch, hide/show state machine
+  across immersive -> theater -> immersive, menu reachability in both.
+- **Headset gate:** runbook segment 8. Until the target is qualified the
+  verdict is BLOCKED, not "config works".
+
+### T3 - True stereo (production caller)
+
+- **Build now:** wire the existing `XrBeginNativeStereoFrame` /
+  `XrEndNativeStereoFrame` API into the production render path behind
+  `stereo_enabled` (default off). The bracket must prove one simulation
+  step feeds both eye renders (no duplicate input/physics/combat
+  advance), following the stereo-bracket evidence already in the repo.
+- **Hard rule:** if the two real eye renders cannot be produced, the
+  flag refuses and mono continues. Offsetting, duplicating, or
+  reprojecting the mono image under this flag is a defect.
+- **Tests:** existing stereo-math/frame tests plus a caller test that
+  counts simulation advances per submitted pair (exactly one) and
+  refuses stale tokens and wrong-thread ends.
+- **Headset gate:** captured left/right images with near/far parallax
+  and correct occlusion at one instant; different pixel hashes alone
+  fail. Until then the panel labels stereo experimental/unavailable.
+
+### T4 - AFR (experimental, on T3)
+
+- **Build now, after T3 integration:** alternating-eye submission on the
+  real stereo path behind `afr_enabled` (default off), with per-eye
+  freshness in RenderMetrics (eye age in frames at submission).
+- **Honesty rule:** AFR on a mono image is meaningless and is refused;
+  the mode is selectable only while stereo is active.
+- **Tests:** alternation indexing over a fake XR sequence, freshness
+  accounting, refusal when stereo is inactive, no change to layer
+  timing contracts.
+- **Headset gate:** fast-head-motion segment measuring per-eye freshness
+  and comfort; judder is reported, not smoothed over in text.
+
+### T5 - Physical combat (classification now, damage gated)
+
+- **Build now:** tracked contact classification from weapon/shield
+  kinematics and the bound equipment read: swing/thrust contact events,
+  shield-block and parry windows, and two-hand support-grip state
+  (hold grip near handle), all logged and haptics-ready, with no damage
+  applied. Custom per-weapon placements keep loading from T5's existing
+  grip profiles.
+- **Damage rule:** attributed native damage, stamina, and poise apply
+  only after the contact/damage ABI is qualified on the pinned build
+  with caller evidence. Misses must cause no damage; there is no
+  fallback damage path.
+- **Tests:** contact classifier over recorded kinematics (hit, miss,
+  block, parry, rehit window, despawn), grip attach/detach, refusal
+  when equipment is unbound.
+- **Headset gate:** runbook sword/shield encounter with attributed
+  outcomes; until the ABI is qualified the combat verdict is BLOCKED
+  and the panel keeps the current limitation text.
+
+## 5. Integration and evidence
+
+Integrator order is T1, T2, T3, T4, T5. Each integration: merge the
+track's shared-file changes, build Release, run the focused test, run
+the full offline gate, and only then refresh `dist\DSVR-latest` through
+the gated script. Evidence per track (failing-then-passing test output,
+gate log) is filed under `build\verification\` with the runbook naming.
+Headset verification of integrated tracks follows the runbook segments;
+a track's user-facing claim changes only after its segment passes.
+
+## 6. Known unresolved items (from parallel research)
+
+- The exact blur preference key, section, encoding, and save timing in
+  the live game files are unproven; T1 step 1 must identify them from
+  the installed game before writing, and must refuse if ambiguous.
+- The native blur enable/strength field is unidentified; T1 step 2 is
+  blocked on qualifying it. No offset is invented in this spec.
+- The pinned HUD/UI target chain is not yet derived; T2's first
+  deliverable is that qualification, not the hide itself.
+- Stereo draw boundary, XR-to-native pose/scale mapping, and
+  active-camera ownership remain unproven; T3 must surface exactly
+  which of these its caller still assumes, in code comments and tests.
+- The combat contact/damage ABI has no qualified caller evidence yet;
+  T5 damage stays gated until it does.
+- AFR had the thinnest research coverage; T4 begins with a short
+  design note inside its test file recording freshness definitions
+  before any submission change.

@@ -1,0 +1,442 @@
+// Legacy DXGI observer and shared D3D11 frame dispatch for Present/ReShade.
+//
+// Legacy path (fresh implementation, standard DXGI practice):
+//  1. Create a throwaway D3D11 device + swapchain on a hidden window.
+//  2. Read Present (vtable slot 8) and ResizeBuffers (slot 13) addresses.
+//  3. MinHook those addresses; every game's swapchain shares the vtable.
+//  4. Detours log once (desc + adapter), count frames, forward to original.
+//
+// ReShade mode uses the versioned bridge below instead of these DXGI hooks.
+// Other core subsystems have their own executable/config gates.
+
+#include "render.h"
+#include "render_host.h"
+#include "reshade_bridge.h"
+
+#include <windows.h>
+
+#include <d3d11.h>
+#include <dxgi1_2.h>
+#include <MinHook.h>
+
+#include <atomic>
+
+#include "../common/logging.h"
+#include "camera.h"
+#include "calibration.h"
+#include "core.h"
+#include "afr_policy.h"
+#include "diagnostics.h"
+#include "stereo_gate.h"
+#include "xr.h"
+#include "vr_trace.h"
+#include "mod_menu.h"
+#include "cpu_frame_timer.h"
+
+namespace dsvr {
+namespace {
+
+using PresentFn = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*, UINT, UINT);
+using ResizeBuffersFn = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*, UINT,
+                                                    UINT, UINT, DXGI_FORMAT,
+                                                    UINT);
+
+PresentFn g_present_orig = nullptr;
+ResizeBuffersFn g_resize_orig = nullptr;
+void* g_present_target = nullptr;
+void* g_resize_target = nullptr;
+
+std::atomic<unsigned long long> g_frames{0};
+std::atomic<bool> g_described{false};
+bool g_verbose = false;
+long long g_qpf = 1;
+long long g_last_fps_tick = 0;
+unsigned long long g_last_fps_frame = 0;
+std::atomic_flag g_fps_busy = ATOMIC_FLAG_INIT;
+// Desktop-only readiness never configures or publishes an XR render host.
+std::atomic<bool> g_desktop_ready{false};
+std::atomic<bool> g_desktop_notified{false};
+RenderHost g_host;
+ReShadeBridge g_reshade_bridge{g_host};
+
+long long NowQpc() {
+  LARGE_INTEGER v{};
+  QueryPerformanceCounter(&v);
+  return v.QuadPart;
+}
+
+void RecordHostRateEvidence() {
+  g_frames.fetch_add(1, std::memory_order_relaxed);
+  if (!g_fps_busy.test_and_set(std::memory_order_acquire)) {
+    long long now = NowQpc();
+    if (g_last_fps_tick == 0) {
+      g_last_fps_tick = now;
+      g_last_fps_frame = g_frames.load();
+    } else if (now - g_last_fps_tick >= g_qpf * 5) {  // every ~5 s
+      unsigned long long f = g_frames.load();
+      double secs = (double)(now - g_last_fps_tick) / (double)g_qpf;
+      const double game_fps = (double)(f - g_last_fps_frame) / secs;
+      // Rate evidence on every run (not verbose-only): measured game FPS
+      // beside the effective target and runtime rate, per README policy.
+      EffectiveRate rate{};
+      XrEffectiveRate(rate);
+      DSVR_LOG("RateEvidence: game_fps=%.1f effective=%d runtime=%.3fHz "
+               "requested=%d source=%s (frames total %llu)",
+               game_fps, rate.effective_fps, rate.runtime_hz,
+               rate.requested_fps, rate.from_runtime ? "runtime" : "fallback",
+               f);
+      RenderMetrics metrics{};
+      if (XrRenderMetricsSnapshot(metrics))
+        DSVR_LOG("VRPerformance: mode=mono frame=%llu cpu=%.3fms "
+                 "xr_wait=%.3fms image_wait=%.3fms copy_cpu=%.3fms "
+                 "blit_cpu=%.3fms end_cpu=%.3fms copies=%u eyes=%u "
+                 "gpu_valid=%d gpu_frame=%llu gpu_copy=%.3fms gpu_blit=%.3fms",
+                 (unsigned long long)metrics.frame_sequence, metrics.cpu_frame_ms,
+                 metrics.xr_wait_ms, metrics.image_wait_ms, metrics.source_copy_cpu_ms,
+                 metrics.eye_blit_cpu_ms, metrics.end_frame_cpu_ms, metrics.source_copies,
+                 metrics.eye_draws, (int)metrics.gpu_valid,
+                 (unsigned long long)metrics.gpu_frame_sequence, metrics.gpu_copy_ms,
+                 metrics.gpu_blit_ms);
+      if(metrics.frame_sequence)
+        DSVR_LOG("VRSubmissionHealth: frame=%llu submitted=%d pose_published=%d image_timeouts=%llu held_image_skips=%llu",
+            static_cast<unsigned long long>(metrics.frame_sequence),static_cast<int>(metrics.submitted),
+            static_cast<int>(metrics.tracking_published),static_cast<unsigned long long>(metrics.image_timeouts),
+            static_cast<unsigned long long>(metrics.held_image_skips));
+      if (g_verbose)
+        DSVR_LOG("Render: %.1f fps over last interval (%llu frames total)",
+                 game_fps, f);
+      const auto cpu=g_cpu_frame_timer.TakeInterval();
+      for(unsigned i=0;i<cpu.size();++i)if(cpu[i].calls)
+        DSVR_LOG("CpuPerformance: stage=%s calls=%llu avg=%.3fms max=%.3fms (inclusive, interval=%.3fs; not summable)",
+            kCpuStageNames[i],static_cast<unsigned long long>(cpu[i].calls),
+            cpu[i].AverageMs(),cpu[i].max_ms,secs);
+      g_last_fps_tick = now;
+      g_last_fps_frame = f;
+    }
+    g_fps_busy.clear(std::memory_order_release);
+  }
+}
+
+void CaptureHostDevice(void*, std::uintptr_t device) {
+  CoreOnRenderFrame();
+  auto* native = reinterpret_cast<ID3D11Device*>(device);
+  // Exactly one process-lifetime reference: XR has no device teardown/migration
+  // contract yet. Temporary frame device and image references are balanced.
+  native->AddRef();
+  DSVR_LOG("Render: sole host captured D3D11 device=%p (held for XR lifetime)",
+           static_cast<void*>(native));
+  XrOnDeviceCaptured(native);
+}
+
+void PollHost(void*) {
+  CoreOnRenderFrame();
+  XrOnPresentFrame();
+}
+
+void SubmitHostMono(void*, const HostSource& source, HostStamp stamp) {
+  CpuStageScope host_time(CpuStage::HostFrame);
+  const auto capture = VrTraceCaptureId();
+  if (capture && VrTraceActive()) {
+    VrTraceEvent trace{};
+    trace.capture_id = capture;  // all three observations belong to one capture
+    trace.event = "host_source";
+    trace.object = source.image;
+    trace.frame = stamp.ordinal;
+    trace.flags = source.host == RenderHostKind::ReShade ? 2u : 1u;
+    // Lossless local RESOURCE generation limbs. Never set epoch/predicted_ns:
+    // this observation knows neither native scene nor consumed-view identity.
+    for (unsigned i = 0; i < 4; ++i)
+      trace.values[i] = static_cast<float>((stamp.generation >> (16 * i)) & 0xffff);
+    D3D11_TEXTURE2D_DESC desc{};
+    reinterpret_cast<ID3D11Texture2D*>(source.image)->GetDesc(&desc);
+    trace.values[4] = static_cast<float>(desc.Width);
+    trace.values[5] = static_cast<float>(desc.Height);
+    trace.values[6] = static_cast<float>(desc.Format);
+    trace.values[7] = static_cast<float>(desc.SampleDesc.Count);
+    VrTraceRecord(trace);
+    trace.event = "host_swapchain";
+    trace.object = source.swapchain;
+    VrTraceRecord(trace);
+    trace.event = "host_device";
+    trace.object = source.device;
+    VrTraceRecord(trace);
+  }
+  // Draw once into the accepted source before its single XR snapshot. This
+  // also keeps Home available on the desktop when the headset is not running.
+  const Config cfg = DiagnosticsCurrentConfig();
+  CalibrationGameplayReady(cfg.vr_enabled && !cfg.observer_only && XrSessionRunning() && CameraGameplayReady());
+    ModMenuRenderTexture(reinterpret_cast<ID3D11Device*>(source.device),
+                        reinterpret_cast<ID3D11Texture2D*>(source.image));
+  if (XrSessionRunning()) {
+    // T3 stereo gate: no native eye renderer is bound (Present sees one
+    // finished image), so a stereo request refuses once and mono continues.
+    // XrBeginNativeStereoFrame runs only on AttemptStereo, which requires
+    // that renderer; duplicating this image would be fake stereo.
+    constexpr bool kNativeEyeRendererBound = false;
+    static std::atomic<bool> stereo_refusal_logged{false};
+    if (DecideStereo(cfg.stereo_enabled, true, kNativeEyeRendererBound) ==
+            StereoDecision::RefuseNoRenderer &&
+        !stereo_refusal_logged.exchange(true))
+      DSVR_WARN("Stereo: stereo_enabled requested but no native eye renderer "
+                "is bound; continuing mono (no duplicated-eye substitute)");
+    static std::atomic<bool> afr_refusal_logged{false};
+    if (DecideAfr(cfg.afr_enabled, false) == AfrDecision::RefuseStereoInactive &&
+        !afr_refusal_logged.exchange(true))
+      DSVR_WARN("AFR: afr_enabled requested while stereo is inactive; "
+                "alternating a mono image proves nothing, continuing mono");
+    XrSubmitMonoFrame(reinterpret_cast<void*>(source.image));
+  }
+  RecordHostRateEvidence();
+}
+
+void DispatchTexture(RenderHostKind host, std::uintptr_t swapchain,
+                     ID3D11Texture2D* image) {
+  ID3D11Device* device = nullptr;
+  image->GetDevice(&device);
+  if (!device) return;
+  g_host.Dispatch({host, reinterpret_cast<std::uintptr_t>(device), swapchain,
+                   reinterpret_cast<std::uintptr_t>(image), GetCurrentThreadId()});
+  device->Release();
+}
+
+void DescribeOnce(IDXGISwapChain* swap) {
+  bool expected = false;
+  if (!g_described.compare_exchange_strong(expected, true)) return;
+  DXGI_SWAP_CHAIN_DESC desc{};
+  if (SUCCEEDED(swap->GetDesc(&desc))) {
+    DSVR_LOG("Render: swapchain %ux%u format=%d buffers=%u windowed=%d "
+             "sample=%u sync-via-present",
+             desc.BufferDesc.Width, desc.BufferDesc.Height,
+             (int)desc.BufferDesc.Format, desc.BufferCount,
+             desc.Windowed ? 1 : 0, desc.SampleDesc.Count);
+  } else {
+    DSVR_LOG("Render: swapchain GetDesc failed");
+  }
+  ID3D11Device* device = nullptr;
+  if (SUCCEEDED(swap->GetDevice(__uuidof(ID3D11Device), (void**)&device)) &&
+      device) {
+    IDXGIDevice* dxgi_device = nullptr;
+    if (SUCCEEDED(device->QueryInterface(__uuidof(IDXGIDevice),
+                                         (void**)&dxgi_device)) &&
+        dxgi_device) {
+      IDXGIAdapter* adapter = nullptr;
+      if (SUCCEEDED(dxgi_device->GetAdapter(&adapter)) && adapter) {
+        DXGI_ADAPTER_DESC ad{};
+        if (SUCCEEDED(adapter->GetDesc(&ad))) {
+          char name[256]{};
+          WideCharToMultiByte(CP_UTF8, 0, ad.Description, -1, name,
+                              sizeof(name) - 1, nullptr, nullptr);
+          DSVR_LOG("Render: device adapter '%s' vram=%llu MB feature-level "
+                   "device=%p",
+                   name,
+                   (unsigned long long)(ad.DedicatedVideoMemory / 1048576),
+                   (void*)device);
+        }
+        adapter->Release();
+      }
+      dxgi_device->Release();
+    }
+    device->Release();  // describing a swapchain never claims XR ownership
+  }
+}
+
+std::atomic<bool> g_sync_logged{false};
+
+HRESULT STDMETHODCALLTYPE PresentDetour(IDXGISwapChain* swap,
+                                        UINT sync_interval, UINT flags) {
+  if (g_desktop_ready.load(std::memory_order_acquire)) {
+    // Observe a real, successful desktop Present only. No trace/menu/XR calls,
+    // host selection, device capture, or retained COM reference on this path.
+    const HRESULT result = g_present_orig(swap, sync_interval, flags);
+    DXGI_SWAP_CHAIN_DESC desc{};
+    if (!g_desktop_notified.load(std::memory_order_acquire) &&
+        SUCCEEDED(result) && !(flags & DXGI_PRESENT_TEST) &&
+        SUCCEEDED(swap->GetDesc(&desc)) && RenderWindowBelongsToProcess(desc.OutputWindow)) {
+      ID3D11Texture2D* buffer = nullptr;
+      if (SUCCEEDED(swap->GetBuffer(0, __uuidof(ID3D11Texture2D),
+                                    reinterpret_cast<void**>(&buffer))) && buffer) {
+        D3D11_TEXTURE2D_DESC texture{};
+        buffer->GetDesc(&texture);
+        buffer->Release();
+        if (texture.Width && texture.Height &&
+            !g_desktop_notified.exchange(true, std::memory_order_acq_rel)) CoreOnDesktopFrame();
+      }
+    }
+    return result;
+  }
+  if (!g_sync_logged.exchange(true)) {
+    // A zero sync interval rules out desktop vsync for THIS call only.
+    // Native, driver, runtime and GPU waits require separate measurement.
+    DSVR_LOG("Render: Present sync_interval=%u flags=0x%x (frame-cap "
+             "evidence; see MODLOG)",
+             sync_interval, flags);
+  }
+  VrTraceEvent trace{};
+  trace.event = "present_enter";
+  trace.object = reinterpret_cast<std::uintptr_t>(swap);
+  trace.flags = flags;
+  trace.values[0] = static_cast<float>(sync_interval);
+  VrTraceRecord(trace);
+  DescribeOnce(swap);
+  DXGI_SWAP_CHAIN_DESC desc{};
+  if (!(flags & DXGI_PRESENT_TEST) && SUCCEEDED(swap->GetDesc(&desc)) &&
+      RenderWindowBelongsToProcess(desc.OutputWindow)) {
+    ID3D11Texture2D* backbuffer = nullptr;
+    if (SUCCEEDED(swap->GetBuffer(0, __uuidof(ID3D11Texture2D),
+                                  (void**)&backbuffer)) &&
+        backbuffer) {
+      DispatchTexture(RenderHostKind::Present,
+                      reinterpret_cast<std::uintptr_t>(swap), backbuffer);
+      backbuffer->Release();
+    }
+  }
+  const long long start = VrTraceClock();
+  CpuStageScope present_time(CpuStage::NativePresent);
+  // Desktop Present is pure cost in VR: the backbuffer was already copied
+  // to the eye images above, and the native limiter (not Present) paces
+  // the game. Skipping it removes desktop composition and any vsync wait.
+  // TEST presents and non-VR configs always forward to the original.
+  const bool skip_desktop = !(flags & DXGI_PRESENT_TEST) &&
+      DiagnosticsCurrentConfig().desktop_present == false &&
+      DiagnosticsCurrentConfig().vr_enabled;
+  const HRESULT result = skip_desktop
+      ? S_OK
+      : g_present_orig(swap, sync_interval, flags);
+  present_time.Stop();
+  trace.event = "present_exit";
+  trace.duration_qpc = VrTraceClock() - start;
+  trace.flags = static_cast<unsigned>(result);
+  VrTraceRecord(trace);
+  return result;
+}
+
+HRESULT STDMETHODCALLTYPE ResizeDetour(IDXGISwapChain* swap, UINT buffers,
+                                       UINT width, UINT height,
+                                       DXGI_FORMAT format, UINT flags) {
+  DSVR_LOG("Render: ResizeBuffers %ux%u format=%d buffers=%u", width, height,
+           (int)format, buffers);
+  g_described.store(false);  // re-describe after a resize
+  g_host.Invalidate(RenderHostKind::Present,
+                    reinterpret_cast<std::uintptr_t>(swap));
+  return g_resize_orig(swap, buffers, width, height, format, flags);
+}
+
+}  // namespace
+
+bool RenderHookInstall(bool vr_enabled, bool verbose, bool reshade_host) {
+  if (vr_enabled && !g_host.Configure(true,
+          reshade_host ? RenderHostKind::ReShade : RenderHostKind::Present,
+          {nullptr, CaptureHostDevice, PollHost, SubmitHostMono})) {
+    DSVR_LOG("Render: host disabled or already configured; no new owner");
+    return false;
+  }
+  g_desktop_notified.store(false, std::memory_order_release);
+  g_desktop_ready.store(!vr_enabled, std::memory_order_release);
+  g_verbose = verbose;
+  LARGE_INTEGER qpf{};
+  QueryPerformanceFrequency(&qpf);
+  g_qpf = qpf.QuadPart > 0 ? qpf.QuadPart : 1;
+  if (vr_enabled && reshade_host) {
+    g_reshade_bridge.SetReady(true);
+    DSVR_LOG("Render: ReShade D3D11 host selected; awaiting add-on callbacks; "
+             "no DXGI hooks, no automatic fallback (mono source only)");
+    return true;
+  }
+
+  // Hidden window for the throwaway swapchain.
+  HWND hwnd = CreateWindowExW(0, L"STATIC", L"DSVR-dummy", WS_POPUP, 0, 0, 64,
+                              64, nullptr, nullptr, GetModuleHandleW(nullptr),
+                              nullptr);
+  if (!hwnd) {
+    DSVR_ERROR("Render: dummy window failed (%lu); no hook", GetLastError());
+    return false;
+  }
+
+  DXGI_SWAP_CHAIN_DESC desc{};
+  desc.BufferCount = 1;
+  desc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+  desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+  desc.OutputWindow = hwnd;
+  desc.SampleDesc.Count = 1;
+  desc.Windowed = TRUE;
+
+  ID3D11Device* device = nullptr;
+  ID3D11DeviceContext* context = nullptr;
+  IDXGISwapChain* swap = nullptr;
+  D3D_FEATURE_LEVEL level{};
+  HRESULT hr = D3D11CreateDeviceAndSwapChain(
+      nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, nullptr, 0,
+      D3D11_SDK_VERSION, &desc, &swap, &device, &level, &context);
+  if (FAILED(hr) || !swap) {
+    DSVR_ERROR("Render: dummy device failed (hr=0x%08lx); no hook",
+               (unsigned long)hr);
+    DestroyWindow(hwnd);
+    return false;
+  }
+
+  void** vtable = *(void***)swap;
+  g_present_target = vtable[8];
+  g_resize_target = vtable[13];
+  swap->Release();
+  if (context) context->Release();
+  if (device) device->Release();
+  DestroyWindow(hwnd);
+
+  const MH_STATUS init = MH_Initialize();
+  if (init != MH_OK && init != MH_ERROR_ALREADY_INITIALIZED) {
+    DSVR_ERROR("Render: MinHook initialize failed; no hook");
+    return false;
+  }
+  if (MH_CreateHook(g_present_target, (void*)&PresentDetour,
+                    (void**)&g_present_orig) != MH_OK ||
+      MH_CreateHook(g_resize_target, (void*)&ResizeDetour,
+                    (void**)&g_resize_orig) != MH_OK) {
+    DSVR_ERROR("Render: MinHook create failed; no hook");
+    MH_RemoveHook(g_present_target);
+    MH_RemoveHook(g_resize_target);
+    g_present_target = g_resize_target = nullptr;
+    return false;
+  }
+  if (MH_EnableHook(g_present_target) != MH_OK ||
+      MH_EnableHook(g_resize_target) != MH_OK) {
+    DSVR_ERROR("Render: MinHook enable failed; no hook");
+    MH_DisableHook(g_present_target);
+    MH_DisableHook(g_resize_target);
+    MH_RemoveHook(g_present_target);
+    MH_RemoveHook(g_resize_target);
+    g_present_target = g_resize_target = nullptr;
+    return false;
+  }
+  DSVR_LOG("Render: Present+ResizeBuffers hook installed (%s, level=0x%x)",
+           vr_enabled ? "mono diagnostic host" : "desktop readiness only", (unsigned)level);
+  return true;
+}
+
+void RenderHookUninstall() {
+  g_desktop_ready.store(false, std::memory_order_release);
+  g_reshade_bridge.SetReady(false);
+  if (g_present_target) {
+    MH_DisableHook(g_present_target);
+    MH_DisableHook(g_resize_target);
+    MH_RemoveHook(g_present_target);
+    MH_RemoveHook(g_resize_target);
+    g_present_target = nullptr;
+    g_resize_target = nullptr;
+    DSVR_LOG("Render: hooks removed");
+  }
+}
+
+}  // namespace dsvr
+
+// ABI v1 bridge: called only from the registered ReShade D3D11 callback, never
+// DllMain. Export availability does not grant readiness: startup publishes that
+// only after the pinned executable gate and selected host configuration.
+extern "C" __declspec(dllexport) void __stdcall DsvrReShadeFrameV1(
+    std::uintptr_t swapchain, void* resource, void* window) {
+  dsvr::g_reshade_bridge.Frame(swapchain, resource, window);
+}
+
+extern "C" __declspec(dllexport) void __stdcall DsvrReShadeInvalidateV1(
+    std::uintptr_t swapchain) {
+  dsvr::g_reshade_bridge.Invalidate(swapchain);
+}
