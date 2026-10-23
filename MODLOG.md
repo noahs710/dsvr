@@ -135,6 +135,16 @@ was deployed: the game directory still holds the restored packaged
 logged in during preflight; deployment belongs to the next live probe, which
 the capture script performs inside its own transaction).
 
+**Commit receipt.** The verified wrap was committed locally as `18792a2`
+("feat: solve arm IK before native body copy with copy-verified
+publication"), 32 files, explicit paths only: reviewed source/tests, the
+read-only `pose_transfer.h`, the two multi-range Ghidra dump scripts, and
+MODLOG/ARM_IK_EVIDENCE/VERIFICATION_RUNBOOK/execution guide. No generated
+package, ignored capture or raw decompilation was staged. The working tree
+now holds only the untracked user entry files `IDEA.md` and
+`tools/ghidra/FindFieldWrites.java`. No push, no deployment, no game launch,
+no headset run.
+
 
 ### Source wrap committed, 23 October 2026
 
