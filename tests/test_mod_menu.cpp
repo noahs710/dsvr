@@ -27,6 +27,7 @@ dsvr::MenuPointerState pointer_state{};
 bool probe_pointer_click=false;
 bool pointer_button_clicked=false;
 bool pointer_mouse_down=false;
+bool navigation_select_down=false;
 float pointer_mouse_x=0,pointer_mouse_y=0;
 bool inject_deferred_mouse=false;
 bool observe_deferred_mouse=false;
@@ -36,6 +37,10 @@ int deferred_input_events=0;
 bool pointer_button_test_active=false;
 ImVec2 pointer_button_rect_min{},pointer_button_rect_max{};
 bool pointer_button_hovered=false;
+dsvr::Config live_config{},saved_config{};
+int applies=0,saves=0;
+ImGuiContext* menu_context=nullptr;
+float footer_x=0,footer_y=0;
 }
 
 int CheckInputEventQueue() {
@@ -87,6 +92,7 @@ BodyVisibilityStatus BodyVisibilityGetStatus() {return {};}
 MotionBlurStatus MotionBlurGetStatus() {return {};}
 CalibrationStatus CalibrationGetStatus() {
   if (ImGui::GetCurrentContext()) {
+    menu_context=ImGui::GetCurrentContext();
     if (inject_deferred_mouse) {
       ImGui::GetIO().ConfigDebugIgnoreFocusLoss=true;
       const int queued_before=GImGui->InputEventsQueue.Size;
@@ -103,6 +109,7 @@ CalibrationStatus CalibrationGetStatus() {
     }
     if (probe_pointer_click) {
       pointer_mouse_down=ImGui::IsMouseClicked(0)||ImGui::IsMouseDown(0);
+      navigation_select_down=ImGui::IsKeyDown(ImGuiKey_GamepadFaceDown);
       pointer_mouse_x=ImGui::GetIO().MousePos.x;
       pointer_mouse_y=ImGui::GetIO().MousePos.y;
       probe_pointer_click=false;
@@ -118,9 +125,18 @@ bool CalibrationCapturesInput() {return calibration;}
 void CalibrationRequest() {calibration=true;}
 void CalibrationCancel() {calibration=false;}
 void CalibrationRecenter() {}
-Config DiagnosticsCurrentConfig() {return {};}
-bool DiagnosticsRequestConfig(const Config&,bool) {return true;}
+Config DiagnosticsCurrentConfig() {return live_config;}
+SettingsSnapshot DiagnosticsSettingsSnapshot() {return {live_config,saved_config,false};}
+bool DiagnosticsRequestConfig(const Config& value,bool save) {
+  live_config=value;
+  if(save){++saves;saved_config=value;}else ++applies;
+  return true;
+}
 std::string DiagnosticsSettingsStatus() {
+  footer_x=ImGui::GetWindowPos().x+ImGui::GetStyle().WindowPadding.x;
+  footer_y=GImGui->LastItemData.ID ? GImGui->LastItemData.Rect.GetCenter().y :
+      GImGui->LastItemData.Rect.Min.y-ImGui::GetStyle().ItemSpacing.y-
+      (ImGui::GetFontSize()+2*ImGui::GetStyle().FramePadding.y)*.5f;
   if (pointer_button_test_active) {
     ImGui::SetCursorScreenPos({900.0f,640.0f});
     if (ImGui::Button("Pointer routing test",{160.0f,40.0f}))
@@ -168,6 +184,28 @@ int main(int argc,char** argv) {
   const float color[]={.12f,.14f,.17f,1};context->ClearRenderTargetView(target.Get(),color);
   ModMenuToggle();CHECK(ModMenuCapturesInput());
   for(int i=0;i<3;++i) ModMenuRenderTexture(device.Get(),image.Get());
+  if(!calibration) {
+    // Drive the shipped controls through ImGui's navigation activation, not a
+    // duplicate settings-state helper: edit -> Apply -> Save identical values.
+    CHECK(menu_context);ImGui::SetCurrentContext(menu_context);
+    ImGuiWindow* panel=nullptr;
+    for(auto* candidate:GImGui->Windows)
+      if(std::string(candidate->Name).find("/Panel_")!=std::string::npos) panel=candidate;
+    CHECK(panel);
+    ImGui::ActivateItemByID(ImHashStr("Track native arms",0,panel->ID));
+    ModMenuRenderTexture(device.Get(),image.Get());
+    auto click=[&](float x) {
+      pointer_state={true,true,false,x,footer_y};
+      ModMenuRenderTexture(device.Get(),image.Get());
+      pointer_state.select=true;ModMenuRenderTexture(device.Get(),image.Get());
+      pointer_state.select=false;ModMenuRenderTexture(device.Get(),image.Get());
+    };
+    click(footer_x+55.f);
+    CHECK(applies==1 && live_config.arm_ik_enabled);
+    click(footer_x+110.f+12.f+77.5f);
+    CHECK(saves==1 && live_config.arm_ik_enabled);
+    pointer_state={};
+  }
   inject_deferred_mouse=true;
   ModMenuRenderTexture(device.Get(),image.Get());
   CHECK(deferred_input_events>0);
@@ -201,6 +239,20 @@ int main(int argc,char** argv) {
     probe_pointer_click=true;
     ModMenuRenderTexture(device.Get(),image.Get());
     CHECK(!pointer_mouse_down && pointer_mouse_x < -1.0e20f && pointer_mouse_y < -1.0e20f);
+    // A/focus navigation remains available with spatial presentation even if
+    // aim is lost. It must never become a phantom mouse click.
+    pointer_state.navigation_select=true;
+    probe_pointer_click=true;ModMenuRenderTexture(device.Get(),image.Get());
+    CHECK(navigation_select_down && !pointer_mouse_down);
+    pointer_state.navigation_select=false;
+    probe_pointer_click=true;ModMenuRenderTexture(device.Get(),image.Get());
+    CHECK(!navigation_select_down && !pointer_mouse_down);
+    pointer_state={true,true,false,100.f,65.f};
+    ModMenuControllerInput(0,1,false,false);
+    probe_pointer_click=true;ModMenuRenderTexture(device.Get(),image.Get());
+    CHECK(pointer_mouse_x < -1.0e20f); // a hovering ray cannot steal stick focus
+    ModMenuControllerInput(0,0,false,false);
+    pointer_state={};
   ComPtr<ID3D11RenderTargetView> restored;context->OMGetRenderTargets(1,&restored,nullptr);CHECK(restored.Get()==target.Get());
   if(argc>1) {
     auto read=desc;read.BindFlags=0;read.Usage=D3D11_USAGE_STAGING;read.CPUAccessFlags=D3D11_CPU_ACCESS_READ;

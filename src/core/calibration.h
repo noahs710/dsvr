@@ -22,12 +22,12 @@ struct UserCalibration {
   std::uint64_t revision = 0;
 };
 
-// Seated users keep the configured avatar eye height. The measured floor-to-eye
-// value describes their physical pose; it must not put the camera in the adult
-// model's torso. Standing/roomscale users use their measured height.
+// View height is distinct from anatomical size. Sitting changes the eye's
+// floor-relative position, not reach or stature. A legacy numeric fallback
+// never overrides a usable calibration without the explicit opt-in.
 inline float CalibrationViewHeight(const UserCalibration& profile, float configured,
-                                   bool seated) {
-  return profile.valid && !seated ? profile.eye_height_m : configured;
+                                   bool /*seated*/, bool manual_override = false) {
+  return profile.valid && !manual_override ? profile.eye_height_m : configured;
 }
 
 enum class CalibrationPhase { Loading, WaitingForGameplay, AwaitingPose, Holding, Ready };

@@ -235,6 +235,11 @@ int main() {
   CameraResetHeadlook();
   CHECK(CameraApplyFirstPerson(follow.data(),0,0,0,1,1,1.04f,0,
       CalibrationViewHeight(calibration,1.65f,true),1,0,0,1.4f,1.1f));
+  CHECK(std::fabs(Float(0x44)-3.04f)<1e-5f && calibration.eye_height_m==1.04f);
+  // The former seated default requires an explicit manual override now.
+  // It changes placement only, never the measured profile or anatomy.
+  CHECK(CameraApplyFirstPerson(follow.data(),0,0,0,1,1,1.04f,0,
+      CalibrationViewHeight(calibration,1.65f,true,true),1,0,0,1.4f,1.1f));
   CHECK(std::fabs(Float(0x44)-3.65f)<1e-5f && calibration.eye_height_m==1.04f);
   // A new XR space establishes a new origin once. Repeating its epoch does
   // not rebase a subsequent crouch, and no profile measurement changes.

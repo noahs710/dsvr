@@ -7,6 +7,9 @@ int main() {
   using namespace dsvr;
   auto near=[](float a,float b) {return std::fabs(a-b)<1e-5f;};
   UserCalibration p;p.valid=true;p.revision=7;
+  p.eye_height_m=1.8f;
+  CHECK(near(CalibrationViewHeight(p,1.65f,true),1.8f));
+  p.eye_height_m=1.65f;
   p.arm_reach_m[0]=p.arm_reach_m[1]=.6f;
   const auto fit=ResolveCalibrationMapping(p,1.65f,false,1.f,.54f,3);
   CHECK(fit.valid && fit.fitted && near(fit.world_scale,.9f));
@@ -21,7 +24,7 @@ int main() {
     CHECK(stature.valid && near(stature.eye_height/ stature.world_scale,height));
     CHECK(near(stature.world_scale,fit.world_scale)); // height is not arm reach
     const auto seated=ResolveCalibrationMapping(p,1.65f,true,1.f,.54f,3);
-    CHECK(seated.valid && near(seated.eye_height,1.485f));
+    CHECK(seated.valid && near(seated.eye_height,height*.9f));
   }
   p.eye_height_m=1.65f;
   const auto trim=ResolveCalibrationMapping(p,1.65f,false,1.5f,.54f,3);
@@ -64,9 +67,19 @@ int main() {
   const auto absurd=ResolveCalibrationMapping(p,1.65f,false,1.f,.72f,4,12.f,shoulders_native);
   CHECK(absurd.fit==CalibrationFit::Arm && near(absurd.world_scale,1.f));
   CHECK(near(absurd.native_head_height,12.f));
-  // Seated must not shrink anatomy: the head ratio is unchanged.
+  // Seated floor height is posture: reach (not seated eye height) owns scale.
   const auto seated_head=ResolveCalibrationMapping(p,1.65f,true,1.f,.72f,4,head_native,shoulders_native);
-  CHECK(seated_head.fit==CalibrationFit::Head && near(seated_head.world_scale,head_fit.world_scale));
+  CHECK(seated_head.fit==CalibrationFit::Arm && near(seated_head.world_scale,1.f));
+  p.eye_height_m=1.1f;
+  const auto sitting=ResolveCalibrationMapping(p,1.65f,true,1.f,.72f,4,head_native,shoulders_native);
+  CHECK(near(sitting.world_scale,1.f) && near(sitting.eye_height,1.1f));
+  p.eye_height_m=1.65f;
+  const auto manual=ResolveCalibrationMapping(p,1.9f,false,1.f,.72f,4,head_native,shoulders_native,true,true);
+  CHECK(near(manual.world_scale,head_fit.world_scale));
+  CHECK(near(manual.eye_height/manual.world_scale,1.9f));
+  const auto automatic=ResolveCalibrationMapping(p,1.9f,false,1.f,.72f,4,head_native,shoulders_native);
+  CHECK(near(automatic.eye_height,head_native));
+  CHECK(near(CalibrationViewHeight(p,1.9f,false,true),1.9f));
   // A fitted write still needs the model revision it was measured against.
   CHECK(!ResolveCalibrationMapping(p,1.65f,false,1.f,.72f,0,head_native,shoulders_native).valid);
   CHECK(!ResolveCalibrationMapping(p,1.65f,false,1.f,.72f,4,NAN,shoulders_native).valid);

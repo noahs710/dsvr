@@ -31,6 +31,7 @@ struct MenuPointerState {
   bool select = false;
   float x = 0.0f;
   float y = 0.0f;
+  bool navigation_select = false;  // A selects focus; trigger selects the ray
 };
 
 inline bool MenuFiniteVec3(Vec3 value) {
@@ -112,6 +113,6 @@ inline bool MenuPointerMouseDown(const MenuPointerState& pointer) {
 }
 inline bool MenuGamepadSelect(const MenuPointerState& pointer,
                               bool controller_select) {
-  return !pointer.spatial_menu && controller_select;
+  return pointer.spatial_menu ? pointer.navigation_select : controller_select;
 }
 }  // namespace dsvr

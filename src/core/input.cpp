@@ -26,6 +26,7 @@
 #include "vr_heading.h"
 #include "xr.h"
 #include "camera.h"
+#include "combat_native.h"
 
 namespace dsvr {
 // Calibration owns the coherent TrackingFrame sample in xr.cpp. Input only
@@ -38,6 +39,7 @@ XrInstance g_instance = XR_NULL_HANDLE;
 XrSession g_session = XR_NULL_HANDLE;
 XrActionSet g_action_set = XR_NULL_HANDLE;
 XrAction g_grip_pose = XR_NULL_HANDLE;
+XrAction g_aim_pose = XR_NULL_HANDLE;
 XrAction g_squeeze = XR_NULL_HANDLE;
 XrAction g_trigger = XR_NULL_HANDLE;
 XrAction g_stick = XR_NULL_HANDLE;  // vector2, right hand turns (turn_math)
@@ -48,6 +50,7 @@ XrAction g_stick_click = XR_NULL_HANDLE;
 XrAction g_haptic = XR_NULL_HANDLE;
 XrPath g_hand_path[2] = {XR_NULL_PATH, XR_NULL_PATH};  // 0 left, 1 right
 XrSpace g_grip_space[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
+XrSpace g_aim_space[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
 XrSpace g_view_space = XR_NULL_HANDLE;  // actual HMD orientation in the input frame
 std::atomic<bool> g_attached{false};
 std::atomic<bool> g_failed{false};
@@ -166,6 +169,8 @@ void SuggestAll() {
   const Row full[] = {
       {g_grip_pose, "/user/hand/left/input/grip/pose",
        "/user/hand/right/input/grip/pose"},
+      {g_aim_pose, "/user/hand/left/input/aim/pose",
+       "/user/hand/right/input/aim/pose"},
       {g_squeeze, "/user/hand/left/input/squeeze/click",
        "/user/hand/right/input/squeeze/click"},
       {g_trigger, "/user/hand/left/input/trigger/value",
@@ -183,7 +188,7 @@ void SuggestAll() {
       "/interaction_profiles/microsoft/motion_controller",
   };
   for (const char* profile : profiles) {
-    XrActionSuggestedBinding list[14]{};
+    XrActionSuggestedBinding list[16]{};
     uint32_t n = 0;
     for (const Row& row : full) {
       for (int side = 0; side < 2; ++side) {
@@ -200,11 +205,13 @@ void SuggestAll() {
   // current target; Index keeps its A/B + stick clicks, and WMR keeps the
   // controls that profile exposes. Unsupported suggestions fail soft.
   {
-    XrActionSuggestedBinding list[17]{};
+    XrActionSuggestedBinding list[19]{};
     uint32_t n = 0;
     const struct { XrAction action; const char* path; } rows[] = {
         {g_grip_pose, "/user/hand/left/input/grip/pose"},
         {g_grip_pose, "/user/hand/right/input/grip/pose"},
+        {g_aim_pose, "/user/hand/left/input/aim/pose"},
+        {g_aim_pose, "/user/hand/right/input/aim/pose"},
         {g_squeeze, "/user/hand/left/input/squeeze/value"},
         {g_squeeze, "/user/hand/right/input/squeeze/value"},
         {g_trigger, "/user/hand/left/input/trigger/value"},
@@ -229,11 +236,13 @@ void SuggestAll() {
     Suggest("/interaction_profiles/oculus/touch_controller", list, n);
   }
   {
-    XrActionSuggestedBinding list[18]{};
+    XrActionSuggestedBinding list[20]{};
     uint32_t n = 0;
     const struct { XrAction action; const char* path; } rows[] = {
         {g_grip_pose, "/user/hand/left/input/grip/pose"},
         {g_grip_pose, "/user/hand/right/input/grip/pose"},
+        {g_aim_pose, "/user/hand/left/input/aim/pose"},
+        {g_aim_pose, "/user/hand/right/input/aim/pose"},
         {g_squeeze, "/user/hand/left/input/squeeze/value"},
         {g_squeeze, "/user/hand/right/input/squeeze/value"},
         {g_trigger, "/user/hand/left/input/trigger/value"},
@@ -267,6 +276,8 @@ void SuggestAll() {
     const Row poses[] = {
         {g_grip_pose, "/user/hand/left/input/grip/pose",
          "/user/hand/right/input/grip/pose"},
+        {g_aim_pose, "/user/hand/left/input/aim/pose",
+         "/user/hand/right/input/aim/pose"},
         {g_haptic, "/user/hand/left/output/haptic",
          "/user/hand/right/output/haptic"},
     };
@@ -501,6 +512,8 @@ void InputAttachSession(void* xr_instance, void* xr_session) {
       !MakePath("/user/hand/right", g_hand_path[1]) ||
       !MakeAction(XR_ACTION_TYPE_POSE_INPUT, "grip_pose", "Grip pose", true,
                   g_grip_pose) ||
+      !MakeAction(XR_ACTION_TYPE_POSE_INPUT, "aim_pose", "Pointer aim", true,
+                  g_aim_pose) ||
       !MakeAction(XR_ACTION_TYPE_FLOAT_INPUT, "squeeze", "Squeeze", true,
                   g_squeeze) ||
       !MakeAction(XR_ACTION_TYPE_FLOAT_INPUT, "trigger", "Trigger", true,
@@ -539,6 +552,11 @@ void InputAttachSession(void* xr_instance, void* xr_session) {
                  "xrCreateActionSpace(grip)")) {
       g_failed = true;
       return;
+    }
+    space_info.action = g_aim_pose;
+    if (XR_FAILED(xrCreateActionSpace(g_session, &space_info, &g_aim_space[side]))) {
+      g_aim_space[side]=XR_NULL_HANDLE;
+      DSVR_WARN("Input: aim space unavailable; controller navigation remains available");
     }
   }
   SyncParams(cfg);
@@ -716,12 +734,36 @@ void InputPollFrame(void* base_space, const float head_pos[3],
     pad_active = pad_active || action_active;
     pad_hand.stick_click = ReadBool(g_stick_click, g_hand_path[side], action_active);
     pad_active = pad_active || action_active;
+    HandSample& sample = hand_samples[side];
+    sample.squeeze_held = squeeze_raw > 0.7f;
+    sample.trigger_held = trigger_raw > 0.7f;
+    sample.primary_held = pad_hand.primary;
+    // Aim is located separately in the exact same space/time as grip and HMD.
+    // Grip tracking loss cannot disable navigation buttons or a valid aim.
+    XrActionStateGetInfo aim_get{XR_TYPE_ACTION_STATE_GET_INFO};
+    aim_get.action=g_aim_pose;aim_get.subactionPath=g_hand_path[side];
+    XrActionStatePose aim_state{XR_TYPE_ACTION_STATE_POSE};
+    XrSpaceLocation aim{XR_TYPE_SPACE_LOCATION};
+    constexpr auto aim_flags=XR_SPACE_LOCATION_ORIENTATION_VALID_BIT |
+                              XR_SPACE_LOCATION_POSITION_VALID_BIT;
+    if (g_aim_space[side] &&
+        XR_SUCCEEDED(xrGetActionStatePose(g_session,&aim_get,&aim_state)) && aim_state.isActive &&
+        XR_SUCCEEDED(xrLocateSpace(g_aim_space[side],(XrSpace)base_space,
+                                   (XrTime)predicted_display_time,&aim)) &&
+        (aim.locationFlags & aim_flags)==aim_flags) {
+      sample.aim_pos[0]=aim.pose.position.x;sample.aim_pos[1]=aim.pose.position.y;
+      sample.aim_pos[2]=aim.pose.position.z;
+      sample.aim_quat[0]=aim.pose.orientation.x;sample.aim_quat[1]=aim.pose.orientation.y;
+      sample.aim_quat[2]=aim.pose.orientation.z;sample.aim_quat[3]=aim.pose.orientation.w;
+      float norm2=0;for(float v:sample.aim_quat)norm2+=v*v;
+      sample.aim_valid=FiniteVec({sample.aim_pos[0],sample.aim_pos[1],sample.aim_pos[2]}) &&
+          std::isfinite(norm2) && norm2>.5f && norm2<1.5f;
+    }
     XrSpaceVelocity velocity{XR_TYPE_SPACE_VELOCITY};
     XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};
     location.next = &velocity;
     XrResult located = xrLocateSpace(g_grip_space[side], (XrSpace)base_space,
                                      (XrTime)predicted_display_time, &location);
-    HandSample& sample = hand_samples[side];
     const auto kValid = XR_SPACE_LOCATION_ORIENTATION_VALID_BIT |
                         XR_SPACE_LOCATION_POSITION_VALID_BIT;
     if (XR_FAILED(located) || (location.locationFlags & kValid) != kValid) {
@@ -967,8 +1009,12 @@ void InputPollFrame(void* base_space, const float head_pos[3],
     g_active_movement_hand = next_hand;
     g_movement_settings_initialized = true;
   }
-  // IK arms on: weapon-hand buttons must not fire canned attacks.
-  pad_input.suppress_weapon_attacks = cfg.arm_ik_enabled;
+  // Visual IK is not a replacement for controls. Keep normal combat buttons
+  // until real native physical damage AND defense are bound; enabling IK or
+  // log-only must never leave the player unable to attack/block/parry.
+  const auto combat=CombatNativeGetStatus();
+  pad_input.suppress_weapon_attacks = cfg.arm_ik_enabled && !cfg.arm_ik_log_only &&
+      combat.physical_damage_bound && combat.shield_contact_bound;
   if (!sanctuary) {
     HeadDirectedLocomotion locomotion{};
     {

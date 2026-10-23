@@ -35,7 +35,7 @@ int main() {
   CHECK(c.snap_turn_degrees == 45);
   CHECK(c.movement_orientation == dsvr::MovementOrientation::Head);
   CHECK(c.movement_controller == dsvr::MovementController::NonDominant);
-  CHECK(c.eye_height == 1.65f);
+  CHECK(c.eye_height == 1.65f && !c.eye_height_override);
   CHECK(c.forward_offset_m == 0.0f && !c.hide_player_model);
   CHECK(c.eye_clearance_m == 0.45f);
   CHECK(c.hide_head);
@@ -75,7 +75,10 @@ int main() {
   CHECK(c.snap_turn_degrees == 30);
   CHECK(c.movement_orientation == dsvr::MovementOrientation::Head);
   CHECK(!c.head_directed_move);
-  CHECK(c.eye_height == 1.8f);
+  CHECK(c.eye_height == 1.8f && !c.eye_height_override); // legacy value is not opt-in
+  c.eye_height_override=true;
+  CHECK(dsvr::ConfigSave(path.c_str(),c));
+  CHECK(dsvr::ConfigLoad(path.c_str(),c) && c.eye_height_override && c.eye_height==1.8f);
   CHECK(c.world_scale == 1.2f);
   CHECK(c.forward_offset_m == 0.12f && !c.hide_player_model);
   CHECK(c.eye_clearance_m == 0.6f);

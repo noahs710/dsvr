@@ -59,6 +59,13 @@ int main() {
   frames.Publish(in);
   CHECK(frames.Read(110, 100, out));
   CHECK(!out.arm[0].valid && out.arm[1].valid);
+  in.hand[0].quat[0]=std::numeric_limits<float>::quiet_NaN();
+  in.hand[0].aim_valid=in.hand[0].primary_held=true;
+  frames.Publish(in);CHECK(frames.Read(110,100,out));
+  CHECK(!out.hand[0].valid && out.hand[0].aim_valid && out.hand[0].primary_held);
+  in.hand[0].aim_pos[0]=std::numeric_limits<float>::infinity();
+  frames.Publish(in);CHECK(frames.Read(110,100,out) && !out.hand[0].aim_valid);
+  in.hand[0]={};
   // Freshness is local monotonic time, never subtraction of XrTime.
   CHECK(frames.Read(200, 100, out));
   CHECK(!frames.Read(201, 100, out) && out.sequence == 0);

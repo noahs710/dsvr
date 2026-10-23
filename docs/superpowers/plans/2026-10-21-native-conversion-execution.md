@@ -251,9 +251,12 @@ distributable sources, exact commands/exits/hashes and restoration receipts.
 Update this ledger, the stereo evidence note and MODLOG after each bounded task.
 Planning-only documentation changes do not rebuild, deploy or launch the game.
 
-**After the feasibility decision:** resume F2's distinct source-to-body palette
-transfer: capture the real bone map, correctly addressed assembly root and
-proportion records before qualifying a before-copy or mapped final-body write.
+**After the feasibility decision:** the 23 October protected capture completed
+F2's distinct source-to-body palette data collection: the 69-entry bone map,
+correctly addressed assembly root at +0x20 and proportion records for the
+captured resource are recovered, and a before-copy source seam is implemented
+with offline regressions (see ARM_IK_EVIDENCE). What remains is qualifying the
+verified-copy publication live.
 Then pursue B/C's newer enemy damage-dispatch lead at `0x14032F548` with natural
 hit/miss/block correlation. Do not replace either research gate with solver
 retuning, generic health setters or UI/packaging work. D3-D7 remain required
@@ -303,6 +306,18 @@ owner, not just a visual test. See ARM_IK_EVIDENCE before changing the hook or
 removing a guard. D's omitted consumer tail and B's bounded HP-callsite findings
 are in NATIVE_STEREO_CONTRACT and NATIVE_MELEE_CONTRACT respectively; neither
 establishes an enabled native binding.
+
+23 October embodiment-wrap continuation: the protected read-only capture
+recovered F2's copy contract for the captured resource: a 69-entry identity
+map, proportion records reproducing all 13,248 `model+4` floats to max
+float32 error `5.245e-08`, and assembly roots at `+0x20` (details and limits
+in ARM_IK_EVIDENCE). The IK solve now runs on the fresh source pose before
+the natural `140207F10` body copy, with publication gated on a verified
+natural copy; offline regressions model the two-hook sequence and refuse
+premature publication. This is offline-only: the hooks have never executed in
+the live game, and the captured map/proportion constants belong to that one
+resource, not to all equipment variants. F2 remains unchecked; the runbook
+"Verified native copy publication" row is the live probe that would close it.
 
 Exit: coherent rendered body/equipment, persistent calibration and demonstrated geometric crouch/duck behavior. Native visual pose data alone cannot establish collision/hurt-volume changes.
 

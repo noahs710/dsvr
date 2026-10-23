@@ -11,6 +11,7 @@ enum class MovementController : int { NonDominant = 0, Left = 1, Right = 2 };
 // Defaults are safe for first load: VR stays disabled until the user opts in
 // via DSVR-Setup, so a bad HMD/driver can never brick a flatscreen launch.
 struct Config {
+  bool operator==(const Config&) const = default;
   // [loader] -- dinput8 chain-loading (QoL batch 1, item 1)
   // Filename (or path) of another dinput8-style proxy to forward to instead of
   // the system DLL, e.g. "dinput8-chain.dll". Empty = forward to System32.
@@ -81,7 +82,10 @@ struct Config {
   bool xr_input_enabled = true;
 
   // [camera]
-  float eye_height = 1.65f;       // metres above player anchor
+  // Calibration owns the default. Legacy eye_height alone is a fallback, not
+  // an implicit override. Only the in-game menu exposes this opt-in.
+  bool eye_height_override = false;
+  float eye_height = 1.65f;       // manual/fallback metres above player anchor
   float world_scale = 1.0f;       // 0.5..2.0 trim on automatic native-world/avatar fit
   float forward_offset_m = 0.0f;  // 0..0.4; 0 = camera at the head (0.12.0:
                                   // the old 0.22 hovered in front of the face)

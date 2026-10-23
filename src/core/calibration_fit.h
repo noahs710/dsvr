@@ -66,7 +66,8 @@ inline CalibrationMapping ResolveCalibrationMapping(
     const UserCalibration& profile, float fallback_eye_height_m, bool seated,
     float world_trim, float native_arm_reach = 0.f,
     std::uint64_t model_revision = 0, float native_head_height = 0.f,
-    float native_shoulder_width = 0.f, bool prefer_head_fit = true) {
+    float native_shoulder_width = 0.f, bool prefer_head_fit = true,
+    bool manual_eye_height = false) {
   CalibrationMapping out;
   if (!std::isfinite(fallback_eye_height_m) || fallback_eye_height_m < .5f ||
       fallback_eye_height_m > 2.5f || !std::isfinite(world_trim) ||
@@ -77,15 +78,19 @@ inline CalibrationMapping ResolveCalibrationMapping(
       (profile.valid && !CalibrationValidProfile(profile)))
     return out;
   const float view_height_m =
-      CalibrationViewHeight(profile, fallback_eye_height_m, seated);
+      CalibrationViewHeight(profile, fallback_eye_height_m, seated, manual_eye_height);
   const bool arm_available = profile.valid && native_arm_reach > 0.f;
-  const bool head_available = profile.valid && native_head_height > 0.f;
+  // A seated floor capture is posture, not standing stature. Use measured
+  // reach for scale in that case; never grow/shrink anatomy from sitting.
+  const bool head_available = profile.valid && !seated && native_head_height > 0.f;
   if ((arm_available || head_available) && !model_revision) return out;
   if (arm_available && (native_arm_reach < .1f || native_arm_reach > 2.f))
     return out;
   float automatic = 1.f;
   if (head_available) {
-    const float candidate = native_head_height / view_height_m;
+    // Manual eye placement must not silently resize the whole world and
+    // cancel its own height adjustment under a head-anchored fit.
+    const float candidate = native_head_height / profile.eye_height_m;
     if (prefer_head_fit && native_head_height > .4f && native_head_height < 6.f &&
         std::isfinite(candidate) && candidate >= kHeadFitScaleMin &&
         candidate <= kHeadFitScaleMax) {
@@ -107,12 +112,9 @@ inline CalibrationMapping ResolveCalibrationMapping(
   out.native_head_height = native_head_height;
   out.native_shoulder_width = native_shoulder_width;
   out.world_scale = automatic * world_trim;
-  // The Head fit is anchored on the native head bone, so the camera height in
-  // native units is exactly that bone's height by construction; the physical
-  // view height still sets the ratio, and the trim still moves the whole world.
-  out.eye_height = out.fit == CalibrationFit::Head
-                       ? native_head_height * world_trim
-                       : view_height_m * out.world_scale;
+  // One conversion for the chosen eye position, hands and roomscale. Manual
+  // placement changes only view height; calibration continues to own scale.
+  out.eye_height = view_height_m * out.world_scale;
   out.world_trim = world_trim;
   out.calibration_revision = profile.revision;
   out.valid = std::isfinite(out.world_scale) && out.world_scale > 0.f &&

@@ -53,10 +53,12 @@ HWND g_window=nullptr;
 WNDPROC g_original=nullptr;
 DWORD g_thread=0;
 ULONGLONG g_last_frame=0;
-Config g_draft;
+Config g_draft, g_draft_base;
 bool g_draft_ready=false,g_dirty=false;
 int g_panel=0;
 ImFont* g_title_font=nullptr;
+bool g_pointer_mode=true;
+ImVec2 g_navigation_pointer{};
 
 LRESULT CALLBACK MenuWindowProc(HWND window,UINT message,WPARAM key,LPARAM data) {
   const bool capture=ModMenuCapturesInput();
@@ -148,9 +150,22 @@ bool Initialize(ID3D11Device* device) {
 void FeedInput(unsigned width,unsigned height) {
   auto& io=ImGui::GetIO();
   const MenuPointerState pointer=XrMenuPointerInput(width,height);
+  ControllerInput controller;
+  MenuWindowEventQueue events;
+  { std::lock_guard<std::mutex> lock(g_input_mutex);controller=g_controller;events.Swap(g_events); }
   if (g_reset_imgui_input.exchange(false)) {
-    io.ClearEventsQueue();io.ClearInputKeys();io.ClearInputMouse();
+    io.ClearEventsQueue();io.ClearInputKeys();io.ClearInputMouse();g_pointer_mode=true;
   }
+  const bool navigating=std::fabs(controller.x)>.6f || std::fabs(controller.y)>.6f ||
+                        pointer.navigation_select;
+  if (navigating) {
+    if(g_pointer_mode)g_navigation_pointer={pointer.x,pointer.y};
+    g_pointer_mode=false;
+  } else if(pointer.valid && (pointer.select ||
+      std::hypot(pointer.x-g_navigation_pointer.x,pointer.y-g_navigation_pointer.y)>16.f)) {
+    g_pointer_mode=true;
+  }
+  const bool pointing=pointer.spatial_menu && pointer.valid && g_pointer_mode;
   const auto now=GetTickCount64();
   io.DeltaTime=g_last_frame ? std::clamp(static_cast<float>(now-g_last_frame)/1000.f,.001f,.1f) : 1.f/90;
   g_last_frame=now;io.DisplaySize={static_cast<float>(width),static_cast<float>(height)};
@@ -159,10 +174,10 @@ void FeedInput(unsigned width,unsigned height) {
   // Outside pointer mode the desktop cursor is a phantom input. A live mouse
   // position makes ImGui treat the mouse as the active navigation source, so
   // the d-pad never drives navigation. Report "no mouse" instead.
-  if (pointer.spatial_menu && pointer.valid) io.AddMousePosEvent(pointer.x,pointer.y);
+  if (pointing) io.AddMousePosEvent(pointer.x,pointer.y);
   else io.AddMousePosEvent(-FLT_MAX,-FLT_MAX);
   for (int i=0;i<3;++i)
-    io.AddMouseButtonEvent(i,pointer.spatial_menu && i==0 && MenuPointerMouseDown(pointer));
+    io.AddMouseButtonEvent(i,pointing && i==0 && MenuPointerMouseDown(pointer));
   struct Key { int native;ImGuiKey gui; };
   constexpr Key keys[]={{VK_TAB,ImGuiKey_Tab},{VK_LEFT,ImGuiKey_LeftArrow},
     {VK_RIGHT,ImGuiKey_RightArrow},{VK_UP,ImGuiKey_UpArrow},{VK_DOWN,ImGuiKey_DownArrow},
@@ -173,9 +188,6 @@ void FeedInput(unsigned width,unsigned height) {
   for (auto key:keys) io.AddKeyEvent(key.gui,focused && (GetAsyncKeyState(key.native)&0x8000));
   io.AddKeyEvent(ImGuiMod_Ctrl,focused && (GetAsyncKeyState(VK_CONTROL)&0x8000));
   io.AddKeyEvent(ImGuiMod_Shift,focused && (GetAsyncKeyState(VK_SHIFT)&0x8000));
-  ControllerInput controller;
-  MenuWindowEventQueue events;
-  { std::lock_guard<std::mutex> lock(g_input_mutex);controller=g_controller;events.Swap(g_events); }
   MenuWindowEvent event{};
   while (events.Pop(event)) {
     const bool key_down=event.message==WM_KEYDOWN || event.message==WM_SYSKEYDOWN;
@@ -227,7 +239,7 @@ void FeedInput(unsigned width,unsigned height) {
   io.AddKeyEvent(ImGuiKey_GamepadDpadRight,controller.x>.6f);
   io.AddKeyEvent(ImGuiKey_GamepadDpadUp,controller.y>.6f);
   io.AddKeyEvent(ImGuiKey_GamepadDpadDown,controller.y<-.6f);
-  io.MouseDrawCursor=g_open.load() || pointer.spatial_menu;
+  io.MouseDrawCursor=pointing;
 }
 
 void Title(const char* text) {
@@ -278,7 +290,7 @@ void CalibrationScreen(const CalibrationStatus& status) {
   ImGui::ProgressBar(status.hold_progress,{content,12},"");
     ImGui::TextWrapped("You only do this once each time you start. Dying or loading will not erase it.");
   if (!CalibrationCurrent().floor_height_measured)
-    ImGui::TextWrapped("Tip: your height comes from the settings below. If the world feels too tall or short, cancel and fix it first.");
+    ImGui::TextWrapped("A floor reference will be used when available. Without one, the previous calibration is retained; manual height is available under Calibration in the mod menu.");
   if (status.save_failed) ImGui::TextWrapped("Could not save your measurements. Try again, or keep the old ones.");
   if (status.can_cancel && ImGui::Button("Skip - keep my old measurements")) {
     CalibrationCancel();
@@ -307,7 +319,7 @@ void CalibrationPanel() {
   if(ImGui::Combo("Play position",&position,"Standing\0Seated\0Roomscale\0")) {
     g_draft.play_style=position==1?"seated":position==2?"roomscale":"standing";g_dirty=true;
   }
-  ImGui::TextWrapped("Seated mode keeps your configured standing eye height; sitting does not shrink your anatomy. Floor height stays saved separately.");
+  ImGui::TextWrapped("Calibration supplies eye height by default. Seated floor height changes your viewpoint, never your measured reach or anatomical scale.");
   int fit = g_draft.embodiment_fit == "arm" ? 1 : 0;
   if (ImGui::Combo("Body fit anchored on", &fit,
                    "Native head bone (default)\0Native arm reach\0")) {
@@ -316,7 +328,11 @@ void CalibrationPanel() {
   }
   ImGui::TextWrapped("Head fit sets one automatic scale for the whole world and player so the native Head bone lands on your eye height: the camera sits in the avatar's own head and the body takes the space your body does. Arm fit instead matches your measured hand reach exactly, and the head may sit off the head bone. Either way bones and collision are not scaled, and independent avatar mesh resizing is not yet verified.");
   ImGui::Separator();
-  g_dirty|=ImGui::SliderFloat("Standing / fallback eye height (m)",&g_draft.eye_height,.7f,2.3f,"%.2f",ImGuiSliderFlags_AlwaysClamp);
+  g_dirty|=ImGui::Checkbox("Override calibrated eye height",&g_draft.eye_height_override);
+  if (g_draft.eye_height_override) {
+    g_dirty|=ImGui::SliderFloat("Manual eye height (m)",&g_draft.eye_height,.5f,2.5f,"%.2f",ImGuiSliderFlags_AlwaysClamp);
+    ImGui::TextWrapped("Manual placement only. Your saved body measurements and world scale stay unchanged. Turn off the override to return to calibration.");
+  } else if (!profile.valid) ImGui::TextDisabled("Using fallback height until calibration is available.");
   g_dirty|=ImGui::SliderFloat("World / player scale trim",&g_draft.world_scale,.5f,2.f,"%.2f",ImGuiSliderFlags_AlwaysClamp);
   g_dirty|=ImGui::SliderFloat("Wrist roll trim (degrees)",&g_draft.grip_roll_correction_deg,-45,45,"%.1f",ImGuiSliderFlags_AlwaysClamp);
   if (status.saving) ImGui::TextDisabled("Saving calibration...");
@@ -549,12 +565,15 @@ void DiagnosticsPanel() {
   ImGui::Text("Blur reads forced off: %llu / enable requests blocked: %llu",
       static_cast<unsigned long long>(blur.reads),static_cast<unsigned long long>(blur.blocked_enables));
   ImGui::TextDisabled("Home: open / close     F6: recenter     F8: theater");
-  ImGui::TextWrapped("VR shortcut: hold left Menu + right grip. Use the left stick to navigate, right trigger to select and B to go back.");
+  ImGui::TextWrapped("VR shortcut: hold left Menu + right grip. Use the left stick and A to navigate/select, or aim and pull the right trigger. B goes back.");
   ImGui::TextWrapped("The game world continues while this menu is open.");
 }
 
 void DrawMenu() {
-  if (!g_draft_ready) {g_draft=DiagnosticsCurrentConfig();g_draft_ready=true;g_dirty=false;}
+  const auto settings=DiagnosticsSettingsSnapshot();
+  if (!g_draft_ready || g_draft==g_draft_base || g_draft==settings.applied) {
+    g_draft=g_draft_base=settings.applied;g_draft_ready=true;g_dirty=false;
+  }
   const auto size=ImGui::GetIO().DisplaySize;
   ImGui::SetNextWindowPos({size.x*.5f,size.y*.5f},ImGuiCond_Always,{.5f,.5f});
   ImGui::SetNextWindowSize({std::min(1180.f,size.x-32),std::min(860.f,size.y-32)},ImGuiCond_Always);
@@ -579,11 +598,20 @@ void DrawMenu() {
   }
   ImGui::PopItemWidth();ImGui::EndChild();
   ImGui::Separator();
-  ImGui::BeginDisabled(!g_dirty);
-  if (ImGui::Button("Apply",{110,0})) {if (DiagnosticsRequestConfig(g_draft,false)) g_dirty=false;}
-  ImGui::SameLine();if (ImGui::Button("Save settings",{155,0})) {if (DiagnosticsRequestConfig(g_draft,true)) g_dirty=false;}
-  ImGui::SameLine();if (ImGui::Button("Revert edits")) {g_draft=DiagnosticsCurrentConfig();g_dirty=false;}
+  const bool unapplied=g_draft!=settings.applied;
+  const bool unsaved=g_draft!=settings.saved;
+  ImGui::BeginDisabled(settings.busy || !unapplied);
+  if (ImGui::Button("Apply",{110,0})) DiagnosticsRequestConfig(g_draft,false);
+  ImGui::EndDisabled();ImGui::SameLine();
+  ImGui::BeginDisabled(settings.busy || !unsaved);
+  if (ImGui::Button("Save settings",{155,0})) DiagnosticsRequestConfig(g_draft,true);
+  ImGui::EndDisabled();ImGui::SameLine();
+  ImGui::BeginDisabled(settings.busy || !unapplied);
+  if (ImGui::Button("Revert edits")) {g_draft=g_draft_base=settings.applied;g_dirty=false;}
   ImGui::EndDisabled();ImGui::SameLine();if (ImGui::Button("Close")) ModMenuClose();
+  ImGui::TextDisabled(settings.busy ? "Updating settings..." : unapplied ?
+      "Edits not applied. Apply to test, or Save to apply and keep." : unsaved ?
+      "Applied for this session. Save to keep after restarting." : "Applied and saved.");
   ImGui::TextWrapped("%s",DiagnosticsSettingsStatus().c_str());ImGui::End();
 }
 }  // namespace

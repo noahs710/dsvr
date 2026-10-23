@@ -35,7 +35,6 @@ enum {
   CTL_MOTION = 114,
   CTL_SCALE = 115,
   CTL_SNAPDEG = 116,
-  CTL_EYE = 117,
   CTL_HAND = 118,
   CTL_STYLE = 119,
   CTL_CHAIN = 120,
@@ -54,7 +53,7 @@ enum {
 HWND g_game_edit = nullptr, g_status = nullptr, g_log = nullptr;
 HWND g_vr = nullptr, g_vignette = nullptr, g_snap = nullptr;
 HWND g_haptics = nullptr, g_motion = nullptr;
-HWND g_scale = nullptr, g_snapdeg = nullptr, g_eye = nullptr;
+HWND g_scale = nullptr, g_snapdeg = nullptr;
 HWND g_hand = nullptr, g_style = nullptr, g_chain = nullptr;
 HWND g_fps = nullptr;
 HWND g_move_mode = nullptr, g_move_hand = nullptr;
@@ -113,9 +112,7 @@ void PopulateControls(const dsvr::Config& c) {
   SetChecked(g_motion, c.motion_attacks);
   SetText(g_scale, std::to_wstring(c.render_scale_percent));
   SetText(g_snapdeg, std::to_wstring(c.snap_turn_degrees));
-  wchar_t eye[32]{};
-  swprintf_s(eye, L"%.2f", (double)c.eye_height);
-  SetText(g_eye, eye);
+  // Eye height belongs to calibration/the in-game manual override only.
   SendMessageW(g_hand, CB_SETCURSEL, c.dominant_hand_left ? 1 : 0, 0);
   SendMessageW(g_move_mode, CB_SETCURSEL,
                c.movement_orientation == dsvr::MovementOrientation::Controller ? 1 : 0, 0);
@@ -149,8 +146,7 @@ dsvr::Config ReadControls(dsvr::Config base) {
   if (scale > 0) base.render_scale_percent = scale;
   int deg = _wtoi(GetText(g_snapdeg).c_str());
   if (deg > 0) base.snap_turn_degrees = deg;
-  double eye = _wtof(GetText(g_eye).c_str());
-  if (eye > 0) base.eye_height = (float)eye;
+  // Preserve the existing calibrated/manual height policy from the file.
   base.dominant_hand_left =
       SendMessageW(g_hand, CB_GETCURSEL, 0, 0) == 1;
   {
@@ -283,9 +279,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       Add(hwnd, L"STATIC", L"Snap deg:", SS_LEFT, 400, 202, 60, 20, 0);
       g_snapdeg = Add(hwnd, L"EDIT", L"45", ES_NUMBER | WS_BORDER, 460, 200,
                       50, 22, CTL_SNAPDEG);
-      Add(hwnd, L"STATIC", L"Eye m:", SS_LEFT, 520, 202, 50, 20, 0);
-      g_eye = Add(hwnd, L"EDIT", L"1.65", WS_BORDER, 570, 200, 60, 22,
-                  CTL_EYE);
+      Add(hwnd, L"STATIC", L"Height: calibrate in VR", SS_LEFT, 520, 202, 190, 20, 0);
 
       Add(hwnd, L"STATIC", L"Weapon hand:", SS_LEFT, 16, 232, 90, 20, 0);
       g_hand = Add(hwnd, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_BORDER, 106,

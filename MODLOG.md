@@ -7,6 +7,135 @@ this handoff records evidence/state, not a competing task order.
 
 ## Current task and candidate
 
+### Active embodiment wrap and native IK transfer run, 23 October 2026
+
+User priority: finish existing unfinished work before expanding scope, and
+resolve the IK issue in this run. Operator is available for game/headset tests.
+Entry HEAD `52bddc1`; entry changes were the two Ghidra range scripts,
+`FindFieldWrites.java` and `IDEA.md`. Current menu/height/aim edits are uncommitted.
+No neck feature or replacement solver has been started.
+
+Objective: finish the current settings/input integration, then replace the
+known no-op post-copy IK boundary only with an evidenced native transfer seam.
+Hypothesis: the natural animation return precedes native body remapping and
+proportion processing; solving its selected source before that transfer lets
+native code propagate body/armor/attachments without guessing an identity map.
+Primary read-only Ghidra query confirms `357A20 -> 320980 -> 207F10` order;
+new correct-root/map/proportion capture is required before changing the hook.
+Raw query: external `combat-evidence/embodiment-pose-boundary-20261023.txt`.
+Rollback boundary: this run's source/test changes and receipted test-owned
+install/save files only. No native root/collision writes, replay, primary
+analysis repair, or alteration of retained independent fixtures.
+
+Fresh initial Debug baseline: 88/88. Current integration sweep exposed one
+seated-camera expectation still using the old implicit manual height; it now
+has separate automatic and explicit-override cases. Focused camera checks pass.
+Menu Apply/Save was reproduced red with real pointer clicks and fixed with
+writer-acknowledged applied/saved state. Aim/grip profile tests were red and now
+pass; the actual XR pointer adapter passes the distance/yaw/grid fixture.
+Full Debug/Release and protected native/headset receipts are still pending.
+
+Operator confirms Steam Offline and game closed. Preparing the existing
+reversible disposable-save transaction; exact receipt and restoration status
+must be recorded here before concluding the run.
+
+**Capture transaction receipt and restoration (complete).** The protected
+`run_pose_capture.ps1` transaction ran 14:06:50-14:21:50 local, vault
+`C:\Users\Gabrielle Monlea\.dsvr-backups\desktop-observer-20261023-140650`,
+saved receipt `build/verification/embodiment-wrap/native-capture-receipt.json`
+reports state **Restored**: `DSVR.dll` restored to its exact pre-transaction
+identity `304A63FCD676E26547BEB5D9D33508798FD78EEC9258E2BE812B6507ED890645`;
+`DSVR.toml` hash-verified `53F06F10755C5DC5B2B6271738A47E2FC1B74A767CCA824E7A255401470BC70C`;
+`DSVR-Setup.exe` restored; loader stub absent after cleanup; save roots were
+never moved (`moved:false`) and the five inventoried save-file hashes verify
+against the pre-transaction inventory; Steam-owned `remotecache.vdf` test
+metadata retained as client-owned state; Steam client left untouched;
+exact-game outbound block and `cachedOffline=True` verified. The transaction
+console host was orphaned when harness processes were killed at the start of
+this continuation session, but the transaction completed its own restore;
+receipt and completion output agree. No game/headset run was launched for the
+wrap itself.
+
+**Read-only capture evidence (hashes re-verified this session).** Pinned
+executable `a45aaa36dd2f6cc151670a639ea5547043cf38ea79ff4178b963c6ed71f98d7b`;
+hardware debug registers restored before detach (`debug_registers_restored:
+true`); only the expected attach-breakpoint
+exception (`0x80000003`, one event); 16 complete pairs / 32 samples. The full
+capture archive now lives in-repo at
+`build/verification/embodiment-wrap/native-pose-transfer-baseline.json`
+(602,923 bytes), SHA-256
+`e3b459e6de9257028a62ab2019c5cfc481a4b83aa5b3160cb4ec1f194c21b866`,
+re-hashed matching during this wrap. The observer script is retained beside
+it at `build/verification/embodiment-wrap/dsvr-pose-transfer-observe.py`,
+SHA-256 `543449a3893b33423f3347c070eca9bb2dd55d61ec1e10d692e89b86392154fd`,
+matching the capture's embedded `script_sha256`. The scratch-cache capture
+copy under `.dsvr-backups\pose-transfer-20261023-140810\` has since been
+purged; the in-repo archive is the retained evidence. Prior-session raw
+Ghidra receipts remain under
+`C:\Tools\DarkSoulsRemaster_De\combat-evidence\embodiment-pose-*-20261023.txt`.
+
+**Native copy contract recovered (large finding of this run).** Fully written
+up in [arm IK evidence](docs/ARM_IK_EVIDENCE.md); independently recomputed
+from the retained capture this session: both models are `HGIRootDrawNode`
+arm assemblies with roots at assembly `+0x20` (the old observer read `+0x30`,
+which is model-root field 4); the 80-row body palette's rows 0..68 are
+byte-identical to source rows 0..68 (a 69-entry identity map for this
+resource/character, with the proportion flag at body arm assembly `+8 & 4`);
+and the two proportion records reproduce all 13,248 `model+4` floats with
+maximum float32 error `5.245391818571167e-08`. This is evidence for this one
+captured resource only; nothing about other equipment variants or animation
+states follows.
+
+**Seam implemented against that contract.** Two detours with pinned prologue
+bytes (installation refuses on any byte mismatch, and refuses before hooking
+unless the player vtable route resolves exactly to the update function):
+`0x140320980` source-pose writer and `0x140357A20` local-player outer pose
+update. Inside an open local outer scope the source-pose detour lets the
+native source writer run, then solves FABRIK on the fresh source palette
+*before* the natural `140207F10` body copy executes in the outer update; a
+second native source update invalidates the pending receipt. The outer
+detour then lets exactly one natural update complete and
+`VerifyNaturalCopy()` (read-only contract verifier in
+`src/core/pose_transfer.h`: layout, map counts, proportion scale records;
+never a body writer) must accept the corrected pending transfer before
+`g_copy_verified` is set, and every public hand/head/combat-bench getter
+refuses without it. The `tests/test_arm_pose_native.cpp` fixture models the
+hook ordering, counts provisional-getter calls and keeps premature
+publications at zero, and refuses commits under five after-read and two
+before-copy mutation cases. RED was demonstrated at the source-pose seam
+(`pose-transfer-red.log`), then green (`pose-transfer-green.log`); the
+adapter RED/GREEN cycle is recorded in `ik-input-red.log`.
+
+**Offline receipts (fresh at wrap time).** Debug build exit 0; Debug CTest
+**88/88** (`build/verification/embodiment-wrap/debug-ctest-wrap.log`); the
+four arm tests x50 green with zero failures (`arm-4x50-wrap.log` /
+`arm-4x50-wrap-fails.txt` = 0); eighteen settings/menu/input/camera/xr/
+diagnostics/calibration/tracking tests x50 green with zero failures
+(`sweep-18x50-wrap.log`). The seam RED/GREEN logs from the run itself are
+`pose-transfer-red.log`, `pose-transfer-green.log` and `ik-input-red.log`.
+`pwsh -NoProfile -File tools/auto_verify.ps1` completed earlier in this run
+(18:53:15Z, after the last source edit at 14:24:38 local; a full-tree mtime
+scan confirms no packaged input changed after that build): Release CTest
+**88/88**, doctor PASS, `dist/DSVR-latest-x64.zip` SHA-256
+`883f4f428478b7dbb40715748d493d3824eda4b50fc5a5665dd6ea314ad4eb14`
+with packaged `DSVR.dll`
+`4c026540e676646cfde6da330b2c0478b2d5e3632f6ccb17f1edfdbe54393bdc`,
+`dinput8.dll` `e8f1a44455c9fa8600de55afe9c6dcc167f3b7d2406f2421096075eb0cb60169`,
+`DSVR-Setup.exe` `996e48643a8b6d50ed7a61997456b3806030d9217c7247c10b1750dffb02b339`
+(per `dist/DSVR-latest-verification.json`).
+
+**Wrap verdict.** The seam and its contract are offline-verified only. The
+new hooks have never executed against the live game: live publication through
+`g_copy_verified`, equipment/animation-state variant maps, armor/attachment
+and crouch behavior (F3), headset comfort and the neck feature all remain
+open. F2 stays unchecked in the execution guide; the runbook's new
+"Verified native copy publication" row is the next live probe. Nothing new
+was deployed: the game directory still holds the restored packaged
+`304A63FC...` DLL, and this fresh package was not installed (operator was
+logged in during preflight; deployment belongs to the next live probe, which
+the capture script performs inside its own transaction).
+
+
 ### Source wrap committed, 23 October 2026
 
 The verified wrap checkpoint above was committed locally as `763d198`
@@ -581,12 +710,20 @@ Global apparent sizing is not proof of an independently resized skinned body.
 
 ## Exact resume action
 
-Do not restart broad reconnaissance. For F2, recover the native source->body
-index/proportion transfer in `140207F10` and choose a before-copy source seam or
-verified final-body owner; current after-copy source writing cannot propagate
-to run-7's distinct body palette. Any protected observation must collect the
-actual assembly root at +0x20, not reuse the misserialized capture field.
-Do not remove the alias/root guards to manufacture a live write.
+Do not restart broad reconnaissance. For F2, the `140207F10` source->body
+transfer is recovered (69-entry identity map plus proportion records for the
+captured resource; see `docs/ARM_IK_EVIDENCE.md`), and the before-copy source
+seam is implemented with offline regressions. The next F2 step is the live
+probe: the runbook "Verified native copy publication" row, driven by
+`tools/run_pose_capture.ps1` with observer re-anchor
+`pose-transfer-20261023-140810` watching the publication gate. Do not
+hardcode the captured identity map or proportion constants for other
+equipment variants or animation states; capture per-variant contracts first.
+Assembly roots stay at +0x20. Do not remove the copy-verification gate to
+manufacture a live write. Observe the live gate through the `ArmIK: native
+body copy verified=... refused=...` log lines and the retained observer
+`build/verification/embodiment-wrap/dsvr-pose-transfer-observe.py`, inside
+the protected `tools/run_pose_capture.ps1` transaction.
 
 Independent D probe: find the producers/owners of the two counters polled at
 `1411CDE10..46` and the natural executant `1411C2F50`; correlate camera/plan and

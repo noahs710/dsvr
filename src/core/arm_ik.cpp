@@ -24,15 +24,21 @@
 #include "head_rider.h"
 #include "combat_contact.h"
 #include "hand_math.h"
+#include "pose_transfer.h"
 
 namespace dsvr {
 namespace {
 constexpr std::uintptr_t kPlayerPoseUpdate=0x357a20;
+constexpr std::uintptr_t kSourcePoseUpdate=0x320980;
 constexpr std::uintptr_t kPlayerPoseVtable=0x13251f0;
 constexpr std::uintptr_t kPlayerPoseSlot=0xa8;
 constexpr int kBones=80;
 using PoseUpdate=void(__fastcall*)(void*);
-PoseUpdate g_original=nullptr;
+PoseUpdate g_original=nullptr, g_source_original=nullptr;
+thread_local void* g_source_scope=nullptr;
+thread_local bool g_source_seen=false;
+std::atomic<bool> g_copy_verified{false};
+std::uint64_t g_copy_commits=0,g_copy_refusals=0;
 std::atomic<bool> g_enabled{false};
 std::atomic<bool> g_stopping{false};
 std::atomic<bool> g_reset_grip{true};
@@ -81,7 +87,7 @@ std::atomic<unsigned> g_pose_gate{0},g_rig_stop{0};
 constexpr const char* kPoseGateNames[]={
   "none","player vtable","player+0x60 model","model vtable","selected model",
   "override pose set","space != 1","bone count mismatch","model+0x70 data",
-  "rig contract","player+0x850 output","output data mismatch","assembly root mismatch"};
+  "rig contract","player+0x850 output","native copy contract","assembly root mismatch"};
 constexpr const char* kRigStopNames[]={
   "none","flver read/type","counts mismatch","entries read","bone missing",
   "weapon parent != hand","forearm twist parent != upper","upper parent != clavicle",
@@ -139,6 +145,7 @@ ArmPoleSmoother g_pole_smooth[2];
 ArmBendState g_bend_state[2];
 std::uint64_t g_pole_seq=~0ull,g_pole_epoch=~0ull,g_pole_revision=~0ull,g_pole_ms[2]{};
 void InvalidateHands(bool reset_bench=true) {
+  g_copy_verified.store(false,std::memory_order_release);
   { std::lock_guard<std::mutex> lock(g_hands_mutex);g_hands={};g_head_delta={};
     if (reset_bench) g_bench={}; }
 }
@@ -305,12 +312,56 @@ bool ReadRig(std::uintptr_t model,std::uintptr_t data) {
   g_pole_epoch=~0ull; g_pole_revision=~0ull;
   return true;
 }
-void __fastcall PoseUpdateDetour(void* self) {
+struct NativeCopyState {
+  std::uintptr_t output=0,data=0,map=0,map_data=0,resource_owner=0,resource=0,records=0;
+  std::array<unsigned char,0x20> header{};
+  PoseCopyLayout layout;
+  bool operator==(const NativeCopyState&) const = default;
+};
+struct PendingNativeCopy {
+  bool ready=false;
+  std::uintptr_t player=0,model=0,source_data=0;
+  NativeCopyState transfer;
+  ArmPoseMatrix root{};
+  std::array<ArmPoseMatrix,kBones> source{};
+} g_pending_copy;
+
+// This reads the contract observed at 357A2E/357A7F. It never invokes the
+// copy routine or writes its destination, proportions, roots or resources.
+bool ReadNativeCopyState(std::uintptr_t player,NativeCopyState& out) {
+  out={};
+  if (!GuardedRead(player+0x850,out.output) || !out.output ||
+      !GuardedRead(out.output+0x60,out.data) || !out.data ||
+      !GuardedRead(out.output+0x5c,out.layout.destination_count) ||
+      !out.layout.destination_count || out.layout.destination_count>kBones ||
+      !GuardedRead(player+0x858,out.map) || !out.map ||
+      !GuardedRead(out.map+8,out.layout.source_count) ||
+      !out.layout.source_count || out.layout.source_count>kBones ||
+      !GuardedRead(out.map+0x10,out.map_data) || !out.map_data ||
+      !GuardedReadBytes(out.map_data,out.layout.destination.data(),
+                       out.layout.source_count*sizeof(short)) ||
+      !GuardedRead(out.output+0x18,out.resource_owner) || !out.resource_owner)
+    return false;
+  out.resource=out.resource_owner+0xe0;
+  if (out.resource<out.resource_owner ||
+      !GuardedReadBytes(out.resource,out.header.data(),out.header.size())) return false;
+  out.layout.proportions=(out.header[8]&4)!=0;
+  if (out.layout.proportions) {
+    if (!GuardedRead(out.resource+0x18,out.records) || !out.records ||
+        !GuardedReadBytes(out.records,out.layout.records.data(),
+                         out.layout.destination_count*4) ||
+        !GuardedReadBytes(player+0x860,out.layout.values.data(),sizeof(out.layout.values)))
+      return false;
+  }
+  if(out.data==g_rig.data)return true;  // source snapshot is validated separately
+  std::array<ArmPoseMatrix,kBones> readable{};
+  return GuardedReadBytes(out.data,readable.data(),
+                         out.layout.destination_count*sizeof(ArmPoseMatrix));
+}
+
+void RetargetSourcePose(void* self) {
   const bool local_player_pose=GetCurrentThreadId()==g_owner_thread.load() &&
       reinterpret_cast<std::uintptr_t>(self)==g_targets.player;
-  CpuStageScope native_time(CpuStage::NativePose,local_player_pose);
-  g_original(self);  // Complete the native PlayerIns update and bone writer first.
-  native_time.Stop();
   CpuStageScope mod_time(CpuStage::ArmRetarget,local_player_pose);
   if (g_stopping.load() || !g_enabled.load()) return;
   if (GetCurrentThreadId()!=g_owner_thread.load()) { ++g_foreign_visits; return; }
@@ -356,6 +407,7 @@ void __fastcall PoseUpdateDetour(void* self) {
   std::uintptr_t model=0,selected=0,override_pose=0,data=0;
   std::uintptr_t output=0,output_data=0;
   unsigned space=0,count=0;
+  NativeCopyState transfer;
   unsigned gate=0;
     if (!Type(player,0x13251f0)) gate=1;
     else if (!GuardedRead(player+0x60,model) || !model) gate=2;
@@ -367,11 +419,12 @@ void __fastcall PoseUpdateDetour(void* self) {
   else if (!GuardedRead(model+0x70,data) || !data) gate=8;
   else if (!ReadRig(model,data)) gate=9;
   else if (!GuardedRead(player+0x850,output) || !output) gate=10;
-  // Qwen: run-7's real body copy has a DISTINCT palette, unlike this adapter's
-  // accepted alias fixture. Keep that path refused until its index remap and
-  // optional native proportion transforms are owned; deleting this check only
-  // writes the animation source after the visible-body copy already happened.
-  else if (!GuardedRead(output+0x60,output_data) || output_data!=data) gate=11;
+  // This is the natural source-writer return, BEFORE 140207F10. Read the
+  // actual bounded remap/proportion owner; native code will perform the copy.
+  // No identity-map assumption, final-body write or native replay is involved.
+  else if (!ReadNativeCopyState(player,transfer) || transfer.output!=output ||
+           !PoseCopyValid(transfer.layout,g_rig.owned)) gate=11;
+  output_data=transfer.data;
   if (gate) { if (g_pose_gate.exchange(gate)!=gate) ReportGate(); g_torso_smooth.Reset(); return; }
   ArmPoseMatrix root{},assembly_root{};
   std::array<ArmPoseMatrix,kBones> before{},corrected{},shoulder_scratch{};
@@ -413,11 +466,9 @@ void __fastcall PoseUpdateDetour(void* self) {
   // Refuse divergence; never "repair" either native root by writing it here.
   // Compare the FULL snapshot: `root` above is now translation-free solely
   // for target inversion, not the coordinate frame held by either native owner.
-  for (int i=0;i<12;++i)
-    if (!std::isfinite(assembly_root.m[i]) || assembly_root.m[i]!=root_before.m[i]) {
-      if(g_pose_gate.exchange(12)!=12) ReportGate();
-      g_torso_smooth.Reset();return;
-    }
+  // Assembly still contains the preceding native copy here. Do not require
+  // its stale root to equal the newly animated source. The outer hook checks
+  // complete root coherence AFTER the natural copy, before exposing a commit.
   if (g_pose_gate.exchange(0)) ReportGate();
   // Measure before any mod correction, never from the previously solved arm.
   // Anatomy is rig-bound, not animated. Freeze a valid measurement so native
@@ -720,8 +771,10 @@ void __fastcall PoseUpdateDetour(void* self) {
       current_equipment.weapon_id[1]!=equipment.weapon_id[1] ||
       current_equipment.native_stance!=equipment.native_stance) return;
   }
-  if (!GuardedRead(player+0x850,current_output) || current_output!=output ||
-      !GuardedRead(current_output+0x60,current_output_data) || current_output_data!=data ||
+  NativeCopyState current_transfer;
+  if (!ReadNativeCopyState(player,current_transfer) || current_transfer!=transfer ||
+      !GuardedRead(player+0x850,current_output) || current_output!=output ||
+      !GuardedRead(current_output+0x60,current_output_data) || current_output_data!=output_data ||
       !GuardedRead(player+0x60,current_model) || current_model!=model ||
       !GuardedRead(model+0x70,current_data) || current_data!=data ||
       !GuardedRead(model+0x128,current_selected) || current_selected!=selected ||
@@ -761,6 +814,12 @@ void __fastcall PoseUpdateDetour(void* self) {
     written[bone]=true;
   }
   if (committed) {
+    g_pending_copy.ready=true;g_pending_copy.player=player;
+    g_pending_copy.model=model;g_pending_copy.source_data=data;
+    g_pending_copy.root=root_before;g_pending_copy.transfer=transfer;
+    g_pending_copy.source=before;
+    for(int bone=0;bone<kBones;++bone)
+      if(written[bone])g_pending_copy.source[bone]=corrected[bone];
     {
       std::lock_guard<std::mutex> lock(g_hands_mutex);
       g_hands = published;
@@ -906,7 +965,8 @@ void __fastcall PoseUpdateDetour(void* self) {
         }
       } else { g_bench={}; }
     }
-    ++g_pose_commits; g_last_commit=g_targets.sequence;
+    // Publication is provisional until the outer hook verifies native copy.
+    // Every public hand/head/bench getter checks g_copy_verified.
     // Publish solved-vs-native head displacement for diagnostics only.
     // It must never feed the camera (that feedback loop detached the
     // viewpoint from the body in live testing).
@@ -922,6 +982,84 @@ void __fastcall PoseUpdateDetour(void* self) {
       }
     }
   }
+}
+
+bool VerifyNaturalCopy() {
+  GuardedReadScope reads;
+  const auto& pending=g_pending_copy;
+  NativeCopyState current;
+  std::uintptr_t model=0,data=0,selected=0;
+  unsigned space=0;
+  ArmPoseMatrix model_root{},body_root{};
+  std::array<ArmPoseMatrix,kBones> source{},body{};
+  if (!pending.ready || LocalPlayer()!=pending.player ||
+      !ReadNativeCopyState(pending.player,current) || current!=pending.transfer ||
+      !GuardedRead(pending.player+0x60,model) || model!=pending.model ||
+      !GuardedRead(model+0x70,data) || data!=pending.source_data ||
+      !GuardedRead(model+0x128,selected) || selected!=model+0x60 ||
+      !GuardedRead(current.output+0x58,space) || space!=1 ||
+      !GuardedReadBytes(model+0x30,&model_root,sizeof model_root) ||
+      std::memcmp(&model_root,&pending.root,sizeof model_root)!=0 ||
+      !GuardedReadBytes(current.output+0x20,&body_root,sizeof body_root) ||
+      !GuardedReadBytes(data,source.data(),sizeof source) ||
+      std::memcmp(source.data(),pending.source.data(),sizeof source)!=0 ||
+      !GuardedReadBytes(current.data,body.data(),current.layout.destination_count*sizeof(ArmPoseMatrix)))
+    return false;
+  for(unsigned i=0;i<12;++i)
+    if(!std::isfinite(body_root.m[i]) || body_root.m[i]!=model_root.m[i])return false;
+  return PoseCopyMatches(current.layout,source,body,g_rig.owned);
+}
+
+void __fastcall SourcePoseUpdateDetour(void* self) {
+  // Shared native animation writer: foreign actors/callers always run normally.
+  // Only the natural, owner-thread local PlayerIns outer update opens a scope.
+  g_source_original(self);
+  if (self==g_source_scope && !g_source_seen) {
+    g_source_seen=true;
+    RetargetSourcePose(self);
+  } else if (!g_source_scope && GetCurrentThreadId()==g_owner_thread.load() &&
+             reinterpret_cast<std::uintptr_t>(self)==g_targets.player) {
+    InvalidateHands();  // another native source update invalidates the last copy receipt
+  }
+}
+
+void __fastcall PoseUpdateDetour(void* self) {
+  const bool local=GetCurrentThreadId()==g_owner_thread.load() &&
+      reinterpret_cast<std::uintptr_t>(self)==g_targets.player;
+  const auto previous_scope=g_source_scope;
+  const bool previous_seen=g_source_seen;
+  const bool own=local && !previous_scope && g_enabled.load() && !g_stopping.load();
+  g_source_scope=own?self:nullptr;g_source_seen=false;
+  if(own) {
+    g_pending_copy.ready=false;
+    g_copy_verified.store(false,std::memory_order_release);
+  }
+  {
+    CpuStageScope native_time(CpuStage::NativePose,local);
+    // Exactly one natural animation + remap/proportion copy. The inner hook
+    // solves the freshly animated source before this caller copies it.
+    g_original(self);
+  }
+  g_source_scope=previous_scope;g_source_seen=previous_seen;
+  if(!own)return;
+  if(g_pending_copy.ready && !g_stopping.load() && VerifyNaturalCopy()) {
+    ++g_copy_commits;++g_pose_commits;g_last_commit=g_targets.sequence;
+    g_copy_verified.store(true,std::memory_order_release);
+    if(g_copy_commits==1 || g_copy_commits%300==0)
+      DSVR_LOG("ArmIK: native body copy verified=%llu refused=%llu map=%u body=%u distinct=%d seq=%llu",
+          (unsigned long long)g_copy_commits,(unsigned long long)g_copy_refusals,
+          g_pending_copy.transfer.layout.source_count,g_pending_copy.transfer.layout.destination_count,
+          (int)(g_pending_copy.source_data!=g_pending_copy.transfer.data),
+          (unsigned long long)g_targets.sequence);
+  } else {
+    if(g_pending_copy.ready) {
+      ++g_copy_refusals;
+      if(g_copy_refusals==1 || g_copy_refusals%300==0)
+        DSVR_WARN("ArmIK: natural body copy verification refused; no committed hand/head/bench publication");
+    }
+    InvalidateHands();g_reset_torso.store(true);
+  }
+  g_pending_copy.ready=false;
 }
 }  // namespace
 void ArmIkResetCalibration() {
@@ -969,12 +1107,14 @@ bool ArmIkNativeStature(float& head_above_origin, float& shoulder_width,
 bool ArmIkHeadWorldDelta(Vec3& delta_world, std::uint64_t& sequence,
                          std::uint64_t& epoch) {
   delta_world={};sequence=0;epoch=0;
-  if (XrMenuPresentationActive() || CalibrationCapturesInput()) return false;
+  if (!g_copy_verified.load(std::memory_order_acquire) ||
+      XrMenuPresentationActive() || CalibrationCapturesInput()) return false;
   TrackingFrame frame{};
   if (!XrLatestTrackingFrame(frame)) return false;
   std::lock_guard<std::mutex> lock(g_hands_mutex);
   const auto now=GetTickCount64();
-  if (!g_head_delta.sequence || g_head_delta.sequence>frame.sequence ||
+  if (!g_copy_verified.load(std::memory_order_acquire) ||
+      !g_head_delta.sequence || g_head_delta.sequence>frame.sequence ||
       g_head_delta.epoch!=frame.space_epoch ||
       now<g_head_delta.captured_ms || now-g_head_delta.captured_ms>100) return false;
   delta_world=g_head_delta.world;sequence=g_head_delta.sequence;
@@ -982,12 +1122,14 @@ bool ArmIkHeadWorldDelta(Vec3& delta_world, std::uint64_t& sequence,
 }
 bool ArmIkLatestHands(ArmIkHands& out) {
   out={};
-  if (XrMenuPresentationActive() || CalibrationCapturesInput()) return false;
+  if (!g_copy_verified.load(std::memory_order_acquire) ||
+      XrMenuPresentationActive() || CalibrationCapturesInput()) return false;
   TrackingFrame frame{};
   if (!XrLatestTrackingFrame(frame)) return false;
   std::lock_guard<std::mutex> lock(g_hands_mutex);
   const auto now=GetTickCount64();
-  if (!g_hands.sequence || g_hands.sequence>frame.sequence ||
+  if (!g_copy_verified.load(std::memory_order_acquire) ||
+      !g_hands.sequence || g_hands.sequence>frame.sequence ||
       g_hands.sequence!=XrAppliedCameraSequence() || g_hands.epoch!=frame.space_epoch ||
       now<g_hands.captured_ms || now-g_hands.captured_ms>100) return false;
   out=g_hands;return true;
@@ -996,14 +1138,16 @@ bool ArmIkCombatBench(CombatBenchSnapshot& out) {
   out = {};
   const auto cfg=DiagnosticsCurrentConfig();
   out.bench_on=cfg.combat_test_bench;
-  if (!out.bench_on || !cfg.motion_attacks || cfg.observer_only ||
+  if (!g_copy_verified.load(std::memory_order_acquire) ||
+      !out.bench_on || !cfg.motion_attacks || cfg.observer_only ||
       !cfg.vr_enabled || !cfg.arm_ik_enabled || cfg.arm_ik_log_only ||
       XrMenuPresentationActive() || CalibrationCapturesInput()) return false;
   TrackingFrame frame{};
   if (!XrLatestTrackingFrame(frame)) return false;
   std::lock_guard<std::mutex> lock(g_hands_mutex);
   const auto now = GetTickCount64();
-  if (!frame.focused || !frame.orientation_valid || !frame.position_valid ||
+  if (!g_copy_verified.load(std::memory_order_acquire) ||
+      !frame.focused || !frame.orientation_valid || !frame.position_valid ||
       !g_bench.sequence || g_bench.sequence > frame.sequence ||
       g_bench.epoch != frame.space_epoch ||
       now < g_bench.captured_ms || now - g_bench.captured_ms > 250)
@@ -1032,18 +1176,29 @@ bool ArmIkHookInstall() {
       !GuardedRead(vtable+kPlayerPoseSlot,method) || method!=module+kPlayerPoseUpdate)
     return false;
   const auto target=reinterpret_cast<void*>(module+kPlayerPoseUpdate);
-  if (g_original) {
-    const auto status=MH_EnableHook(target);
-    g_enabled.store(status==MH_OK || status==MH_ERROR_ENABLED);
-    return g_enabled.load();
+  const auto source=reinterpret_cast<void*>(module+kSourcePoseUpdate);
+  if (!g_original) {
+    constexpr unsigned char outer_bytes[]={0x40,0x56,0x48,0x83,0xec,0x60,0x48,0x8b,0xf1,0xe8,0x52,0x8f,0xfc,0xff};
+    constexpr unsigned char source_bytes[]={0x4c,0x8b,0x41,0x60,0x41,0xb1,0x01,0x41,0x83,0x88,0x84,0x00,0x00,0x00,0x01};
+    if (!BytesMatch(module+kPlayerPoseUpdate,outer_bytes,sizeof outer_bytes) ||
+        !BytesMatch(module+kSourcePoseUpdate,source_bytes,sizeof source_bytes)) return false;
+    const auto init=MH_Initialize();
+    if (init!=MH_OK && init!=MH_ERROR_ALREADY_INITIALIZED) return false;
+    if (MH_CreateHook(source,reinterpret_cast<void*>(&SourcePoseUpdateDetour),
+                      reinterpret_cast<void**>(&g_source_original))!=MH_OK) return false;
+    if (MH_CreateHook(target,reinterpret_cast<void*>(&PoseUpdateDetour),
+                      reinterpret_cast<void**>(&g_original))!=MH_OK) {
+      MH_RemoveHook(source);g_source_original=nullptr;return false;
+    }
   }
-  const auto init=MH_Initialize();
-  if (init!=MH_OK && init!=MH_ERROR_ALREADY_INITIALIZED) return false;
-  if (MH_CreateHook(target,reinterpret_cast<void*>(&PoseUpdateDetour),
-                    reinterpret_cast<void**>(&g_original))!=MH_OK) return false;
-  if (MH_EnableHook(target)!=MH_OK) { MH_RemoveHook(target); g_original=nullptr; return false; }
+  const auto source_status=MH_EnableHook(source);
+  if (source_status!=MH_OK && source_status!=MH_ERROR_ENABLED) return false;
+  const auto outer_status=MH_EnableHook(target);
+  if (outer_status!=MH_OK && outer_status!=MH_ERROR_ENABLED) {
+    MH_DisableHook(source);return false;
+  }
   g_enabled.store(true);
-  DSVR_LOG("ArmIK: PlayerIns +0xA8 post-writer hook installed; live headset body quality remains unverified until the guided session");
+  DSVR_LOG("ArmIK: scoped source-before-native-copy hooks installed; body publication requires verified native remap/proportions and roots");
   return true;
 }
 void ArmIkHookUninstall() {
@@ -1053,6 +1208,7 @@ void ArmIkHookUninstall() {
   g_enabled.store(false);
   InvalidateHands();
   if (g_original) MH_DisableHook(reinterpret_cast<void*>(ModuleBase(nullptr)+kPlayerPoseUpdate));
+  if (g_source_original) MH_DisableHook(reinterpret_cast<void*>(ModuleBase(nullptr)+kSourcePoseUpdate));
   // An already-running detour may still need its trampoline; keep it allocated.
 }
 void ArmIkTick(const TrackingFrame& frame) {

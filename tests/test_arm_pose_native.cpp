@@ -27,6 +27,10 @@ std::array<unsigned char,0x80> world{};
 std::array<unsigned char,0x900> player{}, other{};
 std::array<unsigned char,0x150> model{};
 std::array<unsigned char,0x80> pose_output{};
+std::array<unsigned char,0x18> copy_map{};
+std::array<short,80> copy_indices{};
+std::array<unsigned char,0x110> body_resource{};
+std::array<unsigned char,320> proportion_records{};
 std::array<unsigned char,0x30> flver{};
 std::array<unsigned char,80*0x30> entries{}, rebound_entries{};
 std::array<std::array<wchar_t,24>,80> names{};
@@ -44,6 +48,8 @@ bool capture_input=false;
 bool equipment_available=false;
 unsigned mutate_after_pose_read=0;
 unsigned output_root_mode=0;
+bool native_proportion_test=false;
+unsigned mutate_before_copy=0,premature_publications=0;
 unsigned originals=0,writes=0,forbidden=0,creates=0,disables=0;
 std::array<unsigned,80> writes_by_bone{};
 bool write_this_original=false;
@@ -56,15 +62,43 @@ bool ReadScopeActive() {
 }
 HANDLE enable_entered=nullptr,enable_continue=nullptr;
 using Update=void(__fastcall*)(void*);
-Update callback=nullptr;
+Update callback=nullptr,source_callback=nullptr;
 Vec3 camera_anchor{10,20,30},camera_lean{};
 template<class T> std::uintptr_t Ptr(T& v) { return reinterpret_cast<std::uintptr_t>(v.data()); }
 template<class T,class V> void Put(T& v,unsigned offset,V value) { std::memcpy(v.data()+offset,&value,sizeof(value)); }
 ArmPoseMatrix Pose(float x,float y,float z) { return {{1,0,0,x,0,1,0,y,0,0,1,z}}; }
-void __fastcall Original(void*) {
-  ++originals;if(ReadScopeActive())++original_scope_leaks;poses=copied_body=native;
-  // Native FUN_140207f10 copies the model root into the separate assembly
-  // root, even when the assembly palette data aliases the model palette.
+void __fastcall SourceOriginal(void*) {
+  if(ReadScopeActive())++original_scope_leaks;
+  poses=copied_body=native;
+  writes_by_bone.fill(0);write_this_original=false;
+}
+void __fastcall Original(void* self) {
+  ++originals;if(ReadScopeActive())++original_scope_leaks;
+  if(source_callback)source_callback(self);else SourceOriginal(self);
+  // A source write alone must never be visible as a committed body pose.
+  if(write_this_original) {
+    ArmIkHands provisional;
+    if(ArmIkLatestHands(provisional))++premature_publications;
+  }
+  if(mutate_before_copy==1)std::swap(copy_indices[26],copy_indices[43]);
+  if(mutate_before_copy==2)proportion_records[26*4+1]=0xf1;
+  mutate_before_copy=0;
+  // Natural native copy AFTER the source hook, not an adapter-side replay.
+  std::uintptr_t destination=0;std::memcpy(&destination,pose_output.data()+0x60,8);
+  if(destination==Ptr(copied_body)) {
+    unsigned count=0;std::memcpy(&count,copy_map.data()+8,4);
+    for(unsigned i=0;i<count && i<copy_indices.size();++i) {
+      const int target=copy_indices[i];
+      if(target>=0 && target<80) {
+        copied_body[target]=poses[i];
+        // Independent literal from the observed -0.5 / coefficient 10 case.
+        // Do not call the production verifier to manufacture this fixture.
+        if(native_proportion_test && (target==26 || target==43))
+          for(unsigned row=0;row<3;++row)for(unsigned column:{1u,2u})
+            copied_body[target].m[row*4+column]*=.95f;
+      }
+    }
+  }
   ArmPoseMatrix output_root;
   std::memcpy(&output_root,model.data()+0x30,sizeof(output_root));
   if(output_root_mode==1) output_root.m[3]+=.05f;
@@ -72,14 +106,15 @@ void __fastcall Original(void*) {
   if(output_root_mode==3) output_root.m[0]=NAN;
   if(output_root_mode==4) output_root.m[1]=-output_root.m[1]; // +/-zero equal
   std::memcpy(pose_output.data()+0x20,&output_root,sizeof(output_root));
-  writes_by_bone.fill(0);write_this_original=false;
 }
 void Fresh() { latest.captured_ms=GetTickCount64();camera_sequence=latest.sequence; }
 bool Copy(std::uintptr_t address,void* out,std::size_t size) {
   struct Range { std::uintptr_t start; std::size_t size; };
   std::vector<Range> ranges{{Ptr(world),world.size()},{Ptr(player),player.size()},
       {Ptr(other),other.size()},{Ptr(model),model.size()},{Ptr(pose_output),pose_output.size()},
-      {Ptr(flver),flver.size()},
+      {Ptr(flver),flver.size()},{Ptr(copy_map),copy_map.size()},
+      {Ptr(copy_indices),sizeof(copy_indices)},{Ptr(body_resource),body_resource.size()},
+      {Ptr(proportion_records),proportion_records.size()},
       {Ptr(entries),entries.size()},{Ptr(rebound_entries),rebound_entries.size()},
        {Ptr(poses),sizeof(poses)},{Ptr(copied_body),sizeof(copied_body)}};
   for (auto& text:names) ranges.push_back({Ptr(text),sizeof(text)});
@@ -96,8 +131,12 @@ void Name(int index,const wchar_t* name,int parent) {
 MH_STATUS WINAPI MH_Initialize() { return MH_OK; }
 MH_STATUS WINAPI MH_CreateHook(LPVOID target,LPVOID detour,LPVOID* original) {
   ++creates;
-  if (target!=reinterpret_cast<void*>(base+0x357a20)) ++forbidden;
-  callback=reinterpret_cast<Update>(detour);*original=reinterpret_cast<void*>(&Original);return MH_OK;
+  if (target==reinterpret_cast<void*>(base+0x357a20)) {
+    callback=reinterpret_cast<Update>(detour);*original=reinterpret_cast<void*>(&Original);
+  } else if(target==reinterpret_cast<void*>(base+0x320980)) {
+    source_callback=reinterpret_cast<Update>(detour);*original=reinterpret_cast<void*>(&SourceOriginal);
+  } else ++forbidden;
+  return MH_OK;
 }
 MH_STATUS WINAPI MH_EnableHook(LPVOID) {
   if (enable_entered) { SetEvent(enable_entered); WaitForSingleObject(enable_continue,INFINITE); }
@@ -109,7 +148,8 @@ namespace dsvr {
 void LogWrite(LogLevel,const char*,int,const char*,...) {}
 std::uintptr_t ModuleBase(const wchar_t*) { return base; }
 bool BytesMatch(std::uintptr_t address,const void*,std::size_t size) {
-  return signature && address==base+0x320980 && size==15;
+  return signature && ((address==base+0x320980 && size==15) ||
+                       (address==base+0x357a20 && size==14));
 }
 bool GuardedReadBytes(std::uintptr_t address,void* out,std::size_t size) {
   if(ReadScopeActive())++scoped_reads;else ++unscoped_reads;
@@ -370,10 +410,16 @@ int main() {
     latest.arm[side].pos[1]=1.1f;latest.arm[side].pos[2]=-.2f;
   }
   Put(player,0x850,Ptr(pose_output));Put(pose_output,0x60,Ptr(poses));
+  Put(pose_output,0x58,1u);Put(pose_output,0x5c,80u);
+  Put(pose_output,0x18,Ptr(body_resource));
+  Put(player,0x858,Ptr(copy_map));Put(copy_map,8,69u);Put(copy_map,0x10,Ptr(copy_indices));
+  for(unsigned i=0;i<copy_indices.size();++i)copy_indices[i]=static_cast<short>(i);
   player_pose_method=base+0x320980;
   CHECK(!ArmIkHookInstall() && creates==0);
+  player_pose_method=base+0x357a20;signature=false;
+  CHECK(!ArmIkHookInstall() && creates==0);signature=true;
   player_pose_method=base+0x357a20;
-  Fresh();ArmIkTick(latest);CHECK(callback && creates==1);
+  Fresh();ArmIkTick(latest);CHECK(callback && source_callback && creates==2);
   callback(player.data());CHECK(originals==1 && writes==1 && forbidden==0);
   CHECK(original_scope_leaks==0 && scoped_reads>0 && !ReadScopeActive());
   CHECK(writes_by_bone[0]==0 && writes_by_bone[79]==0);
@@ -390,15 +436,12 @@ int main() {
   const auto after_first_commit=writes;
   Put(pose_output,0x60,Ptr(other));
   Fresh();ArmIkTick(latest);callback(player.data());
-  CHECK(writes==after_first_commit); // output buffer must alias selected ChrModel poses
-  // Qwen: retained run-7 after-copy samples have TWO valid, distinct palettes.
-  // Keep that real pattern distinct from a bad pointer: this adapter still
-  // refuses it until source->body remapping/scale/attachment ownership is proven.
-  // A synthetic aliased fixture passing above is not live retarget acceptance.
+  CHECK(writes==after_first_commit); // invalid destination storage still refuses
   Put(pose_output,0x60,Ptr(copied_body));
   Fresh();ArmIkTick(latest);callback(player.data());
-  CHECK(writes==after_first_commit);
-  CHECK(std::memcmp(copied_body.data(),native.data(),sizeof native)==0);
+  CHECK(writes==after_first_commit+1);
+  CHECK(std::memcmp(&copied_body[26],&poses[26],sizeof(ArmPoseMatrix))==0);
+  CHECK(std::memcmp(&copied_body[43],&poses[43],sizeof(ArmPoseMatrix))==0);
   Put(pose_output,0x60,Ptr(poses));
   // Native head/neck geometry filtering is separate from skeletal retargeting.
   // Bone matrices stay nonsingular even while the head-visibility setting is on.
@@ -408,7 +451,7 @@ int main() {
   CHECK(std::memcmp(model.data()+0x30,&root,sizeof(root))==0);
   // Root movement after the camera sample cannot drag targets away from this body.
   root.m[3]=100;root.m[7]=200;root.m[11]=300;std::memcpy(model.data()+0x30,&root,sizeof(root));
-  Fresh();ArmIkTick(latest);callback(player.data());CHECK(writes==2);
+  Fresh();ArmIkTick(latest);callback(player.data());CHECK(writes==after_first_commit+2);
   CHECK(VLen(VAdd(ArmPoseOrigin(poses[26]),{-.35f,-1.f,.2f}))<1e-5f);
   // Turning a controller in place must turn its own wrist and equipment.
   latest.arm[0].quat[2]=.70710678f;latest.arm[0].quat[3]=.70710678f;
@@ -427,9 +470,8 @@ int main() {
       callback(player.data());
       if(mode==4) CHECK(writes==old_writes+1);
       else {
-        CHECK(writes==old_writes);
-        CHECK(std::memcmp(poses.data(),native.data(),sizeof poses)==0);
-        ArmIkHands refused;CHECK(!ArmIkLatestHands(refused));
+        CHECK(writes==old_writes+1); // source precedes the native root copy
+        ArmIkHands refused;CHECK(!ArmIkLatestHands(refused)); // invalid copy is never published
       }
       CHECK(std::memcmp(model.data()+0x30,&root,sizeof root)==0);
     }
@@ -712,6 +754,66 @@ int main() {
     ++latest.sequence;Fresh();ArmIkTick(latest);callback(player.data());
   }
   CHECK(poses[24].m[0]!=0 && ArmIkLatestHands(published));
+  {
+    // The observed native route has distinct palettes: tracked corrections
+    // must reach the body through the native copy, not stop at source writes.
+    const auto old_writes=writes;
+    Put(pose_output,0x60,Ptr(copied_body));
+    Fresh();ArmIkTick(latest);callback(player.data());
+    CHECK(writes==old_writes+1 && ArmIkLatestHands(published));
+    CHECK(std::memcmp(&copied_body[26],&poses[26],sizeof(ArmPoseMatrix))==0);
+    CHECK(std::memcmp(&copied_body[43],&poses[43],sizeof(ArmPoseMatrix))==0);
+    CHECK(std::memcmp(&copied_body[26],&native[26],sizeof(ArmPoseMatrix))!=0);
+    std::swap(copy_indices[26],copy_indices[43]);
+    ++latest.sequence;Fresh();ArmIkTick(latest);callback(player.data());
+    CHECK(ArmIkLatestHands(published));
+    CHECK(std::memcmp(&copied_body[43],&poses[26],sizeof(ArmPoseMatrix))==0);
+    CHECK(std::memcmp(&copied_body[26],&poses[43],sizeof(ArmPoseMatrix))==0);
+    std::swap(copy_indices[26],copy_indices[43]);
+    for(unsigned bad=0;bad<4;++bad) {
+      const auto before_bad=writes;
+      if(bad==0)copy_indices[26]=-1; // an owned hand cannot be a map hole
+      if(bad==1)copy_indices[26]=43; // duplicate destinations are ambiguous
+      if(bad==2)copy_indices[26]=80; // destination outside the actual palette
+      if(bad==3)Put(copy_map,8,81u); // source extent cannot exceed the source palette
+      ++latest.sequence;Fresh();ArmIkTick(latest);callback(player.data());
+      CHECK(writes==before_bad && !ArmIkLatestHands(published));
+      copy_indices[26]=26;Put(copy_map,8,69u);
+    }
+    // A hole outside the owned body/arms is legitimate, not an identity map.
+    copy_indices[60]=-1;
+    ++latest.sequence;Fresh();ArmIkTick(latest);callback(player.data());
+    CHECK(ArmIkLatestHands(published));copy_indices[60]=60;
+    // Authored native proportions must be retained, never erased by copying
+    // the solver's unit bases into the already-transferred visible body.
+    native_proportion_test=true;body_resource[0xe8]=4;
+    Put(body_resource,0xf8,Ptr(proportion_records));
+    for(unsigned row=0;row<80;++row)proportion_records[row*4]=0xf0;
+    for(unsigned row:{26u,43u}) {
+      proportion_records[row*4]=0x0c;proportion_records[row*4+1]=0xf6;
+      proportion_records[row*4+2]=30;
+    }
+    for(unsigned value=0;value<5;++value)Put(player,0x860+value*4,-.5f);
+    ++latest.sequence;Fresh();ArmIkTick(latest);callback(player.data());
+    CHECK(ArmIkLatestHands(published));
+    for(unsigned row:{26u,43u}) {
+      CHECK(VLen(arm_pose_detail::Sub(ArmPoseOrigin(copied_body[row]),ArmPoseOrigin(poses[row])))<1e-6f);
+      CHECK(std::fabs(VLen(arm_pose_detail::Column(copied_body[row],1))-.95f)<1e-5f);
+      CHECK(std::fabs(VLen(arm_pose_detail::Column(poses[row],1))-1.f)<1e-5f);
+    }
+    for(unsigned mutation:{1u,2u}) {
+      mutate_before_copy=mutation;
+      ++latest.sequence;Fresh();ArmIkTick(latest);callback(player.data());
+      CHECK(!ArmIkLatestHands(published)); // post-source layout replacement is not a commit
+      copy_indices[26]=26;copy_indices[43]=43;proportion_records[26*4+1]=0xf6;
+    }
+    body_resource[0xe8]=0;native_proportion_test=false;
+    ++latest.sequence;Fresh();ArmIkTick(latest);callback(player.data());
+    CHECK(ArmIkLatestHands(published) && premature_publications==0);
+    const auto before_unscoped=writes;source_callback(player.data());
+    CHECK(writes==before_unscoped && !ArmIkLatestHands(published));
+    Put(pose_output,0x60,Ptr(poses));
+  }
   // Losing controllers must leave animation intact. The independent native
   // mesh filter owns visibility even when no arm can be solved.
   latest.arm[0].valid=latest.arm[1].valid=false;
@@ -783,7 +885,7 @@ int main() {
   CloseHandle(enable_entered);CloseHandle(enable_continue);CloseHandle(stopped);
   enable_entered=enable_continue=nullptr;
   CHECK(serialized && !ArmIkHookInstall());
-  callback(player.data());CHECK(writes==before && disables==1);
-  CHECK(std::memcmp(poses.data(),native.data(),sizeof(poses))==0 && forbidden==0 && creates==1);
+  callback(player.data());CHECK(writes==before && disables==2);
+  CHECK(std::memcmp(poses.data(),native.data(),sizeof(poses))==0 && forbidden==0 && creates==2);
   std::puts("PASS native arm adapter ownership/refusal (memory fixture, not live rendering)");
 }

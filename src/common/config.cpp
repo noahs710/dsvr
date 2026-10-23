@@ -161,6 +161,7 @@ void Apply(Config& c, std::string_view section_raw, std::string_view key_raw,
   } else if (s == "camera") {
     bool b;
     float f;
+    if (k == "eye_height_override" && ParseBool(value, b)) c.eye_height_override = b;
     if (k == "eye_height" && ParseFloat(value, f))
       c.eye_height = Clamp(f, 0.5f, 2.5f);
     if (k == "world_scale" && ParseFloat(value, f))
@@ -407,6 +408,8 @@ bool ConfigSave(const wchar_t* toml_path, const Config& c) {
   fprintf(f, "config_reload_vk = 0x%02x\n\n", (unsigned)c.config_reload_vk);
 
   fprintf(f, "[camera]\n");
+  fprintf(f, "# Calibrated eye height by default; manual override is opt-in in the mod menu.\n");
+  fprintf(f, "eye_height_override = %s\n", c.eye_height_override ? "true" : "false");
   fprintf(f, "eye_height = %s\n", FmtFloat(c.eye_height).c_str());
   fprintf(f, "world_scale = %s\n", FmtFloat(c.world_scale).c_str());
   fprintf(f, "# Horizontal clearance from the player mesh; 0 disables it.\n");

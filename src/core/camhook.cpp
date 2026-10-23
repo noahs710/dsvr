@@ -116,7 +116,7 @@ void __fastcall FollowCamUpdateDetour(void* self, float dt, void* arg3,
     const auto mapping = ResolveCalibrationMapping(CalibrationCurrent(),
         cfg.eye_height, cfg.play_style == "seated", cfg.world_scale,
         native_reach, model_revision, native_head, native_shoulders,
-        cfg.embodiment_fit != "arm");
+        cfg.embodiment_fit != "arm", cfg.eye_height_override);
     if (!mapping.valid) {
       XrRecordCameraSequence(0);
       InputInvalidateHeadDirectedLocomotion();

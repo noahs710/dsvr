@@ -25,6 +25,12 @@ bool DiagnosticsBeginCapture();
 
 // Thread-safe copy of the live config (updated by F7 reloads).
 Config DiagnosticsCurrentConfig();
+// Writer-acknowledged state: a queued request is not an applied/saved receipt.
+struct SettingsSnapshot {
+  Config applied, saved;
+  bool busy = false;
+};
+SettingsSnapshot DiagnosticsSettingsSnapshot();
 // Queue UI changes for the diagnostic writer; no disk I/O on render callbacks.
 bool DiagnosticsRequestConfig(const Config& config, bool save);
 void DiagnosticsRequestLogExport();

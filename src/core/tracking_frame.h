@@ -41,7 +41,9 @@ class TrackingFrames {
   std::uint64_t Publish(TrackingFrame frame) {
     for (int side = 0; side < 2; ++side) {
       if (!FinitePose(frame.hand[side].quat, frame.hand[side].pos))
-        frame.hand[side] = {};
+        frame.hand[side].valid = false;  // aim/buttons have independent validity
+      if (!FinitePose(frame.hand[side].aim_quat, frame.hand[side].aim_pos))
+        frame.hand[side].aim_valid = false;
       if (!FinitePose(frame.arm[side].quat, frame.arm[side].pos))
         frame.arm[side] = {};
     }

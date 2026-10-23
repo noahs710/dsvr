@@ -33,6 +33,10 @@ struct HandSample {
   bool squeeze_held = false;
   bool trigger_held = false;
   bool primary_held = false;
+  // Runtime pointing pose, independent from the grip used by IK/equipment.
+  bool aim_valid = false;
+  float aim_pos[3] = {0, 0, 0};
+  float aim_quat[4] = {0, 0, 0, 1};
 };
 
 // Continuous arm target for the IK driver / H5 (one per logical hand).

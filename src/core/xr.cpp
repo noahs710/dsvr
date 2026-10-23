@@ -180,8 +180,11 @@ void SampleCalibration(const TrackingFrame& frame) {
     floor_valid = floor_valid && std::isfinite(floor_height) && floor_height > .4f &&
                   floor_height < 2.8f;
   }
+  const auto profile=CalibrationCurrent();
+  // A manual view override is not a new anatomical measurement. Without a
+  // floor reference preserve the prior calibration rather than baking it in.
   CalibrationSample(frame, trigger, CameraGameplayReady(), floor_valid, floor_height,
-                     DiagnosticsCurrentConfig().eye_height);
+                     profile.valid ? profile.eye_height_m : Config{}.eye_height);
 }
 
 bool DrainMonoImages() {
@@ -1498,7 +1501,7 @@ bool XrLatestTrackingFrame(TrackingFrame& out) {
 
 MenuPointerState XrMenuPointerInput(unsigned display_width,
                                     unsigned display_height) {
-  // Grip samples are located in g_space by InputPollFrame; the quad's
+  // Aim samples are located in g_space by InputPollFrame; the quad's
   // composition-layer space is also g_space, so no tracking-space conversion
   // is applied here. This getter is consumed on that same Present/render thread.
   const bool spatial_menu = g_running.load() && g_menu_active.load() &&
@@ -1506,31 +1509,33 @@ MenuPointerState XrMenuPointerInput(unsigned display_width,
   TrackingFrame frame{};
   const bool fresh_frame = spatial_menu && XrLatestTrackingFrame(frame);
   const HandSample& right = frame.hand[1];
-  bool tracking_valid = fresh_frame && right.valid;
+  bool tracking_valid = fresh_frame && right.aim_valid;
   Vec3 forward{};
   if (tracking_valid) {
     float norm2 = 0.0f;
-    for (float component : right.quat) norm2 += component * component;
+    for (float component : right.aim_quat) norm2 += component * component;
     if (!std::isfinite(norm2) || norm2 <= 1e-6f) {
       tracking_valid = false;
     } else {
       const float inv_norm = 1.0f / std::sqrt(norm2);
-      forward = BladeDirection(right.quat[0] * inv_norm,
-                               right.quat[1] * inv_norm,
-                               right.quat[2] * inv_norm,
-                               right.quat[3] * inv_norm);
+      forward = QuatRotate({0,0,-1},right.aim_quat[0] * inv_norm,
+                               right.aim_quat[1] * inv_norm,
+                               right.aim_quat[2] * inv_norm,
+                               right.aim_quat[3] * inv_norm);
     }
   }
-  const bool select = right.primary_held || right.trigger_held;
+  const bool select = right.trigger_held && !CalibrationCapturesInput();
   const Config cfg = DiagnosticsCurrentConfig();
   const bool title = g_menu_debounce.Current().state == MenuState::FrontEnd;
   const float aspect = display_height
       ? static_cast<float>(display_width) / display_height : 0.0f;
-  return ProjectMenuPointer(spatial_menu, g_menu_anchored, tracking_valid,
-      select, {right.pos[0], right.pos[1], right.pos[2]}, forward,
+  auto pointer = ProjectMenuPointer(spatial_menu, g_menu_anchored, tracking_valid,
+      select, {right.aim_pos[0], right.aim_pos[1], right.aim_pos[2]}, forward,
       g_menu_anchor, MenuWidth(cfg.menu_distance_m,
           title ? 60.0f : cfg.menu_reading_fov_deg), aspect,
       display_width, display_height);
+  pointer.navigation_select=fresh_frame && right.primary_held;
+  return pointer;
 }
 
 void XrRecordCameraSequence(std::uint64_t sequence) {

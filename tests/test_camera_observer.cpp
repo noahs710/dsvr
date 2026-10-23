@@ -36,6 +36,7 @@ unsigned creates = 0, removes = 0;
 bool active = true, signature = true, fail_enable = false, replace_capture = false;
 bool global_read = true, container_read = true;
 bool calibration_test = false, native_head_available = false;
+bool manual_eye_height = false;
 unsigned camera_applies = 0;
 std::uint64_t stature_revision = 9, applied_sequence = 0;
 dsvr::CalibrationMapping applied_mapping;
@@ -106,7 +107,7 @@ bool VrTraceActive() { return active; }
 std::uint64_t VrTraceCaptureId() { return capture; }
 Config DiagnosticsCurrentConfig() {
   MutationCall();
-  Config c;
+  Config c;c.eye_height_override=manual_eye_height;c.eye_height=1.82f;
   c.vr_enabled = c.headlook_enabled = c.xr_input_enabled = c.arm_ik_enabled = true;
   return c;
 }
@@ -222,9 +223,17 @@ int main() {
   detour(follow, 0.25f, &words, follow);
   CHECK(camera_applies == 2 && applied_mapping.fit == CalibrationFit::Head &&
         applied_mapping.model_revision == 9);
+  const auto automatic_scale=applied_mapping.world_scale;
+  manual_eye_height=true;
+  detour(follow, 0.25f, &words, follow);
+  CHECK(camera_applies==3 && applied_mapping.world_scale==automatic_scale);
+  CHECK(std::fabs(applied_mapping.eye_height/automatic_scale-1.82f)<1e-5f);
+  manual_eye_height=false;
+  detour(follow, 0.25f, &words, follow);
+  CHECK(camera_applies==4 && std::fabs(applied_mapping.eye_height-1.8f)<1e-5f);
   stature_revision = 10;
   detour(follow, 0.25f, &words, follow);
-  CHECK(camera_applies == 2 && applied_sequence == 0);  // refuse mixed rig snapshots
+  CHECK(camera_applies == 4 && applied_sequence == 0);  // refuse mixed rig snapshots
   CameraHookUninstall();
   std::puts("test_camera_observer: PASS (fixture only, native layout unverified)");
   return 0;

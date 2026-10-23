@@ -1,6 +1,7 @@
 // Fake-runtime regression seam linked against the actual core/input.cpp.
 #include "../src/core/input.h"
 #include "../src/core/diagnostics.h"
+#include "../src/core/combat_native.h"
 #include "../src/common/logging.h"
 #include <openxr/openxr.h>
 
@@ -23,6 +24,7 @@ const float kHead[3] = {0.0f, 1.6f, 0.0f};
 std::uintptr_t next_handle = 1;
 XrPath left_path = XR_NULL_PATH;
 XrAction stick_action = XR_NULL_HANDLE;
+XrAction aim_action = XR_NULL_HANDLE;
 XrAction squeeze_action = XR_NULL_HANDLE;
 XrAction trigger_action = XR_NULL_HANDLE;
 XrAction menu_action = XR_NULL_HANDLE;
@@ -54,6 +56,9 @@ bool left_stick_click = false;
 bool right_stick_click = false;
 bool left_pose_valid = true;
 bool right_pose_valid = true;
+bool aim_pose_valid = true;
+bool aim_active = true;
+float aim_quat[4] = {.258819045f,0,0,.965925826f};
 float head_quat[4] = {0, 0, 0, 1};
 float left_quat[4] = {0, 0, 0, 1};
 float right_quat[4] = {0, 0, 0, 1};
@@ -91,6 +96,8 @@ void ProfileBindings() {
         for (const char* action_path : {
                  "/user/hand/left/input/grip/pose",
                  "/user/hand/right/input/grip/pose",
+                 "/user/hand/left/input/aim/pose",
+                 "/user/hand/right/input/aim/pose",
                  "/user/hand/left/input/trigger/value",
                  "/user/hand/right/input/trigger/value",
                  "/user/hand/left/input/thumbstick",
@@ -765,6 +772,7 @@ void CapturedInput() {
 
 namespace dsvr {
 Config DiagnosticsCurrentConfig() { return config; }
+CombatNativeStatus CombatNativeGetStatus() { return {}; }
 bool DiagnosticsReloadConfig() { return true; }
 void DiagnosticsLogMarker() {}
 void XrToggleSanctuary() { ++theater_toggles; }
@@ -799,6 +807,7 @@ XRAPI_ATTR XrResult XRAPI_CALL xrStringToPath(XrInstance, const char* text, XrPa
 XRAPI_ATTR XrResult XRAPI_CALL xrCreateAction(XrActionSet, const XrActionCreateInfo* info, XrAction* out) {
     *out = Handle<XrAction>();
     if (std::strcmp(info->actionName, "thumbstick") == 0) stick_action = *out;
+    if (std::strcmp(info->actionName, "aim_pose") == 0) aim_action = *out;
     if (std::strcmp(info->actionName, "squeeze") == 0) squeeze_action = *out;
     if (std::strcmp(info->actionName, "trigger") == 0) trigger_action = *out;
     if (std::strcmp(info->actionName, "menu") == 0) menu_action = *out;
@@ -818,7 +827,8 @@ XRAPI_ATTR XrResult XRAPI_CALL xrAttachSessionActionSets(XrSession, const XrSess
     return XR_SUCCESS;
 }
 XRAPI_ATTR XrResult XRAPI_CALL xrCreateActionSpace(XrSession, const XrActionSpaceCreateInfo* info, XrSpace* out) {
-    *out = reinterpret_cast<XrSpace>(static_cast<std::uintptr_t>(info->subactionPath == left_path ? 200 : 201));
+    *out = reinterpret_cast<XrSpace>(static_cast<std::uintptr_t>(
+        (info->action==aim_action?210:200)+(info->subactionPath==left_path?0:1)));
     return XR_SUCCESS;
 }
 XRAPI_ATTR XrResult XRAPI_CALL xrCreateReferenceSpace(XrSession, const XrReferenceSpaceCreateInfo*, XrSpace* out) {
@@ -831,7 +841,9 @@ XRAPI_ATTR XrResult XRAPI_CALL xrSyncActions(XrSession, const XrActionsSyncInfo*
 }
 XRAPI_ATTR XrResult XRAPI_CALL xrLocateSpace(XrSpace space, XrSpace, XrTime, XrSpaceLocation* out) {
     out->locationFlags = XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
-    const float* q = space == view_space ? head_quat :
+    const bool is_aim=space==reinterpret_cast<XrSpace>(210) || space==reinterpret_cast<XrSpace>(211);
+    if(is_aim && !aim_pose_valid) out->locationFlags=0;
+    const float* q = is_aim ? aim_quat : space == view_space ? head_quat :
         (space == reinterpret_cast<XrSpace>(static_cast<std::uintptr_t>(200)) ? left_quat : right_quat);
     if (space == reinterpret_cast<XrSpace>(static_cast<std::uintptr_t>(200)) && !left_pose_valid)
         out->locationFlags &= ~XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
@@ -839,6 +851,9 @@ XRAPI_ATTR XrResult XRAPI_CALL xrLocateSpace(XrSpace space, XrSpace, XrTime, XrS
         out->locationFlags &= ~XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
     out->pose.orientation = {q[0], q[1], q[2], q[3]};
     return XR_SUCCESS;
+}
+XRAPI_ATTR XrResult XRAPI_CALL xrGetActionStatePose(XrSession, const XrActionStateGetInfo*, XrActionStatePose* out) {
+    out->isActive=aim_active?XR_TRUE:XR_FALSE;return XR_SUCCESS;
 }
 XRAPI_ATTR XrResult XRAPI_CALL xrGetActionStateBoolean(XrSession, const XrActionStateGetInfo* info, XrActionStateBoolean* out) {
     out->isActive = XR_TRUE;
@@ -884,6 +899,43 @@ int main() {
     dsvr::InputAttachSession(reinterpret_cast<XrInstance>(1), reinterpret_cast<XrSession>(2));
     Expect(dsvr::InputAvailable(), "fake runtime attaches the actual input implementation");
     ProfileBindings();
+    {
+      const auto saved=config;
+      config.arm_ik_enabled=true;
+      right_stick_value=right_trigger=right_squeeze=0;
+      dsvr::InputInvalidateFrame();
+      dsvr::InputPollFrame(reinterpret_cast<XrSpace>(100),kHead,1,1000000000LL);
+      right_trigger=right_squeeze=1;
+      for(bool observe_only:{false,true}) {
+        config.arm_ik_log_only=observe_only;
+        dsvr::InputPollFrame(reinterpret_cast<XrSpace>(100),kHead,1,1010000000LL);
+        dsvr::VirtualPadState pad{};
+        Expect(dsvr::InputLatestPad(pad) && pad.right_trigger==255 && (pad.buttons&dsvr::kPadRightShoulder),
+            "IK preference cannot disable gameplay combat buttons while native physical combat is unbound");
+      }
+      config=saved;right_trigger=right_squeeze=0;right_stick_value=1;
+      dsvr::InputInvalidateFrame();
+    }
+    {
+      const auto base=reinterpret_cast<XrSpace>(100);
+      dsvr::HandSample hands[2];dsvr::ArmTarget arms[2];
+      dsvr::InputPollFrame(base,kHead,1,1000000000LL);
+      dsvr::InputCopyTrackingSamples(hands,arms);
+      Expect(hands[1].aim_valid && std::fabs(hands[1].aim_quat[0]-.258819045f)<1e-5f &&
+          hands[1].quat[0]==0,"aim and grip orientations stay independent");
+      right_pose_valid=false;right_trigger=1;
+      dsvr::InputPollFrame(base,kHead,1,1010000000LL);
+      dsvr::InputCopyTrackingSamples(hands,arms);
+      Expect(!hands[1].valid && hands[1].aim_valid && hands[1].trigger_held,
+          "grip loss preserves valid pointer aim and select buttons");
+      right_pose_valid=true;aim_active=false;
+      dsvr::InputPollFrame(base,kHead,1,1020000000LL);
+      dsvr::InputCopyTrackingSamples(hands,arms);
+      Expect(hands[1].valid && !hands[1].aim_valid,"inactive aim cannot become a stale pointer");
+      aim_active=true;right_trigger=0;
+      dsvr::InputInvalidateFrame();dsvr::InputCopyTrackingSamples(hands,arms);
+      Expect(!hands[1].aim_valid,"invalidation clears the pointer as well as grip");
+    }
     TheaterButtons();
     FailedTurnQuery(false);
     FailedTurnQuery(true);

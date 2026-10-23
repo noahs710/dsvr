@@ -21,7 +21,8 @@ namespace dsvr {
 namespace {
 
 std::mutex g_mutex;
-Config g_config;
+Config g_config, g_saved_config;
+bool g_settings_busy = false;
 bool g_initialized = false;  // process-lifetime mode, not diagnostic-thread lifetime
 bool g_observer_hooks_attempted = false;
 bool g_observer_hooks_ready = false;
@@ -58,7 +59,11 @@ void PumpMenuRequests() {
     }
     {
       std::lock_guard<std::mutex> lock(g_mutex);
-      if (ok) g_config = *pending;
+      if (ok) {
+        g_config = *pending;
+        if (save) g_saved_config = *pending;
+      }
+      g_settings_busy = false;
       g_settings_status = ok ? (save ? "Settings saved." : "Settings applied for this session.") :
                                "Could not save settings. Previous settings remain active.";
     }
@@ -213,7 +218,9 @@ bool ReloadConfig() {
       DSVR_WARN("Diagnostics: observer_only change ignored until process restart");
     fresh.observer_only = g_config.observer_only;
     ConfigRestrictObserver(fresh);
+    if (g_settings_busy) return false;
     g_config = fresh;
+    g_saved_config = fresh;
   }
   DSVR_LOG("Diagnostics: config reloaded vr=%d scale=%d motion=%d haptics=%d "
            "hand=%s style=%s",
@@ -294,6 +301,7 @@ void DiagnosticsStart(const Config& initial, std::wstring config_path) {
     g_initialized = true;
     g_config = initial;
     ConfigRestrictObserver(g_config);
+    g_saved_config = g_config;
     g_config_path = std::move(config_path);
   }
   if (g_running.exchange(true)) return;
@@ -318,17 +326,23 @@ Config DiagnosticsCurrentConfig() {
   return g_config;
 }
 
+SettingsSnapshot DiagnosticsSettingsSnapshot() {
+  std::lock_guard<std::mutex> lock(g_mutex);
+  return {g_config, g_saved_config, g_settings_busy};
+}
+
 bool DiagnosticsReloadConfig() { return ReloadConfig(); }
 
 bool DiagnosticsRequestConfig(const Config& requested, bool save) {
   if (!ConfigValid(requested)) return false;
   std::lock_guard<std::mutex> lock(g_mutex);
-  if (!g_initialized) return false;
+  if (!g_initialized || !g_running.load() || g_settings_busy) return false;
   Config effective = requested;
   effective.observer_only = g_config.observer_only;
   ConfigRestrictObserver(effective);
   g_pending_config = effective;
   g_pending_save = save;
+  g_settings_busy = true;
   g_settings_status = "Applying settings...";
   return true;
 }

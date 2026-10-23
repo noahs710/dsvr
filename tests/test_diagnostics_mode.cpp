@@ -89,11 +89,21 @@ int main(int argc, char** argv) {
 
   Config applied=DiagnosticsCurrentConfig();
   applied.render_scale_percent=133;
+  applied.eye_height_override=true;applied.eye_height=1.82f;
   CHECK(DiagnosticsRequestConfig(applied,false));
   CHECK(WaitForSettingsStatus("Settings applied for this session."));
   CHECK(DiagnosticsCurrentConfig().render_scale_percent==133);
   Config on_disk{};
   CHECK(ConfigLoad(path,on_disk) && on_disk.render_scale_percent==125);
+  auto state=DiagnosticsSettingsSnapshot();
+  CHECK(!state.busy && state.applied.render_scale_percent==133 && state.saved.render_scale_percent==125);
+  // Apply -> test -> Save must persist the exact same candidate, not force an
+  // additional edit to re-enable Save. Save failures must retain this receipt.
+  CHECK(DiagnosticsRequestConfig(applied,true));
+  CHECK(WaitForSettingsStatus("Settings saved."));
+  CHECK(ConfigLoad(path,on_disk) && on_disk.render_scale_percent==133);
+  CHECK(on_disk.eye_height_override && on_disk.eye_height==1.82f);
+  state=DiagnosticsSettingsSnapshot();CHECK(!state.busy && state.applied==state.saved);
 
   Config saved=applied;
   saved.render_scale_percent=143;

@@ -40,6 +40,7 @@ XrResult image_release[2]{XR_SUCCESS, XR_SUCCESS};
 XrResult destroy_result[2]{XR_SUCCESS, XR_SUCCESS};
 XrTime predicted = 0;
 dsvr::Config config{};
+dsvr::UserCalibration calibration_profile{};
 bool gameplay_ready = true, mod_menu_visible = false, calibration_visible = false;
 bool physical_trigger = false;
 bool tracking_valid=true,should_render=true;
@@ -228,6 +229,8 @@ XRAPI_ATTR XrResult XRAPI_CALL TestEnumerateSwapchainImages(XrSwapchain chain,
 
 namespace dsvr {
 Config DiagnosticsCurrentConfig() { return config; }
+UserCalibration CalibrationCurrent() { return calibration_profile; }
+bool CalibrationCapturesInput() { return calibration_visible; }
 void LogWrite(LogLevel, const char*, int, const char*, ...) {}
 bool CameraIsTitle() { return false; }
 bool CameraGameplayReady() { return gameplay_ready; }
@@ -385,12 +388,13 @@ int main() {
   calibration_visible = true;
   gameplay_ready = false;
   physical_trigger = true;
-  config.eye_height = 1.73f;
+  config.eye_height = 1.73f;config.eye_height_override=true;
+  calibration_profile.valid=true;calibration_profile.eye_height_m=1.71f;
   g_floor_space = reinterpret_cast<XrSpace>(5);
   XrSubmitMonoFrame(backbuffer);
   CHECK(sampled_trigger && !sampled_gameplay && sampled_floor);
   CHECK(std::fabs(sampled_height - 1.6f) < .001f);
-  CHECK(std::fabs(sampled_fallback - 1.73f) < .001f);
+  CHECK(std::fabs(sampled_fallback - 1.71f) < .001f);
   CHECK(XrRenderMetricsSnapshot(metrics) && metrics.theater && metrics.eye_draws == 1);
   calibration_visible = false;
   mod_menu_visible = true;
@@ -401,6 +405,40 @@ int main() {
   physical_trigger = false;
   XrSubmitMonoFrame(backbuffer);
   CHECK(XrRenderMetricsSnapshot(metrics) && !metrics.theater && metrics.eye_draws == 2);
+  // Project the runtime AIM pose through the shipped XR adapter. Deliberately
+  // point the grip elsewhere: a grip-based ray would miss every sample below.
+  {
+    const auto saved_config=config;const bool saved_local=g_local_space;
+    g_local_space=true;g_menu_active=true;g_menu_anchored=true;
+    for(float distance:{1.f,2.75f,4.f})for(float yaw:{0.f,.7f,1.5707963f,2.7f}) {
+      config.menu_distance_m=distance;
+      g_menu_anchor=MakeMenuAnchor(.2f,1.6f,-.3f,yaw,distance);
+      const float width=MenuWidth(distance,config.menu_reading_fov_deg);
+      const float height=width/(1280.f/720.f);
+      for(float u:{.1f,.5f,.9f})for(float v:{.1f,.5f,.9f}) {
+        const Vec3 normal{std::sin(yaw),0,std::cos(yaw)};
+        const Vec3 right{std::cos(yaw),0,-std::sin(yaw)};
+        const Vec3 target=VAdd({g_menu_anchor.x,g_menu_anchor.y,g_menu_anchor.z},
+            VAdd(VScale(right,(u-.5f)*width),Vec3{0,(.5f-v)*height,0}));
+        const Vec3 origin=VAdd(target,VAdd(VScale(normal,2.f),Vec3{0,-.5f,0}));
+        TrackingFrame pointing{};pointing.focused=pointing.orientation_valid=pointing.position_valid=true;
+        pointing.predicted_time_ns=1;pointing.captured_ms=GetTickCount64();
+        auto& hand=pointing.hand[1];hand.valid=hand.aim_valid=hand.trigger_held=true;
+        hand.quat[0]=-.70710678f;hand.quat[3]=.70710678f;
+        const float pitch=std::atan2(.5f,2.f);
+        hand.aim_quat[0]=std::cos(yaw*.5f)*std::sin(pitch*.5f);
+        hand.aim_quat[1]=std::sin(yaw*.5f)*std::cos(pitch*.5f);
+        hand.aim_quat[2]=-std::sin(yaw*.5f)*std::sin(pitch*.5f);
+        hand.aim_quat[3]=std::cos(yaw*.5f)*std::cos(pitch*.5f);
+        hand.aim_pos[0]=origin.x;hand.aim_pos[1]=origin.y;hand.aim_pos[2]=origin.z;
+        g_tracking_frames.Publish(pointing);
+        const auto pointer=XrMenuPointerInput(1280,720);
+        CHECK(pointer.valid && pointer.select);
+        CHECK(std::fabs(pointer.x-u*1280)<.01f && std::fabs(pointer.y-v*720)<.01f);
+      }
+    }
+    config=saved_config;g_local_space=saved_local;g_menu_active=false;g_menu_anchored=false;
+  }
   // A lost/failed source SRV must rebuild on the next accepted frame instead
   // of permanently submitting a missing or stale source image.
   g_blit_srv->Release();

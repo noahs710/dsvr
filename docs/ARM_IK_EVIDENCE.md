@@ -64,6 +64,81 @@ the defect is arm-only in `OrientModelHandPose`, isolating the fault.
 
 ## Root/copy ownership, 22 October continuation
 
+### Natural transfer capture, 23 October 2026
+
+**New native evidence, not yet an implemented IK fix.** A protected, unmodded
+flatscreen run captured 16 natural before/after body-copy pairs on PID 5660,
+pose-owner thread 30388. The local PlayerIns and selected ChrModel were checked
+at each pair. No pose/root/code bytes were written and no native function was
+replayed; hardware debug registers were restored before detach. The sole recorded
+non-single-step exception was the expected OS debugger-attach breakpoint.
+
+Capture: `build/verification/embodiment-wrap/native-pose-transfer-baseline.json`,
+SHA-256 `e3b459e6de9257028a62ab2019c5cfc481a4b83aa5b3160cb4ec1f194c21b866`.
+The observer is retained at
+`build/verification/embodiment-wrap/dsvr-pose-transfer-observe.py` (the cache
+original under `hermes\cache\scratch\` may be purged); its exact SHA-256 is
+embedded in the capture and was re-hashed identical to the retained copy. Unlike run 7, this observer reads
+all twelve assembly-root floats at **assembly +0x20**, not +0x30. It also records
+the actual mapping count/entries, resource header, proportion records, five
+proportion inputs and selected source pose at both observation sites.
+
+Observed on this character/model only:
+
+- Source and body each have 80 palette rows, with **distinct data allocations**.
+- The native copy map has **69 entries**, mapping source 0..68 to destination
+  0..68. It does not copy the eleven trailing dummy/nub rows. This is measured
+  identity for this capture, not permission to hardcode identity for other
+  equipment/resources or assume all 80 rows propagate.
+- All 16 after-copy **complete roots agree numerically**. The source palette is
+  byte-identical across each copy. Body basis differences are native proportions,
+  not an independently retargeted animation or a changed root.
+- The resource's proportion flag (`+8 & 4`) is set; all five captured inputs are
+  -0.5. Applying the recovered destination-indexed axis records reproduces all
+  **13,248 mapped floats** with maximum absolute error `5.21540641784668e-8`.
+  Origins are copied unchanged; authored basis-column proportions must survive.
+
+Fresh read-only primary Ghidra queries and pinned instruction bytes establish:
+
+1. PlayerIns pose slot +0xA8 is `140357A20`. It calls `140320980` at
+   `140357A29`; that animation/source writer returns to **140357A2E**.
+2. Only afterward does the caller obtain the selected pose (`140327A90`), copy
+   the source root (`140321F80`) and invoke `140207F10` at `140357A7A`.
+   The natural body-copy return is **140357A7F**.
+3. `140320980` takes the actor in RCX, marks model dirty bits and tail-jumps to
+   `140379F70`; its source pose is the model +0x60 and root is model +0x30.
+4. `140207F10` uses the actual short-index array at map +0x10 with count +8,
+   copies into assembly palette +0x60, and performs its optional native
+   proportion branch. `140211940` returns `*(assembly+0x18)+0xE0` (inline
+   resource); it is not another pointer dereference at +0xE0.
+5. The pinned binary's proportion constants are `0.01f` at `1412DC48C` and
+   `1.0f` at `141615C6C`. Translation is retained by the source-times-diagonal
+   matrix operation; do not replace the body with unscaled source bases.
+
+Raw queries remain outside distributable sources under
+`C:\Tools\DarkSoulsRemaster_De\combat-evidence\embodiment-pose-{boundary,accessors,instructions}-20261023.txt`.
+The executable SHA-256 remains
+`a45aaa36dd2f6cc151670a639ea5547043cf38ea79ff4178b963c6ed71f98d7b`.
+
+**Implementation consequence:** solving after the outer PlayerIns update is too
+late for a distinct body palette. The candidate seam is after the natural source
+writer returns but **before** the existing native body copy, scoped to the
+verified local-player outer update. Let native code perform its own mapping,
+proportions and downstream propagation; never replay it or overwrite a final
+body with guessed same-index source rows. Check source/resource ownership before
+writing, and independently confirm body/root propagation after the natural
+copy before publishing a successful committed pose. Preserve all stale tracking,
+thread/lifetime/topology, log-only and invalid-resource refusals.
+
+Still unverified: changed equipment/nonidentity maps, modified-candidate native
+propagation, rendered armor/attachments, headset alignment/comfort and neck
+behavior. The native capture does not close F1/F2/F3 or prove that a new hook is
+safe. The protected-run receipt is
+`build/verification/embodiment-wrap/native-capture-receipt.json`; it reports
+state **Restored**, and its hashes were independently hash-checked and
+recorded in the 23 October MODLOG wrap entry.
+
+
 **Qualification blocker, not a green native result:** retained run-7 idle and
 walk captures each contain 16 before/after pairs. All **32 after-copy samples**
 have distinct model/body palette pointers. Current adapter gate `output data
