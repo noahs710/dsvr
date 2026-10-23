@@ -7,6 +7,35 @@ this handoff records evidence/state, not a competing task order.
 
 ## Current task and candidate
 
+### Source wrap committed, 23 October 2026
+
+The verified wrap checkpoint above was committed locally as `763d198`
+("feat: complete coherent calibration, embodiment fit and source wrap")
+on top of `271bd47`, using explicit paths only: reviewed source/tests,
+the provenance tool, AGENTS, evidence/authority docs, the sole execution
+guide, and the superseded plans/specs retained verbatim under
+`docs/history/`. No generated package, ignored capture or raw
+decompilation was staged.
+
+Fresh pre-commit receipts (not just the historical ones):
+`cmake --build build --config Debug --parallel 4` exit 0;
+`ctest --test-dir build -C Debug --output-on-failure` **88/88**.
+`git diff --cached --check` flagged exactly one whitespace defect, a
+trailing blank line at EOF inside the retained snapshot
+`docs/history/2026-10-21-before-consolidation/docs/VERIFICATION_RUNBOOK.md.txt`.
+It was intentionally left uncorrected: `docs/history/README.md` defines
+those files as exact-text evidence snapshots, and editing them would
+break byte fidelity. The exception is recorded here instead.
+
+Working tree is clean after the commit. No push, no deployment, no game
+launch, no headset run. Native gates remain open exactly as the wrap
+verdict states: D1b/D1/D2 stereo, F2 source->body transfer, F3
+independent mesh fit, B/C physical damage, collision/crouch and headset
+qualification. Resume at the execution guide's D1b counter-owner probe:
+`& ./tools/ghidra/query.ps1 -Address @('0x1411BFE80','0xD0') -Script
+DumpInstructions.java`, then the entity vptr sites `0x1411BFED3/DA` and
+owner `+0x68` counters; read-only primary database only.
+
 ### Source wrap and commit, 22 October 2026 (offline complete)
 
 User request: finish and commit the existing source work, including its tests,
