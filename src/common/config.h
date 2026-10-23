@@ -60,7 +60,14 @@ struct Config {
 
   // [controls]
   bool dominant_hand_left = false;       // true = left hand holds the weapon
+  // Legacy migration input only (see ConfigLoad); new settings win.
   MovementReference movement_reference = MovementReference::Head;
+  // Left-stick locomotion orientation. The stick is ALWAYS steered by exactly
+  // one live reference: Head (default -- head-oriented smooth locomotion) or
+  // Controller, which steers by movement_controller's grip heading and falls
+  // back to the head reference whenever that hand is untracked or aimed
+  // vertically with no stable planar heading. There is no raw/native option
+  // and no dead stick: a missing hand removes hand steering, not movement.
   MovementOrientation movement_orientation = MovementOrientation::Head;
   MovementController movement_controller = MovementController::NonDominant;
   std::string play_style = "standing";   // standing | seated | roomscale
@@ -75,18 +82,25 @@ struct Config {
 
   // [camera]
   float eye_height = 1.65f;       // metres above player anchor
-  float world_scale = 1.0f;       // 0.5..2.0, escape hatch for scale feel
+  float world_scale = 1.0f;       // 0.5..2.0 trim on automatic native-world/avatar fit
   float forward_offset_m = 0.0f;  // 0..0.4; 0 = camera at the head (0.12.0:
                                   // the old 0.22 hovered in front of the face)
+  // Height band around eye_height that the tracked eye may leave. Physical
+  // kneeling / leaning moves the real eye by up to this much; anything beyond
+  // it would put the eye inside the standing native torso or through the head
+  // shell. 0 disables the band (tracking stays exactly physical).
+  float eye_clearance_m = 0.45f;
   // First person shows the FULL body by default (0.14.0): the camera sits
   // inside the head mesh, so you see your arms, torso, legs and weapon
   // when you look down, exactly as the user asked. Hiding is now only an
   // escape hatch for headgear whose geometry blocks the view.
   bool hide_player_model = false;
-  // Selective head culling: collapse only the Head bone in the native pose
-  // adapter so the FP camera sees the body without the head/helmet shell.
-  // Whole-model hiding above stays an escape hatch. Needs the pose adapter
-  // (arm_ik_enabled, not log-only); menus keep the native head.
+  // Selective native part filtering lets the first-person camera see the body
+  // without the head/helmet shell; it never collapses a bone.
+  // Whole-model hiding above stays an escape hatch. Driven by the native
+  // part filter while the first-person camera owns the view (VR on, not
+  // observer-only, headlook on, XR session running, no menu presentation);
+  // it does NOT require arm_ik_enabled. Menus keep the native head.
   bool hide_head = true;
   bool forearm_only = false;
   bool hide_ui_in_vr = false;
@@ -97,6 +111,15 @@ struct Config {
   // 0.12.0, primary (weapon side) kept. Set false if your weapon vanishes
   // and the body stays -- then the models are the other way round.
   bool hide_second_model = true;
+  // Which native measurement anchors the automatic world/avatar fit.
+  // "head" (default) sizes the world so the native Head bone lands on the
+  // calibrated view height: the first-person camera sits in the avatar's own
+  // head and the body occupies the space the wearer's body does. "arm" sizes
+  // by measured physical reach, so the hands match exactly and the head may
+  // sit off the native head bone. Both convert the whole world/avatar with one
+  // ratio; neither scales a bone base or collider, and neither independently
+  // resizes the skinned mesh (that still needs a verified render owner).
+  std::string embodiment_fit = "head";
 
   // [combat]
   bool motion_attacks = true;      // motion-driven damage (no canned swings)

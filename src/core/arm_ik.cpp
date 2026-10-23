@@ -75,6 +75,26 @@ WeaponTwoHandState g_two_hand;
 std::atomic<DWORD> g_owner_thread{0};
 bool g_attempted=false;
 std::uint64_t g_pose_visits=0,g_pose_commits=0,g_sequence_refusals=0,g_last_commit=0,g_last_report=0;
+// A refused retarget is otherwise silent: commits stay 0 with no clue which
+// contract broke. Name the failing predicate once per change.
+std::atomic<unsigned> g_pose_gate{0},g_rig_stop{0};
+constexpr const char* kPoseGateNames[]={
+  "none","player vtable","player+0x60 model","model vtable","selected model",
+  "override pose set","space != 1","bone count mismatch","model+0x70 data",
+  "rig contract","player+0x850 output","output data mismatch","assembly root mismatch"};
+constexpr const char* kRigStopNames[]={
+  "none","flver read/type","counts mismatch","entries read","bone missing",
+  "weapon parent != hand","forearm twist parent != upper","upper parent != clavicle",
+  "parent chain not rooted"};
+void ReportGate() {
+  const unsigned gate=g_pose_gate.load(),stop=g_rig_stop.load();
+  static unsigned shown_gate=0,shown_stop=0;
+  if (gate==shown_gate && stop==shown_stop) return;
+  shown_gate=gate; shown_stop=stop;
+  if (!gate) { DSVR_LOG("ArmIK: pose gate clear"); return; }
+  DSVR_WARN("ArmIK: pose gate %s (rig stop %s); IK stays uncommitted until this clears",
+            kPoseGateNames[gate<13?gate:0],kRigStopNames[stop<9?stop:0]);
+}
 std::atomic<std::uint64_t> g_foreign_visits{0};
 struct Targets {
   std::uintptr_t player=0;
@@ -82,7 +102,7 @@ struct Targets {
   Vec3 relative[2]{};
   ArmPoseMatrix orientation[2]{};
   ArmPoseMatrix neutral_controller[2]{},neutral_hand[2]{};
-  Vec3 head{},lean{},shoulder_offset[2]{},pole[2]{};
+  Vec3 head{},lean{},pole[2]{};
   Vec3 physical_head{}, physical_grip[2]{}, physical_tip[2]{}, blade_direction[2]{};
   long long predicted_time_ns=0;
   Vec3 heading_right{},heading_up{},heading_forward{};
@@ -90,6 +110,7 @@ struct Targets {
   bool head_basis_valid=false;
   UserCalibration calibration;
   float world_scale=1;
+  CalibrationMapping mapping;
   bool valid[2]{};
   bool squeeze[2]{};
 } g_targets;
@@ -108,11 +129,21 @@ struct TorsoSmooth {
   BodyMotionEstimator root_motion;
   void Reset() { *this=TorsoSmooth{}; }
 } g_torso_smooth;
+// Head-space elbow pole continuity (owner thread only). The published pole is
+// recomputed from the wrist lift each frame; that vector swings ~55 deg as the
+// hand crosses shoulder height, and SolveTwoBoneIk chases it: the live-grade
+// fixture measured an elbow travel of 0.26 m in one frame. Damping the pole
+// direction before the model inverse keeps the bend plane continuous. Reset on
+// the same transitions the torso filter uses (sequence/epoch/revision change).
+ArmPoleSmoother g_pole_smooth[2];
+ArmBendState g_bend_state[2];
+std::uint64_t g_pole_seq=~0ull,g_pole_epoch=~0ull,g_pole_revision=~0ull,g_pole_ms[2]{};
 void InvalidateHands(bool reset_bench=true) {
   { std::lock_guard<std::mutex> lock(g_hands_mutex);g_hands={};g_head_delta={};
     if (reset_bench) g_bench={}; }
 }
 struct Rig {
+  std::uint64_t revision=0;
   std::uintptr_t model=0,flver=0,entries=0,data=0;
   std::array<unsigned char,kBones*0x30> records{};
   std::array<int,kBones> parents{};
@@ -124,6 +155,14 @@ struct Rig {
   int head=-1,neck=-1,spine=-1,chest=-1,pelvis=-1;
   int upper_root=-1,torso_root=-1;
 } g_rig;
+std::uint64_t g_rig_revision=0;
+float g_native_arm_reach=0;
+// Frozen native stature, measured from the same fresh native palette as the arm
+// reach: the upright Head bone above the model origin, and the separation of the
+// two upper-arm IK roots (the real shoulder sockets, which no controller capture
+// can see). Model-space values; the root scale converts them to world units.
+float g_native_head_height=0, g_native_shoulder_width=0;
+std::uintptr_t g_geometry_player=0;
 std::uintptr_t LocalPlayer() {
   std::uintptr_t world=0,player=0;
   return GuardedRead(ModuleBase(nullptr)+0x1c77e50,world) && world &&
@@ -137,8 +176,9 @@ bool ReadRig(std::uintptr_t model,std::uintptr_t data) {
   std::uintptr_t flver=0,entries=0;
   short counts[2]{};
   if (!GuardedRead(model+0x18,flver) || !Type(flver,0x12eb760) ||
-      !GuardedReadBytes(flver+0x10,counts,sizeof(counts)) || counts[0]!=69 ||
-      counts[1]!=kBones || !GuardedRead(flver+0x18,entries) || !entries) return false;
+      !GuardedReadBytes(flver+0x10,counts,sizeof(counts))) { g_rig_stop=1; return false; }
+  if (counts[0]!=69 || counts[1]!=kBones) { g_rig_stop=2; return false; }
+  if (!GuardedRead(flver+0x18,entries) || !entries) { g_rig_stop=3; return false; }
   std::array<unsigned char,kBones*0x30> records{};
   if (!GuardedReadBytes(entries,records.data(),records.size())) return false;
   if (g_rig.model==model && g_rig.flver==flver && g_rig.entries==entries &&
@@ -180,9 +220,10 @@ bool ReadRig(std::uintptr_t model,std::uintptr_t data) {
       rig.upper_root=i;
     }
     for (unsigned side=0;side<2;++side) {
-      if (expected_clavicle[side]==name.data()) {
-        if (rig.clavicle[side]!=-1) return false;
-        rig.clavicle[side]=i;
+      if (expected_clavicle[side] == name.data()) {
+        if (rig.clavicle[side] != -1) return false;
+        rig.clavicle[side] = i;
+        rig.side[side].clavicle = i;
       }
       int* indices[]={&rig.side[side].upper,&rig.side[side].forearm,
                      &rig.side[side].hand,&rig.side[side].upper_twist,
@@ -202,12 +243,20 @@ bool ReadRig(std::uintptr_t model,std::uintptr_t data) {
   for (int bone=0;bone<kBones;++bone) {
     int current=bone;int steps=0;
       while (current!=-1 && steps++<kBones) current=rig.parents[current];
-      if (current!=-1) return false;
+      if (current!=-1) { g_rig_stop=8; return false; }
     }
-    for (const auto& b:rig.side)
-      if (b.upper<0 || b.forearm<0 || b.hand<0 || b.upper_twist<0 ||
-        b.weapon<0 || rig.parents[b.weapon]!=b.hand ||
-        b.fore_twist<0 || rig.parents[b.fore_twist]!=b.upper) return false;
+    for (const auto& b : rig.side) {
+      if (b.upper < 0 || b.forearm < 0 || b.hand < 0 || b.upper_twist < 0 ||
+          b.weapon < 0 || b.fore_twist < 0 || b.clavicle < 0) { g_rig_stop=4; return false; }
+        if (rig.parents[b.weapon] != b.hand) { g_rig_stop=5; return false; }
+        if (rig.parents[b.fore_twist] != b.upper) { g_rig_stop=6; return false; }
+        if (rig.parents[b.upper] != b.clavicle) { g_rig_stop=7; return false; }
+    }
+    // Captured native c0000 animation anchors each UpperArm basis with
+    // column 2 exactly along the elbow bend direction (|dot| = 1.000, 64/64
+    // idle and walk frames), so the arm solve aims that hinge instead of
+    // transporting roll freely with a shortest-arc rotation.
+    for (auto& b : rig.side) b.hinge_aim = true;
     for (unsigned side=0;side<2;++side) {
       const auto& b=rig.legs[side];
       if (rig.clavicle[side]<0 || rig.pelvis<0 || b.thigh<0 || b.calf<0 ||
@@ -246,9 +295,15 @@ bool ReadRig(std::uintptr_t model,std::uintptr_t data) {
     own_subtree(rig.legs[side].thigh);
   }
   own_subtree(rig.head);
+  rig.revision=++g_rig_revision;
+  g_native_arm_reach=0;g_native_head_height=0;g_native_shoulder_width=0;
+  g_geometry_player=0;
   g_rig=rig; g_two_hand.Reset();InvalidateHands();
   // Rebinding may reuse the model address while resources/topology change.
-  g_torso_smooth.Reset(); return true;
+  g_torso_smooth.Reset();
+  // Force the pole filter's key check to reset it after a topology rebind.
+  g_pole_epoch=~0ull; g_pole_revision=~0ull;
+  return true;
 }
 void __fastcall PoseUpdateDetour(void* self) {
   const bool local_player_pose=GetCurrentThreadId()==g_owner_thread.load() &&
@@ -260,7 +315,9 @@ void __fastcall PoseUpdateDetour(void* self) {
   if (g_stopping.load() || !g_enabled.load()) return;
   if (GetCurrentThreadId()!=g_owner_thread.load()) { ++g_foreign_visits; return; }
   ++g_pose_visits;
-  if (g_reset_torso.exchange(false)) g_torso_smooth.Reset();
+  if (g_reset_torso.exchange(false)) { g_torso_smooth.Reset();
+    g_pole_smooth[0].Reset(); g_pole_smooth[1].Reset();
+    g_bend_state[0].Reset(); g_bend_state[1].Reset(); }
   if (!g_targets.player) { g_torso_smooth.Reset(); return; }
   if (reinterpret_cast<std::uintptr_t>(self)!=g_targets.player) return;
   // Native animation has returned. No native callbacks occur inside this
@@ -299,18 +356,27 @@ void __fastcall PoseUpdateDetour(void* self) {
   std::uintptr_t model=0,selected=0,override_pose=0,data=0;
   std::uintptr_t output=0,output_data=0;
   unsigned space=0,count=0;
-  if (!Type(player,0x13251f0) || !GuardedRead(player+0x60,model) ||
-      !Type(model,0x12eaf30) || !Type(model+0x60,0x12eacb8) || !GuardedRead(model+0x128,selected) ||
-      selected!=model+0x60 || !GuardedRead(model+0x78,override_pose) || override_pose ||
-      !GuardedRead(model+0x68,space) || space!=1 || !GuardedRead(model+0x6c,count) ||
-      count!=kBones || !GuardedRead(model+0x70,data) || !data || !ReadRig(model,data) ||
-      !GuardedRead(player+0x850,output) || !output ||
-      !GuardedRead(output+0x60,output_data) || output_data!=data) {
-    g_torso_smooth.Reset(); return;
-  }
-  ArmPoseMatrix root{};
-  std::array<ArmPoseMatrix,kBones> before{},corrected{};
+  unsigned gate=0;
+    if (!Type(player,0x13251f0)) gate=1;
+    else if (!GuardedRead(player+0x60,model) || !model) gate=2;
+    else if (!Type(model,0x12eaf30) || !Type(model+0x60,0x12eacb8)) gate=3;
+    else if (!GuardedRead(model+0x128,selected) || selected!=model+0x60) gate=4;
+    else if (!GuardedRead(model+0x78,override_pose) || override_pose) gate=5;
+    else if (!GuardedRead(model+0x68,space) || space!=1) gate=6;
+    else if (!GuardedRead(model+0x6c,count) || count!=kBones) gate=7;
+  else if (!GuardedRead(model+0x70,data) || !data) gate=8;
+  else if (!ReadRig(model,data)) gate=9;
+  else if (!GuardedRead(player+0x850,output) || !output) gate=10;
+  // Qwen: run-7's real body copy has a DISTINCT palette, unlike this adapter's
+  // accepted alias fixture. Keep that path refused until its index remap and
+  // optional native proportion transforms are owned; deleting this check only
+  // writes the animation source after the visible-body copy already happened.
+  else if (!GuardedRead(output+0x60,output_data) || output_data!=data) gate=11;
+  if (gate) { if (g_pose_gate.exchange(gate)!=gate) ReportGate(); g_torso_smooth.Reset(); return; }
+  ArmPoseMatrix root{},assembly_root{};
+  std::array<ArmPoseMatrix,kBones> before{},corrected{},shoulder_scratch{};
   if (!GuardedReadBytes(model+0x30,&root,sizeof(root)) ||
+      !GuardedReadBytes(output+0x20,&assembly_root,sizeof(assembly_root)) ||
       !GuardedReadBytes(data,before.data(),sizeof(before))) {
     g_torso_smooth.Reset(); return;
   }
@@ -329,6 +395,64 @@ void __fastcall PoseUpdateDetour(void* self) {
   // Targets already exclude the camera's locomotion anchor. Invert only the
   // current root basis: adding/subtracting large world positions loses precision.
   root.m[3]=root.m[7]=root.m[11]=0;
+  float native_reach=0;
+  for (const auto& bones:g_rig.side) {
+    for (int bone:{bones.upper,bones.forearm,bones.hand})
+      if (!arm_pose_detail::ValidMatrix(before[bone])) return;
+    const float upper=VLen(arm_pose_detail::Sub(ArmPoseOrigin(before[bones.forearm]),ArmPoseOrigin(before[bones.upper])));
+    const float forearm=VLen(arm_pose_detail::Sub(ArmPoseOrigin(before[bones.hand]),ArmPoseOrigin(before[bones.forearm])));
+    if (!std::isfinite(upper) || !std::isfinite(forearm) || upper<1e-4f || forearm<1e-4f) return;
+    native_reach+=(upper+forearm)*.5f;
+  }
+  // Qwen handoff: a shared palette pointer is NOT a shared coordinate frame.
+  // FUN_140357a20 -> 140321f80/14020bec0 -> 140207f10 separately copies
+  // ChrModel+0x30 into ChrAsm+0x20 before mesh/attachment propagation. Editing
+  // the palette against one root while the consumer uses another detaches
+  // hands/equipment even though the old alias guard passes. Compare floats,
+  // not bytes: native 140209820 treats +0 and -0 as equal and may skip copying.
+  // Refuse divergence; never "repair" either native root by writing it here.
+  // Compare the FULL snapshot: `root` above is now translation-free solely
+  // for target inversion, not the coordinate frame held by either native owner.
+  for (int i=0;i<12;++i)
+    if (!std::isfinite(assembly_root.m[i]) || assembly_root.m[i]!=root_before.m[i]) {
+      if(g_pose_gate.exchange(12)!=12) ReportGate();
+      g_torso_smooth.Reset();return;
+    }
+  if (g_pose_gate.exchange(0)) ReportGate();
+  // Measure before any mod correction, never from the previously solved arm.
+  // Anatomy is rig-bound, not animated. Freeze a valid measurement so native
+  // floating-point animation noise cannot become a breathing world-scale gain.
+  if (!(g_native_arm_reach>0)) g_native_arm_reach=native_reach;
+  // Native stature, same rule as the reach: measured once from a fresh native
+  // palette before any mod correction, and only for a grounded upright stance
+  // (calibration_fit.h), so crouching, lunging or an airborne frame can never
+  // become the avatar's height. Absent bones leave it 0 and the fit falls back
+  // to the arm measurement instead of guessing.
+  if (!(g_native_head_height>0) && g_rig.head>=0 && g_rig.pelvis>=0 &&
+      g_rig.legs[0].foot>=0 && g_rig.legs[1].foot>=0 &&
+      arm_pose_detail::ValidMatrix(before[g_rig.head]) &&
+      arm_pose_detail::ValidMatrix(before[g_rig.pelvis]) &&
+      arm_pose_detail::ValidMatrix(before[g_rig.legs[0].foot]) &&
+      arm_pose_detail::ValidMatrix(before[g_rig.legs[1].foot])) {
+    const float upright=CalibrationNativeHeadHeight(
+        ArmPoseOrigin(before[g_rig.head]),ArmPoseOrigin(before[g_rig.pelvis]),
+        ArmPoseOrigin(before[g_rig.legs[0].foot]),
+        ArmPoseOrigin(before[g_rig.legs[1].foot]));
+    if (upright>0) g_native_head_height=upright;
+  }
+  if (!(g_native_shoulder_width>0) && g_rig.side[0].upper>=0 &&
+      g_rig.side[1].upper>=0 &&
+      arm_pose_detail::ValidMatrix(before[g_rig.side[0].upper]) &&
+      arm_pose_detail::ValidMatrix(before[g_rig.side[1].upper])) {
+    const float spread=VLen(arm_pose_detail::Sub(
+        ArmPoseOrigin(before[g_rig.side[1].upper]),
+        ArmPoseOrigin(before[g_rig.side[0].upper])));
+    if (std::isfinite(spread)&&spread>.1f&&spread<1.2f) g_native_shoulder_width=spread;
+  }
+  g_geometry_player=player;
+  if (g_targets.mapping.fitted && g_targets.mapping.model_revision!=g_rig.revision) {
+    g_torso_smooth.Reset();return;
+  }
   corrected=before;
   // Torso follows the head before either arm solves, so both shoulders
   // (the IK roots) share the wrist targets' frame. A missing spine chain
@@ -462,19 +586,8 @@ void __fastcall PoseUpdateDetour(void* self) {
   Vec3 support_grip{};
   auto map_grip=[&](unsigned side,Vec3& grip_target)->bool {
     if(!g_targets.valid[side] || !ArmPoseInversePoint(root,g_targets.relative[side],grip_target))return false;
-    if(g_targets.calibration.valid) {
-      const auto& bones=g_rig.side[side];
-      Vec3 head_local{},shoulder_offset{};
-      if(!ArmPoseInversePoint(root,g_targets.head,head_local) ||
-         
-         !ArmPoseInversePoint(root,g_targets.shoulder_offset[side],shoulder_offset))return false;
-      const float reach=VLen(arm_pose_detail::Sub(ArmPoseOrigin(corrected[bones.forearm]),ArmPoseOrigin(corrected[bones.upper])))+
-          VLen(arm_pose_detail::Sub(ArmPoseOrigin(corrected[bones.hand]),ArmPoseOrigin(corrected[bones.forearm])));
-      const float physical=CalibrationReachForScale(g_targets.calibration,(int)side)*g_targets.world_scale;
-      if(!(physical>.01f) || !std::isfinite(reach))return false;
-      grip_target=VAdd(ArmPoseOrigin(corrected[bones.upper]),
-          VScale(arm_pose_detail::Sub(arm_pose_detail::Sub(grip_target,head_local),shoulder_offset),reach/physical));
-    }
+    // Exactly the camera's metre conversion. A shoulder-local gain here used
+    // to cancel world scale and make virtual hands slide away from controllers.
     return FiniteVec(grip_target);
   };
   for (unsigned order=0;order<2;++order) {
@@ -517,18 +630,42 @@ void __fastcall PoseUpdateDetour(void* self) {
       if (!ArmPoseRollBasis(desired,desired_axis,roll,rolled)) return;
       desired=rolled;
     }
+    // Pole continuity before the solve: damp the head-space lift pole so the
+    // bend plane cannot chase the per-frame lift recomputation across the
+    // shoulder-height swing (raw fixture measured 0.26 m elbow travel in one
+    // frame). Head space keeps the filter independent of torso yaw; the model
+    // inverse below is then just a rigid rotation of the damped direction.
+    if (g_pole_epoch!=g_targets.epoch ||
+        g_pole_revision!=g_targets.calibration.revision ||
+        g_pole_seq+1<g_targets.sequence) {
+      g_pole_smooth[0].Reset(); g_pole_smooth[1].Reset();
+      g_bend_state[0].Reset(); g_bend_state[1].Reset();
+    }
+    g_pole_epoch=g_targets.epoch; g_pole_revision=g_targets.calibration.revision;
+    g_pole_seq=g_targets.sequence;
+    const float pole_dt=static_cast<float>(static_cast<std::int64_t>(g_targets.captured_ms)-
+                                           static_cast<std::int64_t>(g_pole_ms[side]));
+    if (pole_dt<0.f || pole_dt>250.f) g_pole_smooth[side].Reset();
+    // The bend rate reference is keyed by an exact input fingerprint, so a
+    // zero-length step (two frames captured inside one millisecond) replays it
+    // bit exactly. Only a real gap in tracking time - resume, teleport, scene
+    // unload - discards it, so a steady animation replays identically whatever
+    // side of a millisecond boundary the captures fall on.
+    if (pole_dt<0.f || pole_dt>250.f) g_bend_state[side].Reset();
+    g_pole_ms[side]=g_targets.captured_ms;
     Vec3 pole{};
-    if (!ArmPoseInversePoint(root,g_targets.pole[side],pole)) return;
+    if (!ArmPoseInversePoint(root,g_pole_smooth[side].Update(g_targets.pole[side],pole_dt),pole))
+      return;
     WeaponGripProfile placement;
     const bool have_profile=have_equipment && WeaponGripGet(equipment.weapon_id[side],cfg.dominant_hand_left,placement);
     if (have_profile &&
         !WeaponGripApplyPrimary(placement.primary,before[bones.hand],before[bones.weapon],
-                                cfg.world_scale,desired,grip_target)) return;
+                                g_targets.world_scale,desired,grip_target)) return;
     if(side==primary) {
       Vec3 offhand_grip{};
       if(have_profile && map_grip(offhand,offhand_grip))
         support_attached=WeaponGripSolveTwoHand(placement,before[bones.hand],before[bones.weapon],
-            cfg.world_scale,primary_anchor,offhand_grip,g_targets.squeeze[offhand],
+            g_targets.world_scale,primary_anchor,offhand_grip,g_targets.squeeze[offhand],
             g_targets.epoch,g_two_hand,desired,grip_target,support_grip);
       else g_two_hand.Reset();
       if(support_attached) support_rotation=placement.support.rotation_deg;
@@ -537,8 +674,11 @@ void __fastcall PoseUpdateDetour(void* self) {
       if(!WeaponGripApplySupportRotation(support_rotation,
           corrected[g_rig.side[primary].weapon],desired)) return;
     }
-    if (!ArmPoseWristForGrip(grip_target,desired,before[bones.hand],before[bones.weapon],wrist_target) ||
-        !SolveModelArmPose(corrected,g_rig.parents,bones,wrist_target,&pole).valid ||
+    if (!ArmPoseWristForGrip(grip_target,desired,before[bones.hand],before[bones.weapon],wrist_target)) return;
+    const auto arm_result = SolveModelArmPoseWithClavicle(
+        corrected,g_rig.parents,bones,wrist_target,shoulder_scratch,&pole,nullptr,
+        kArmBendMaxStepDeg,&g_bend_state[side]);
+    if (!arm_result.valid ||
         !OrientModelHandPose(corrected,g_rig.parents,bones.hand,desired,bones.fore_twist)) return;
     published.side[side]={true,have_equipment?equipment.weapon_id[side]:-1,
                           corrected[bones.hand],corrected[bones.weapon]};
@@ -568,7 +708,7 @@ void __fastcall PoseUpdateDetour(void* self) {
   std::uintptr_t current_model=0,current_data=0,current_selected=0;
   std::uintptr_t current_override=0,current_flver=0,current_entries=0;
   std::uintptr_t current_output=0,current_output_data=0;
-  ArmPoseMatrix current_root{};
+  ArmPoseMatrix current_root{},current_assembly_root{};
   unsigned current_space=0,current_count=0;
   std::array<unsigned char,kBones*0x30> current_rig{};
   std::array<ArmPoseMatrix,kBones> current{};
@@ -592,6 +732,8 @@ void __fastcall PoseUpdateDetour(void* self) {
       !GuardedRead(model+0x6c,current_count) || current_count!=count ||
       !GuardedReadBytes(model+0x30,&current_root,sizeof(current_root)) ||
       std::memcmp(&current_root,&root_before,sizeof(current_root))!=0 ||
+      !GuardedReadBytes(output+0x20,&current_assembly_root,sizeof(current_assembly_root)) ||
+      std::memcmp(&current_assembly_root,&assembly_root,sizeof(assembly_root))!=0 ||
       !GuardedReadBytes(g_rig.entries,current_rig.data(),current_rig.size()) || current_rig!=g_rig.records ||
       !GuardedReadBytes(data,current.data(),sizeof(current)) ||
       std::memcmp(current.data(),before.data(),sizeof(current))!=0) {
@@ -635,7 +777,7 @@ void __fastcall PoseUpdateDetour(void* self) {
               g_bench.weapon_id[1]!=equipment.weapon_id[1] ||
               g_bench.stance!=equipment.native_stance ||
               g_bench.calibration_revision!=g_targets.calibration.revision ||
-              g_bench.world_scale!=cfg.world_scale ||
+              g_bench.world_scale!=g_targets.world_scale ||
               g_bench.dominant_left!=cfg.dominant_hand_left ||
               g_targets.sequence<g_bench.sequence ||
               g_targets.predicted_time_ns<=g_bench.predicted_time_ns ||
@@ -650,7 +792,7 @@ void __fastcall PoseUpdateDetour(void* self) {
           g_bench.weapon_id[1]=equipment.weapon_id[1];
           g_bench.stance=equipment.native_stance;
           g_bench.calibration_revision=g_targets.calibration.revision;
-          g_bench.world_scale=cfg.world_scale;
+          g_bench.world_scale=g_targets.world_scale;
           g_bench.dominant_left=cfg.dominant_hand_left;
           const unsigned weapon_side = cfg.dominant_hand_left ? 0u : 1u;
           const unsigned shield_side = 1u - weapon_side;
@@ -787,6 +929,43 @@ void ArmIkResetCalibration() {
   g_reset_torso.store(true);
   InvalidateHands();
 }
+bool ArmIkNativeReach(float& native_reach, std::uint64_t& model_revision) {
+  native_reach=0;model_revision=0;
+  if (g_stopping.load() || GetCurrentThreadId()!=g_owner_thread.load() ||
+      !(g_native_arm_reach>0)) return false;
+  GuardedReadScope reads;
+  if (LocalPlayer()!=g_geometry_player) return false;
+  std::uintptr_t model=0,flver=0,entries=0,data=0;
+  std::array<unsigned char,kBones*0x30> records{};
+  ArmPoseMatrix root{};
+  if (!GuardedRead(g_geometry_player+0x60,model) || model!=g_rig.model ||
+      !GuardedRead(model+0x18,flver) || flver!=g_rig.flver ||
+      !GuardedRead(model+0x70,data) || data!=g_rig.data ||
+      !GuardedRead(flver+0x18,entries) || entries!=g_rig.entries ||
+      !GuardedReadBytes(entries,records.data(),records.size()) || records!=g_rig.records ||
+      !GuardedReadBytes(model+0x30,&root,sizeof(root)) ||
+      !arm_pose_detail::ValidMatrix(root)) return false;
+  const float scale=VLen(arm_pose_detail::Column(root,0));
+  for (int axis=1;axis<3;++axis)
+    if (std::fabs(VLen(arm_pose_detail::Column(root,axis))-scale)>1e-4f) return false;
+  native_reach=g_native_arm_reach*scale;model_revision=g_rig.revision;
+  return true;
+}
+// Native upright head height and shoulder-socket spread in world units, from the
+// same guarded chain validation and root scale as the arm reach. Read-only fit
+// input: it never writes a mesh scale, a bone base or a collider.
+bool ArmIkNativeStature(float& head_above_origin, float& shoulder_width,
+                        std::uint64_t& model_revision) {
+  head_above_origin=0;shoulder_width=0;model_revision=0;
+  if (!(g_native_head_height>0)||!(g_native_arm_reach>0)) return false;
+  float native_reach=0;
+  if (!ArmIkNativeReach(native_reach,model_revision)||!(native_reach>0)) return false;
+  const float scale=native_reach/g_native_arm_reach;  // the validated root scale
+  if (!std::isfinite(scale)||scale<=0.f) return false;
+  head_above_origin=g_native_head_height*scale;
+  shoulder_width=g_native_shoulder_width>0?g_native_shoulder_width*scale:0.f;
+  return true;
+}
 bool ArmIkHeadWorldDelta(Vec3& delta_world, std::uint64_t& sequence,
                          std::uint64_t& epoch) {
   delta_world={};sequence=0;epoch=0;
@@ -894,7 +1073,8 @@ void ArmIkTick(const TrackingFrame& frame) {
       !std::isfinite(cfg.world_scale) || cfg.world_scale<=0 || XrMenuPresentationActive() ||
       CalibrationCapturesInput()) { g_reset_torso.store(true); return; }
   Vec3 head{},right{},up{},forward{},anchor{}; float reference[4]{};
-  if (!CameraTrackingFrame(head,right,up,forward,reference,&anchor)) {
+  CalibrationMapping mapping;
+  if (!CameraTrackingFrame(head,right,up,forward,reference,&anchor,&mapping)) {
     g_reset_torso.store(true); return;
   }
   Vec3 head_right{},head_up{},head_forward{};
@@ -904,7 +1084,10 @@ void ArmIkTick(const TrackingFrame& frame) {
   if (!player) { g_reset_torso.store(true); return; }
   Targets targets{}; targets.player=player; targets.sequence=frame.sequence;
   targets.epoch=frame.space_epoch; targets.captured_ms=frame.captured_ms;
-  targets.calibration=CalibrationCurrent();targets.world_scale=cfg.world_scale;
+  targets.calibration=CalibrationCurrent();targets.mapping=mapping;
+  if (!mapping.valid || mapping.calibration_revision!=targets.calibration.revision ||
+      mapping.world_trim!=cfg.world_scale) {g_reset_torso.store(true);return;}
+  targets.world_scale=mapping.world_scale;
   targets.heading_right=right;targets.heading_up=up;targets.heading_forward=forward;
   targets.head_right=head_right;targets.head_up=head_up;targets.head_forward=head_forward;
   targets.head_basis_valid=have_head_basis;
@@ -912,14 +1095,14 @@ void ArmIkTick(const TrackingFrame& frame) {
   targets.head=relative;
   targets.physical_head={frame.head_pos[0],frame.head_pos[1],frame.head_pos[2]};
   targets.predicted_time_ns=frame.predicted_time_ns;
-  const float eye_height=CalibrationViewHeight(targets.calibration,cfg.eye_height,cfg.play_style=="seated");
+  const float eye_height=mapping.eye_height;
   // Locomotion-anchored lean: the anchor is the locomotion position, so
   // stick-walking moves anchor and head together and the difference (the
   // lean the torso bends toward) stays near zero. The torso can never
   // outrun the user while walking; it only bends when the head really
   // leaves the upright stance (a physical lean). Damped below; the raw
   // value here must already be locomotion-free.
-  targets.lean=arm_pose_detail::Sub(relative,VAdd(VScale(up,eye_height),VScale(forward,cfg.forward_offset_m)));
+  targets.lean=arm_pose_detail::Sub(relative,VAdd(VScale(up,eye_height),VScale(forward,cfg.forward_offset_m*targets.world_scale)));
   for (unsigned side=0;side<2;++side) {
     const auto& hand=frame.arm[side]; if (!hand.valid) continue;
     targets.squeeze[side]=hand.squeeze_held;
@@ -951,8 +1134,6 @@ void ArmIkTick(const TrackingFrame& frame) {
       targets.neutral_hand[side].m[4+axis]=hand_axes[axis].y;
       targets.neutral_hand[side].m[8+axis]=hand_axes[axis].z;
     }
-    targets.shoulder_offset[side]=VAdd(VScale(right,sign*targets.calibration.shoulder_half_width_m*cfg.world_scale),
-        VScale(up,-targets.calibration.head_to_arm_m*cfg.world_scale));
     targets.physical_grip[side]={hand.pos[0],hand.pos[1],hand.pos[2]};
     const Vec3 blade=BladeDirection(hand.quat[0]*inv,hand.quat[1]*inv,
                                     hand.quat[2]*inv,hand.quat[3]*inv);
@@ -962,7 +1143,7 @@ void ArmIkTick(const TrackingFrame& frame) {
     const Vec3 delta{hand.pos[0]-frame.head_pos[0],hand.pos[1]-frame.head_pos[1],
                      hand.pos[2]-frame.head_pos[2]};
     const auto offset=VAdd(relative,HeadTranslationFromReference(
-        delta,reference,right,up,forward,cfg.world_scale));
+        delta,reference,right,up,forward,targets.world_scale));
     if (!FiniteVec(offset) || VLen(offset)>10) { g_reset_torso.store(true); return; }
     targets.relative[side]=offset; targets.valid[side]=true;
     const float elevation=delta.y+targets.calibration.head_to_arm_m;

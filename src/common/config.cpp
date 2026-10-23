@@ -167,6 +167,8 @@ void Apply(Config& c, std::string_view section_raw, std::string_view key_raw,
       c.world_scale = Clamp(f, 0.5f, 2.0f);
     if (k == "forward_offset_m" && ParseFloat(value, f))
       c.forward_offset_m = Clamp(f, 0.0f, 0.4f);
+    if (k == "eye_clearance_m" && ParseFloat(value, f))
+      c.eye_clearance_m = Clamp(f, 0.0f, 1.2f);
     if (k == "hide_head" && ParseBool(value, b)) c.hide_head = b;
     if (k == "forearm_only" && ParseBool(value, b)) c.forearm_only = b;
     if (k == "hide_ui_in_vr" && ParseBool(value, b)) c.hide_ui_in_vr = b;
@@ -175,6 +177,11 @@ void Apply(Config& c, std::string_view section_raw, std::string_view key_raw,
     if ((k == "hide_second_model" || k == "hide_weapon_model") &&
         ParseBool(value, b))
       c.hide_second_model = b;
+    // Unknown anchors retain the default, as with an unknown play_style.
+    if (k == "embodiment_fit") {
+      const std::string v = ToLower(Trim(value));
+      if (v == "head" || v == "arm") c.embodiment_fit = v;
+    }
   } else if (s == "combat") {
     bool b;
     float f;
@@ -382,8 +389,12 @@ bool ConfigSave(const wchar_t* toml_path, const Config& c) {
   fprintf(f, "[controls]\n");
   fprintf(f, "dominant_hand = \"%s\"\n",
           c.dominant_hand_left ? "left" : "right");
+  fprintf(f, "# Left stick is always steered by one live reference: \"head\" (default,\n");
+  fprintf(f, "# head-oriented smooth locomotion) or \"controller\" (the selected hand's aim,\n");
+  fprintf(f, "# falling back to head when that hand is untracked or aimed vertically).\n");
   fprintf(f, "movement_orientation = \"%s\"\n",
           c.movement_orientation == MovementOrientation::Controller ? "controller" : "head");
+  fprintf(f, "# Which hand steers in controller mode: non_dominant | left | right.\n");
   const char* movement_controller =
       c.movement_controller == MovementController::Left ? "left" :
       c.movement_controller == MovementController::Right ? "right" : "non_dominant";
@@ -400,13 +411,19 @@ bool ConfigSave(const wchar_t* toml_path, const Config& c) {
   fprintf(f, "world_scale = %s\n", FmtFloat(c.world_scale).c_str());
   fprintf(f, "# Horizontal clearance from the player mesh; 0 disables it.\n");
   fprintf(f, "forward_offset_m = %s\n", FmtFloat(c.forward_offset_m).c_str());
+  fprintf(f, "eye_clearance_m = %s\n", FmtFloat(c.eye_clearance_m).c_str());
   fprintf(f, "hide_player_model = %s\n", c.hide_player_model ? "true" : "false");
   fprintf(f, "hide_head = %s\n", c.hide_head ? "true" : "false");
   fprintf(f, "forearm_only = %s\n", c.forearm_only ? "true" : "false");
   fprintf(f, "hide_ui_in_vr = %s\n", c.hide_ui_in_vr ? "true" : "false");
   fprintf(f, "# Second player render model (weapon/shield side) stays visible\n");
   fprintf(f, "# unless this is true. Flip it if your body shows but weapon does not.\n");
-  fprintf(f, "hide_second_model = %s\n\n", c.hide_second_model ? "true" : "false");
+  fprintf(f, "hide_second_model = %s\n", c.hide_second_model ? "true" : "false");
+  fprintf(f, "# Body fit anchor: \"head\" (default) sizes the world so the native Head\n");
+  fprintf(f, "# bone lands on your eye height; \"arm\" sizes by measured hand reach.\n");
+  fprintf(f, "# Either way one ratio moves the whole world and player together; bones,\n");
+  fprintf(f, "# collision and an independent mesh resize are never changed by this.\n");
+  fprintf(f, "embodiment_fit = \"%s\"\n\n", c.embodiment_fit.c_str());
 
   fprintf(f, "[combat]\n");
   fprintf(f, "motion_attacks = %s\n", c.motion_attacks ? "true" : "false");
@@ -455,13 +472,15 @@ bool ConfigValid(const Config& c) {
       range(c.smooth_turn_speed_dps, 30, 360) && range(c.mono_screen_fov_deg, 30, 110) &&
       range(c.menu_distance_m, 1, 4) && range(c.menu_reading_fov_deg, 45, 80) &&
       range(c.eye_height, .5f, 2.5f) && range(c.world_scale, .5f, 2) &&
-      range(c.forward_offset_m, 0, .4f) && range(c.swing_speed_min, .2f, 10) &&
+      range(c.forward_offset_m, 0, .4f) && range(c.eye_clearance_m, 0, 1.2f) &&
+      range(c.swing_speed_min, .2f, 10) &&
       range(c.swing_damage_gain, .1f, 5) && range(c.thrust_speed_min, .2f, 10) &&
       range(c.grip_roll_correction_deg, -45, 45) && range(c.contact_speed_min, .1f, 5) &&
       c.rehit_window_ms >= 50 && c.rehit_window_ms <= 2000 &&
       range(c.combat_test_target_m, 0.5f, 2.0f) && range(c.weapon_separation_min_m, 0.0f, 0.5f) &&
       c.log_marker_vk >= 0 && c.log_marker_vk <= 255 && c.config_reload_vk >= 0 && c.config_reload_vk <= 255 &&
       (c.play_style == "standing" || c.play_style == "seated" || c.play_style == "roomscale") &&
+      (c.embodiment_fit == "head" || c.embodiment_fit == "arm") &&
       (c.movement_reference == MovementReference::Head ||
        c.movement_reference == MovementReference::LeftHand ||
        c.movement_reference == MovementReference::RightHand) &&

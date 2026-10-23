@@ -35,6 +35,11 @@ unsigned forbidden = 0, originals = 0, invalid_reads = 0, reads = 0;
 unsigned creates = 0, removes = 0;
 bool active = true, signature = true, fail_enable = false, replace_capture = false;
 bool global_read = true, container_read = true;
+bool calibration_test = false, native_head_available = false;
+unsigned camera_applies = 0;
+std::uint64_t stature_revision = 9, applied_sequence = 0;
+dsvr::CalibrationMapping applied_mapping;
+void MutationCall() { if (!calibration_test) ++forbidden; }
 std::uint64_t capture = 7;
 std::vector<dsvr::VrTraceEvent> events;
 void __fastcall Original(void* self, float dt, void* arg3, float* arg4) {
@@ -58,9 +63,16 @@ MH_STATUS WINAPI MH_DisableHook(LPVOID) { return MH_OK; }
 MH_STATUS WINAPI MH_RemoveHook(LPVOID) { ++removes; return MH_OK; }
 
 namespace dsvr {
-UserCalibration CalibrationCurrent() {return {};}
+UserCalibration CalibrationCurrent() {
+  UserCalibration profile;
+  if (calibration_test) {
+    profile.valid = true; profile.revision = 17;
+    profile.arm_reach_m[0] = profile.arm_reach_m[1] = .6f;
+  }
+  return profile;
+}
 void CameraPrepareNativeUpdate(void*) {}
-void CameraTrackingSpaceChanged(std::uint64_t) {++forbidden;}
+void CameraTrackingSpaceChanged(std::uint64_t) { MutationCall(); }
 void LogWrite(LogLevel, const char*, int, const char*, ...) {}
 std::uintptr_t ModuleBase(const wchar_t*) { return base; }
 bool BytesMatch(std::uintptr_t, const void*, std::size_t) { return signature; }
@@ -93,25 +105,49 @@ void VrTraceRecord(VrTraceEvent e) {
 bool VrTraceActive() { return active; }
 std::uint64_t VrTraceCaptureId() { return capture; }
 Config DiagnosticsCurrentConfig() {
-  ++forbidden;
+  MutationCall();
   Config c;
   c.vr_enabled = c.headlook_enabled = c.xr_input_enabled = c.arm_ik_enabled = true;
   return c;
 }
-bool LabWantsObservation() { ++forbidden; return true; }
+bool LabWantsObservation() { MutationCall(); return !calibration_test; }
 void LabObserveGame(LabObservation) { ++forbidden; }
 void CameraReadLabObservation(void*, LabObservation&) { ++forbidden; }
-void CameraTraceFollowCam(void*) { ++forbidden; }
-void CameraResetHeadlook() { ++forbidden; }
-void CameraPublishHeadDirectedLocomotion(std::uint64_t) { ++forbidden; }
-void InputInvalidateHeadDirectedLocomotion() { ++forbidden; }
+void CameraTraceFollowCam(void*) { MutationCall(); }
+void CameraResetHeadlook() { MutationCall(); }
+void CameraPublishHeadDirectedLocomotion(std::uint64_t) { MutationCall(); }
+void InputInvalidateHeadDirectedLocomotion() { MutationCall(); }
 bool CameraApplyFirstPerson(void*, float, float, float, float, float, float,
-    float, float, float, float, float, float, float) { ++forbidden; return true; }
-bool XrMenuPresentationActive() { ++forbidden; return false; }
-bool XrLatestTrackingFrame(TrackingFrame&) { ++forbidden; return true; }
-void XrRecordCameraSequence(std::uint64_t) { ++forbidden; }
-float InputTakeTurnYaw() { ++forbidden; return 1; }
-void ArmIkTick(const TrackingFrame&) { ++forbidden; }
+    float, float, float, float, float, float, float, float,
+    const CalibrationMapping* mapping) {
+  MutationCall(); ++camera_applies;
+  if (mapping) applied_mapping = *mapping;
+  return true;
+}
+bool XrMenuPresentationActive() { MutationCall(); return false; }
+bool XrLatestTrackingFrame(TrackingFrame& frame) {
+  MutationCall();
+  frame.head_quat[3] = 1;
+  frame.head_pos[1] = 1.65f;
+  frame.space_epoch = 3; frame.sequence = 99;
+  frame.vfov_rad = 1.4f; frame.fov_aspect = 1.1f;
+  return true;
+}
+void XrRecordCameraSequence(std::uint64_t sequence) { MutationCall(); applied_sequence = sequence; }
+float InputTakeTurnYaw() { MutationCall(); return 1; }
+void ArmIkTick(const TrackingFrame&) { MutationCall(); }
+bool ArmIkNativeReach(float& reach, std::uint64_t& revision) {
+  MutationCall(); reach = .54f; revision = 9; return calibration_test;
+}
+// Same read-only fit query: the observer path must never ask the IK driver for
+// native stature either, so it is counted like every other forbidden call.
+bool ArmIkNativeStature(float& head, float& shoulders, std::uint64_t& revision) {
+  MutationCall();
+  head = native_head_available ? 1.8f : 0;
+  shoulders = native_head_available ? .42f : 0;
+  revision = native_head_available ? stature_revision : 0;
+  return calibration_test && native_head_available;
+}
 void ArmIkHookUninstall() {}
 }
 
@@ -172,6 +208,23 @@ int main() {
   CHECK(events.size() == 5 && events[1].object == 0 && events[1].flags == 0);
   CHECK(events[2].flags == 0x101 && events[2].object == fields[2]);
   CHECK(forbidden == 0 && invalid_reads == 0);
+  CameraHookUninstall();
+  // The gameplay detour must retain a valid arm fit while upright native head
+  // geometry is unavailable; the two native queries have independent outputs.
+  calibration_test = true;
+  active = false;
+  CHECK(CameraHookInstall(true, false));
+  detour(follow, 0.25f, &words, follow);
+  CHECK(camera_applies == 1 && applied_sequence == 99);
+  CHECK(applied_mapping.valid && applied_mapping.fit == CalibrationFit::Arm &&
+        applied_mapping.model_revision == 9);
+  native_head_available = true;
+  detour(follow, 0.25f, &words, follow);
+  CHECK(camera_applies == 2 && applied_mapping.fit == CalibrationFit::Head &&
+        applied_mapping.model_revision == 9);
+  stature_revision = 10;
+  detour(follow, 0.25f, &words, follow);
+  CHECK(camera_applies == 2 && applied_sequence == 0);  // refuse mixed rig snapshots
   CameraHookUninstall();
   std::puts("test_camera_observer: PASS (fixture only, native layout unverified)");
   return 0;

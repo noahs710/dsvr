@@ -25,6 +25,7 @@
 #include "turn_math.h"
 #include "vr_heading.h"
 #include "xr.h"
+#include "camera.h"
 
 namespace dsvr {
 // Calibration owns the coherent TrackingFrame sample in xr.cpp. Input only
@@ -67,7 +68,7 @@ VirtualPadState g_pad_state{};
 bool g_pad_active = false;
 struct HeadDirectedLocomotion {
   Vec3 head_forward{};
-  Vec3 native_forward{};
+  Vec3 movement_basis{};  // basis native interprets the stick in
   std::uint64_t space_epoch = 0;
   std::uint64_t published_ms = 0;
   bool valid = false;
@@ -100,6 +101,15 @@ bool g_capture_rearm = false;
 constexpr long long kStickMenuChordNs = 3000000000LL;
 constexpr long long kDoubleAClickWindowNs = 700000000LL;
 constexpr long long kDoubleAClickMinSpacingNs = 90000000LL;
+// Hold both secondary buttons for half a second as a theater shortcut that
+// remains available when the runtime reserves the controller's Menu button.
+constexpr long long kSanctuaryChordNs = 500000000LL;
+// Lead-in: the moment either constituent goes down, both are withheld. A chord
+// must never leak its individual press into the game (no accidental dodge or
+// heal on the way to theater mode). If the partner never arrives, the lone
+// press is released once this window closes.
+constexpr long long kChordLeadInNs = 250000000LL;
+ButtonPairChord g_sanctuary_chord(kSanctuaryChordNs, kChordLeadInNs);
 
 bool OkInput(XrResult r, const char* what) {
   if (XR_SUCCEEDED(r)) return true;
@@ -156,20 +166,24 @@ void SuggestAll() {
   const Row full[] = {
       {g_grip_pose, "/user/hand/left/input/grip/pose",
        "/user/hand/right/input/grip/pose"},
-      {g_squeeze, "/user/hand/left/input/squeeze/value",
-       "/user/hand/right/input/squeeze/value"},
+      {g_squeeze, "/user/hand/left/input/squeeze/click",
+       "/user/hand/right/input/squeeze/click"},
       {g_trigger, "/user/hand/left/input/trigger/value",
        "/user/hand/right/input/trigger/value"},
       {g_stick, "/user/hand/left/input/thumbstick",
        "/user/hand/right/input/thumbstick"},
       {g_haptic, "/user/hand/left/output/haptic",
        "/user/hand/right/output/haptic"},
+      {g_menu, "/user/hand/left/input/menu/click",
+       "/user/hand/right/input/menu/click"},
+      {g_stick_click, "/user/hand/left/input/thumbstick/click",
+       "/user/hand/right/input/thumbstick/click"},
   };
   const char* profiles[] = {
       "/interaction_profiles/microsoft/motion_controller",
   };
   for (const char* profile : profiles) {
-    XrActionSuggestedBinding list[10]{};
+    XrActionSuggestedBinding list[14]{};
     uint32_t n = 0;
     for (const Row& row : full) {
       for (int side = 0; side < 2; ++side) {
@@ -215,7 +229,7 @@ void SuggestAll() {
     Suggest("/interaction_profiles/oculus/touch_controller", list, n);
   }
   {
-    XrActionSuggestedBinding list[16]{};
+    XrActionSuggestedBinding list[18]{};
     uint32_t n = 0;
     const struct { XrAction action; const char* path; } rows[] = {
         {g_grip_pose, "/user/hand/left/input/grip/pose"},
@@ -234,6 +248,8 @@ void SuggestAll() {
         {g_secondary, "/user/hand/right/input/b/click"},
         {g_stick_click, "/user/hand/left/input/thumbstick/click"},
         {g_stick_click, "/user/hand/right/input/thumbstick/click"},
+        {g_menu, "/user/hand/left/input/system/click"},
+        {g_menu, "/user/hand/right/input/system/click"},
     };
     for (const auto& row : rows) {
       XrPath p = XR_NULL_PATH;
@@ -242,6 +258,8 @@ void SuggestAll() {
     }
     Suggest("/interaction_profiles/valve/index_controller", list, n);
   }
+  // Submit each profile once: a later successful suggestion replaces the
+  // entire previous set, including poses, analog input and haptics.
   // KHR simple: poses + haptics only (no stick/squeeze/trigger values).
   {
     XrActionSuggestedBinding list[6]{};
@@ -360,6 +378,8 @@ struct RoomscaleSampler {
   Vec3 previous_head{};
   long long previous_time_ns = 0;
   std::uint64_t epoch = 0;
+  std::uint64_t calibration_revision = 0;
+  float world_scale = 1.f;
   bool primed = false;
 };
 std::mutex g_roomscale_mutex;
@@ -392,11 +412,15 @@ bool UpdateRoomscaleInput(VrPadInput& pad, Vec3 head, std::uint64_t epoch,
   if (!basis.valid || basis.space_epoch != epoch || now < basis.published_ms ||
       now - basis.published_ms > 100) { ResetRoomscaleLocked(); return false; }
   if (!g_roomscale_sampler.primed || g_roomscale_sampler.epoch != epoch ||
+       g_roomscale_sampler.calibration_revision != basis.calibration_revision ||
+       g_roomscale_sampler.world_scale != basis.world_scale ||
       predicted_time_ns <= g_roomscale_sampler.previous_time_ns ||
       predicted_time_ns - g_roomscale_sampler.previous_time_ns > 100000000) {
     g_roomscale_sampler.previous_head = head;
     g_roomscale_sampler.previous_time_ns = predicted_time_ns;
     g_roomscale_sampler.epoch = epoch;
+    g_roomscale_sampler.calibration_revision = basis.calibration_revision;
+    g_roomscale_sampler.world_scale = basis.world_scale;
     g_roomscale_sampler.primed = true;
     g_roomscale_motion = {};
     return false;
@@ -413,7 +437,7 @@ bool UpdateRoomscaleInput(VrPadInput& pad, Vec3 head, std::uint64_t epoch,
       VScale(basis.tracking_up, delta.y)), VScale(basis.tracking_forward, -delta.z));
   const Vec3 world_velocity = VScale(world_delta, 1.0f / dt);
   VrHeading native;
-  if (!FiniteVec(world_velocity) || !native.SeedOnce(basis.native_forward)) {
+  if (!FiniteVec(world_velocity) || !native.SeedOnce(basis.movement_basis)) {
     g_roomscale_motion = {};
     return false;
   }
@@ -421,13 +445,13 @@ bool UpdateRoomscaleInput(VrPadInput& pad, Vec3 head, std::uint64_t epoch,
   const float right_speed = VDot(world_velocity, movement.r);
   const float forward_speed = VDot(world_velocity, movement.f);
   const RoomscaleAxes axes = RoomscaleAxesFromVelocity(
-      right_speed, forward_speed, cfg.world_scale);
+      right_speed, forward_speed, basis.world_scale);
   pad.roomscale_x = axes.x;
   pad.roomscale_y = axes.y;
   if (axes.active) {
     g_roomscale_motion.world_velocity = VAdd(
-        VScale(movement.r, right_speed * cfg.world_scale),
-        VScale(movement.f, forward_speed * cfg.world_scale));
+        VScale(movement.r, right_speed * basis.world_scale),
+        VScale(movement.f, forward_speed * basis.world_scale));
     g_roomscale_motion.space_epoch = epoch;
     g_roomscale_motion.published_ms = now;
     g_roomscale_motion.expires_ms = now + 150;
@@ -535,6 +559,7 @@ void InputInvalidateFrame() {
   InputInvalidateHeadDirectedLocomotion();
   g_pending_turn_yaw.store(0.0f, std::memory_order_relaxed);
   g_combos.Reset();
+  g_sanctuary_chord.Reset();
   g_turn.Reset();
   g_blade[0].Reset();
   g_blade[1].Reset();
@@ -551,14 +576,15 @@ void InputInvalidateFrame() {
   ResetRoomscaleState();
 }
 
-void InputPublishHeadDirectedLocomotion(Vec3 head_forward, Vec3 native_forward,
-                                        std::uint64_t space_epoch) {
+void InputPublishHeadDirectedLocomotion(Vec3 head_forward,
+                                       Vec3 movement_basis_forward,
+                                       std::uint64_t space_epoch) {
   HeadDirectedLocomotion next{};
   VrHeading heading;
   if (space_epoch && heading.SeedOnce(head_forward) &&
-      heading.CandidateLocomotion(0.0f, 0.0f, native_forward).valid) {
+      heading.CandidateLocomotion(0.0f, 0.0f, movement_basis_forward).valid) {
     next.head_forward = head_forward;
-    next.native_forward = native_forward;
+    next.movement_basis = movement_basis_forward;
     next.space_epoch = space_epoch;
     next.published_ms = GetTickCount64();
     next.valid = true;
@@ -570,10 +596,11 @@ void InputPublishHeadDirectedLocomotion(Vec3 head_forward, Vec3 native_forward,
 void InputPublishRoomscaleBasis(const RoomscaleBasis& basis) {
   std::lock_guard<std::mutex> lock(g_roomscale_mutex);
   if (!basis.space_epoch || !FiniteVec(basis.tracking_right) ||
+      !std::isfinite(basis.world_scale) || !(basis.world_scale > 0.f) ||
       !FiniteVec(basis.tracking_up) || !FiniteVec(basis.tracking_forward) ||
-      !FiniteVec(basis.native_forward) || VLen(basis.tracking_right) < 0.9f ||
+      !FiniteVec(basis.movement_basis) || VLen(basis.tracking_right) < 0.9f ||
       VLen(basis.tracking_up) < 0.9f || VLen(basis.tracking_forward) < 0.9f ||
-      VLen(basis.native_forward) < 0.5f) {
+      VLen(basis.movement_basis) < 0.5f) {
     g_roomscale_basis = {};
     ResetRoomscaleLocked();
     return;
@@ -581,7 +608,9 @@ void InputPublishRoomscaleBasis(const RoomscaleBasis& basis) {
   g_roomscale_basis = basis;
   g_roomscale_basis.published_ms = GetTickCount64();
   g_roomscale_basis.valid = true;
-  if (g_roomscale_sampler.epoch != basis.space_epoch) ResetRoomscaleLocked();
+  if (g_roomscale_sampler.epoch != basis.space_epoch ||
+      g_roomscale_sampler.calibration_revision != basis.calibration_revision ||
+      g_roomscale_sampler.world_scale != basis.world_scale) ResetRoomscaleLocked();
 }
 
 bool InputLatestRoomscaleMotion(RoomscaleMotion& out) {
@@ -866,6 +895,7 @@ void InputPollFrame(void* base_space, const float head_pos[3],
     PublishPad({}, pad_active);
     g_turn.Reset();
     g_combos.Reset();
+    g_sanctuary_chord.Reset();
     g_pending_turn_yaw.store(0.0f, std::memory_order_relaxed);
     g_blade[0].Reset();
     g_blade[1].Reset();
@@ -884,6 +914,16 @@ void InputPollFrame(void* base_space, const float head_pos[3],
     buttons.lstick = pad_input.left.stick_click;
     buttons.rstick = pad_input.right.stick_click;
     const unsigned combos = g_combos.Update(buttons);
+    // Alternate theater shortcut when Menu belongs to system UI. The same
+    // state owns deferred lone taps and suppresses the entire consumed chord.
+    const auto secondary = g_sanctuary_chord.Update(
+        pad_input.left.secondary, pad_input.right.secondary, predicted_display_time);
+    pad_input.left.secondary = secondary.first;
+    pad_input.right.secondary = secondary.second;
+    if (secondary.triggered) {
+      XrToggleSanctuary();
+      DSVR_LOG("Input: chord Y+B held -> theater toggle (F8)");
+    }
     if (combos & kComboTheater) {
       XrToggleSanctuary();
       DSVR_LOG("Input: combo Menu+Y -> theater toggle (F8)");
@@ -901,6 +941,7 @@ void InputPollFrame(void* base_space, const float head_pos[3],
       DSVR_LOG("Input: combo Menu+B -> reload config (F7)");
     }
     if (buttons.menu) {
+      g_sanctuary_chord.Reset();
       pad_input.left.primary = false;
       pad_input.left.secondary = false;
       pad_input.right.secondary = false;
@@ -941,8 +982,12 @@ void InputPollFrame(void* base_space, const float head_pos[3],
     if (!fresh) {
       pad_input.left.stick_x = pad_input.left.stick_y = 0.0f;
     } else {
+      // The left stick always has exactly one live orientation reference. In
+      // Controller mode that is the selected hand's grip heading while it is
+      // usable; otherwise the head reference carried by this same fresh
+      // locomotion packet steers. A lost or vertically-aimed hand removes
+      // hand-relative steering, it never deadens locomotion.
       Vec3 reference_forward = locomotion.head_forward;
-      bool reference_valid = true;
       if (g_active_movement_orientation == MovementOrientation::Controller) {
         const int hand = g_active_movement_hand;
         RoomscaleBasis tracking_basis{};
@@ -957,8 +1002,7 @@ void InputPollFrame(void* base_space, const float head_pos[3],
           g_have_controller_heading = false;
           g_controller_vertical = false;
           g_controller_rearm_required = true;
-          reference_valid = false;
-        } else {
+          } else {
           if (g_controller_heading_epoch != space_epoch ||
               g_controller_heading_hand != hand) {
             g_have_controller_heading = false;
@@ -979,8 +1023,7 @@ void InputPollFrame(void* base_space, const float head_pos[3],
             g_have_controller_heading = false;
             g_controller_vertical = false;
             g_controller_rearm_required = true;
-            reference_valid = false;
-          } else {
+            } else {
             if (planar >= 0.3f) {
               g_last_controller_forward =
                   {world_forward.x / planar, 0.0f, world_forward.z / planar};
@@ -990,18 +1033,20 @@ void InputPollFrame(void* base_space, const float head_pos[3],
             } else if (planar <= 0.2f) {
               g_controller_vertical = true;
             }
+            // The rearm latch gates the HAND heading only: a reacquired hand
+              // must not yank a player who is already travelling head-oriented.
             const bool may_reuse = g_have_controller_heading &&
-                (g_controller_vertical || planar >= 0.2f);
-            reference_valid = may_reuse && !g_controller_rearm_required;
-            if (reference_valid) reference_forward = g_last_controller_forward;
+                  (g_controller_vertical || planar >= 0.2f) &&
+                !g_controller_rearm_required;
+            if (may_reuse) reference_forward = g_last_controller_forward;
           }
         }
       }
       VrHeading heading;
-      const auto candidate = reference_valid && heading.SeedOnce(reference_forward)
+      const auto candidate = heading.SeedOnce(reference_forward)
           ? heading.CandidateLocomotion(pad_input.left.stick_x,
                                         pad_input.left.stick_y,
-                                        locomotion.native_forward)
+                                        locomotion.movement_basis)
           : VrLocomotionCandidate{};
       if (candidate.valid) {
         pad_input.left.stick_x = candidate.stick_x;
@@ -1011,7 +1056,7 @@ void InputPollFrame(void* base_space, const float head_pos[3],
       }
     }
   }
-  { const bool roomscale_active = UpdateRoomscaleInput(pad_input, head, space_epoch, predicted_display_time, cfg, sanctuary); PublishPad(MapVrPad(pad_input,sanctuary), pad_active || roomscale_active); }
+  { const bool roomscale_active = UpdateRoomscaleInput(pad_input, head, space_epoch, predicted_display_time, cfg, sanctuary); PublishPad(MapVrPad(pad_input,sanctuary||!CameraGameplayReady()), pad_active || roomscale_active); }
 
   // Stick turn: sanctuary freezes the world; otherwise the tracker owns
   // snap/smooth and only the accumulated delta crosses to the game thread.

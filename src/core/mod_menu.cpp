@@ -156,22 +156,13 @@ void FeedInput(unsigned width,unsigned height) {
   g_last_frame=now;io.DisplaySize={static_cast<float>(width),static_cast<float>(height)};
   const bool focused=GetForegroundWindow()==g_window;
   io.AddFocusEvent(focused || pointer.spatial_menu);
-  POINT mouse{};RECT client{};
-  if (pointer.spatial_menu) {
-    if (pointer.valid) io.AddMousePosEvent(pointer.x,pointer.y);
-    else io.AddMousePosEvent(-FLT_MAX,-FLT_MAX);
-  } else if (focused && GetCursorPos(&mouse) && ScreenToClient(g_window,&mouse) && GetClientRect(g_window,&client) &&
-             client.right>0 && client.bottom>0)
-    io.AddMousePosEvent(static_cast<float>(mouse.x)*width/client.right,
-                        static_cast<float>(mouse.y)*height/client.bottom);
+  // Outside pointer mode the desktop cursor is a phantom input. A live mouse
+  // position makes ImGui treat the mouse as the active navigation source, so
+  // the d-pad never drives navigation. Report "no mouse" instead.
+  if (pointer.spatial_menu && pointer.valid) io.AddMousePosEvent(pointer.x,pointer.y);
   else io.AddMousePosEvent(-FLT_MAX,-FLT_MAX);
-  for (int i=0;i<3;++i) {
-    const int key=i==0?VK_LBUTTON:(i==1?VK_RBUTTON:VK_MBUTTON);
-    const bool down=pointer.spatial_menu
-        ? i==0 && MenuPointerMouseDown(pointer)
-        : focused && (GetAsyncKeyState(key)&0x8000);
-    io.AddMouseButtonEvent(i,down);
-  }
+  for (int i=0;i<3;++i)
+    io.AddMouseButtonEvent(i,pointer.spatial_menu && i==0 && MenuPointerMouseDown(pointer));
   struct Key { int native;ImGuiKey gui; };
   constexpr Key keys[]={{VK_TAB,ImGuiKey_Tab},{VK_LEFT,ImGuiKey_LeftArrow},
     {VK_RIGHT,ImGuiKey_RightArrow},{VK_UP,ImGuiKey_UpArrow},{VK_DOWN,ImGuiKey_DownArrow},
@@ -304,8 +295,8 @@ void CalibrationPanel() {
         "Use Recalibrate to replace them during this session.");
   if (profile.valid) {
     ImGui::Text("Eye height  %.2f m%s",profile.eye_height_m,profile.floor_height_measured?" (measured)":" (setup value)");
-    ImGui::Text("Arm span  %.2f m",profile.arm_span_m);
-    ImGui::Text("Left / right reach  %.2f / %.2f m",profile.arm_reach_m[0],profile.arm_reach_m[1]);
+    ImGui::Text("Estimated arm span  %.2f m",profile.arm_span_m);
+    ImGui::Text("Estimated left / right reach  %.2f / %.2f m",profile.arm_reach_m[0],profile.arm_reach_m[1]);
     ImGui::Text("Saved profile revision  %llu",static_cast<unsigned long long>(profile.revision));
   }
   if (ImGui::Button("Recalibrate...")) { CalibrationRequest();ModMenuClose(); }
@@ -316,10 +307,17 @@ void CalibrationPanel() {
   if(ImGui::Combo("Play position",&position,"Standing\0Seated\0Roomscale\0")) {
     g_draft.play_style=position==1?"seated":position==2?"roomscale":"standing";g_dirty=true;
   }
-  ImGui::TextWrapped("Seated mode keeps the configured avatar eye height; measured floor height remains saved separately.");
+  ImGui::TextWrapped("Seated mode keeps your configured standing eye height; sitting does not shrink your anatomy. Floor height stays saved separately.");
+  int fit = g_draft.embodiment_fit == "arm" ? 1 : 0;
+  if (ImGui::Combo("Body fit anchored on", &fit,
+                   "Native head bone (default)\0Native arm reach\0")) {
+    g_draft.embodiment_fit = fit == 1 ? "arm" : "head";
+    g_dirty = true;
+  }
+  ImGui::TextWrapped("Head fit sets one automatic scale for the whole world and player so the native Head bone lands on your eye height: the camera sits in the avatar's own head and the body takes the space your body does. Arm fit instead matches your measured hand reach exactly, and the head may sit off the head bone. Either way bones and collision are not scaled, and independent avatar mesh resizing is not yet verified.");
   ImGui::Separator();
-  g_dirty|=ImGui::SliderFloat("Avatar / fallback eye height (m)",&g_draft.eye_height,.7f,2.3f,"%.2f",ImGuiSliderFlags_AlwaysClamp);
-  g_dirty|=ImGui::SliderFloat("World scale",&g_draft.world_scale,.5f,2.f,"%.2f",ImGuiSliderFlags_AlwaysClamp);
+  g_dirty|=ImGui::SliderFloat("Standing / fallback eye height (m)",&g_draft.eye_height,.7f,2.3f,"%.2f",ImGuiSliderFlags_AlwaysClamp);
+  g_dirty|=ImGui::SliderFloat("World / player scale trim",&g_draft.world_scale,.5f,2.f,"%.2f",ImGuiSliderFlags_AlwaysClamp);
   g_dirty|=ImGui::SliderFloat("Wrist roll trim (degrees)",&g_draft.grip_roll_correction_deg,-45,45,"%.1f",ImGuiSliderFlags_AlwaysClamp);
   if (status.saving) ImGui::TextDisabled("Saving calibration...");
 }
@@ -393,21 +391,22 @@ void SettingsPanel() {
   ImGui::EndDisabled();
   if(!ui.installed)ImGui::TextDisabled("Native UI hook unavailable for this session.");
   ImGui::Separator();
-  static const char* movement_modes[] = {"Head", "Controller"};
+  static const char* movement_modes[] = {"Head (default)", "Controller hand"};
   int movement_mode = static_cast<int>(g_draft.movement_orientation);
-  if (ImGui::Combo("Movement orientation", &movement_mode, movement_modes, 2)) {
+  if (ImGui::Combo("Left stick oriented by", &movement_mode, movement_modes, 2)) {
     g_draft.movement_orientation = static_cast<MovementOrientation>(movement_mode);
     g_dirty = true;
   }
-  static const char* movement_controllers[] = {"Non-dominant", "Left", "Right"};
+  static const char* movement_controllers[] = {"Non-dominant hand", "Left hand", "Right hand"};
   int movement_controller = static_cast<int>(g_draft.movement_controller);
   ImGui::BeginDisabled(g_draft.movement_orientation != MovementOrientation::Controller);
-  if (ImGui::Combo("Controller reference", &movement_controller,
+  if (ImGui::Combo("Controller hand", &movement_controller,
                    movement_controllers, 3)) {
     g_draft.movement_controller = static_cast<MovementController>(movement_controller);
     g_dirty = true;
   }
   ImGui::EndDisabled();
+  ImGui::TextWrapped("Smooth locomotion always has one live steering reference: your head, or the selected hand's aim. If that hand leaves view or points straight up/down with no stable heading, movement continues head-oriented instead of going dead. A changed reference takes effect when the stick is next centred.");
   g_dirty|=ImGui::Checkbox("Left hand dominant",&g_draft.dominant_hand_left);
   g_dirty|=ImGui::Checkbox("Snap turning",&g_draft.snap_turn);
   g_dirty|=ImGui::SliderInt("Snap angle",&g_draft.snap_turn_degrees,15,90,"%d",ImGuiSliderFlags_AlwaysClamp);

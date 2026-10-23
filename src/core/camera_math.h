@@ -70,6 +70,27 @@ inline Vec3 HeadTranslationFromReference(Vec3 delta, const float q0[4],
   Vec3 local = QuatRotate(delta, -q0[0], -q0[1], -q0[2], q0[3]);
   return HeadTranslationWorld(local, r, u, f, scale);
 }
+// Height guard for the composed eye point. The eye is the body anchor plus
+// `eye_height` plus the wearer's head translation since the last recenter, so
+// kneeling, leaning forward or a crouched stance lowers a real eye into the
+// torso of the standing native model (the view ends up inside the player), and
+// a raised stance or an over-set eye_height pushes it through the head shell.
+// Keep the eye inside [anchor + eye_height - clearance, anchor + eye_height +
+// clearance]. `clearance` <= 0 disables the band and leaves tracking exactly
+// physical. X/Z are copied untouched: this only bounds height. A non-finite
+// eye falls back to the lower bound rather than writing NaN into the camera.
+inline Vec3 ClampEyeAboveAnchor(Vec3 eye, Vec3 anchor, float eye_height,
+                                 float clearance) {
+  if (!(clearance > 0.0f)) return eye;
+  const float nominal = anchor.y + eye_height;
+  const float lo = nominal - clearance;
+  const float hi = nominal + clearance;
+  float y = eye.y;
+  if (!(y >= lo)) y = lo;
+  else if (y > hi) y = hi;
+  return {eye.x, y, eye.z};
+}
+
 // Quaternion product a (x) b (apply b, then a), xyzw components.
 inline void QuatMul(float a[4], float b[4], float out[4]) {
   out[0] = a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1];

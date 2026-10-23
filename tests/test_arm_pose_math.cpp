@@ -48,6 +48,42 @@ int main(int argc,char** argv) {
   auto check = [&](bool condition, const char* message) {
     if (!condition) { ++failures; std::printf("FAIL: %s\n", message); }
   };
+  {
+    ArmPoleSmoother smoother;
+    const Vec3 wanted{.55f,-1.f,-.4f};
+    const Vec3 held=smoother.Update(wanted,0);
+    for(float dt:{0.f,1.f,8.f,11.f,16.f,120.f})
+      for(int repeat=0;repeat<100;++repeat) {
+        const auto next=smoother.Update(wanted,dt);
+        check(std::memcmp(&held,&next,sizeof held)==0,
+              "held pole is bit-exact across clock/frame rates, not merely near");
+      }
+    const auto moving=smoother.Update({.8f,-.3f,-.2f},11.f);
+    const auto duplicate=smoother.Update({.8f,-.3f,-.2f},0.f);
+    check(std::memcmp(&moving,&duplicate,sizeof moving)==0,
+          "duplicate callback cannot advance or reset a transitioning pole");
+  }
+  {
+    Fixture f;const auto before=f.poses;
+    const ArmPoseLengths invented{2,2};
+    check(!SolveModelArmPose(f.poses,f.parents,f.bones,{.8f,1,.4f},nullptr,&invented).valid,
+          "calibrated links cannot invent a resized rotation-only mesh");
+    check(std::memcmp(before.data(),f.poses.data(),sizeof before)==0,
+          "mismatched anatomy refuses the whole palette");
+  }
+  {
+    Fixture f;f.bones.clavicle=1;
+    std::array<ArmPoseMatrix,11> scratch;
+    ArmBendState state;state.valid=true;state.bend={0,0,1};
+    const auto saved_state=state;
+    f.poses[9]={}; // outside arm probe, inside clavicle branch
+    const auto before=f.poses;const Vec3 pole{0,0,1};
+    check(!SolveModelArmPoseWithClavicle(f.poses,f.parents,f.bones,{.8f,1,.4f},
+        scratch,&pole,nullptr,4.f,&state).valid,"refused shoulder transport is transactional");
+    check(std::memcmp(before.data(),f.poses.data(),sizeof before)==0 &&
+          std::memcmp(&saved_state,&state,sizeof state)==0,
+          "failed final shoulder solve cannot consume next frame's bend budget");
+  }
 
   // An animation can bend the native elbow on either side while the physical
   // hand makes the same overhead motion. Runtime's anatomical pole must keep
@@ -134,20 +170,62 @@ int main(int argc,char** argv) {
           Near(ArmPoseOrigin(f.poses[4]), {0, 0, 2}), "far clamp updates both joints");
   }
 
-  // Unequal links have an inner reach limit; equal links may fold at shoulder.
+  // Near targets clamp to the ANATOMICAL fold limit (~40 deg interior elbow
+  // angle), not the degenerate |link difference| fold: transport must never
+  // drive the wrist toward the shoulder joint, where the solved elbow is
+  // geometrically forced through a half circle in a few frames.
   {
     Fixture f;
     f.poses[3] = Pose({1, 0, 0});
     f.poses[4] = Pose({1.4f, 0, 0});
     auto result = SolveModelArmPose(f.poses, f.parents, f.bones, {0.1f, 0, 0});
-    check(result.valid && !result.reached && Near(result.wrist, {0.6f, 0, 0}),
-          "near target clamps to link length difference");
+    check(result.valid && !result.reached && Near(result.wrist, {0.7397056f, 0, 0}),
+          "near target clamps to anatomical fold limit");
+    check(Near(VLen(Sub(ArmPoseOrigin(f.poses[3]), ArmPoseOrigin(f.poses[2]))),
+               1.f), "fold clamp preserves upper length");
     check(Near(VLen(Sub(ArmPoseOrigin(f.poses[4]), ArmPoseOrigin(f.poses[3]))),
-               0.4f), "inner clamp preserves forearm length");
+               0.4f), "fold clamp preserves forearm length");
     f = Fixture{};
     result = SolveModelArmPose(f.poses, f.parents, f.bones, {0, 0, 0});
-    check(result.valid && result.reached && VLen(result.wrist) < 2e-5f,
-          "equal links fold onto shoulder without nonfinite pose");
+    check(result.valid && !result.reached && Near(VLen(result.wrist), 0.6840403f),
+          "equal links clamp to the fold limit instead of folding onto the shoulder");
+    for (size_t i = 0; i < f.poses.size(); ++i)
+      for (float v : f.poses[i].m)
+        check(std::isfinite(v), "fold clamp keeps every basis finite");
+  }
+
+  // Bend-plane rate budget: a small per-solve budget keeps the bend on the
+  // entering chain's own side even under a fully conditioned pole that wants
+  // the other side -- the budget is measured from the bend side the incoming
+  // (warm-started) chain already shows, so one solve never teleports the
+  // elbow across the chord. A budget above the nu->pu arc reaches the same
+  // pole-side endpoint as no budget at all, so the limiter only rate-limits
+  // the handover and never changes the endpoint.
+  {
+    Fixture f;
+    f.poses[2] = Pose({0, 0, 0});
+    f.poses[3] = Pose({-.6f, .8f, 0});  // native elbow on -x
+    f.poses[4] = Pose({0, 1.6f, 0});
+    const Vec3 pole{.75f, -.3f, -.4f};  // conditioned pole wants +x (see overhead test)
+    auto capped = SolveModelArmPose(f.poses, f.parents, f.bones, {0, 1.4f, .35f},
+                                    &pole, nullptr, 2.f);
+    check(capped.valid && capped.elbow.x < 0.f,
+          "2 deg bend budget keeps the chain's own bend side under a conditioned pole");
+    f = Fixture{};
+    f.poses[2] = Pose({0, 0, 0});
+    f.poses[3] = Pose({-.6f, .8f, 0});
+    f.poses[4] = Pose({0, 1.6f, 0});
+    auto swept = SolveModelArmPose(f.poses, f.parents, f.bones, {0, 1.4f, .35f},
+                                   &pole, nullptr, 180.f);
+    check(swept.valid && swept.elbow.x > 0.f,
+          "budget above the disagreement arc reaches the pole-side bend");
+    f = Fixture{};
+    f.poses[2] = Pose({0, 0, 0});
+    f.poses[3] = Pose({-.6f, .8f, 0});
+    f.poses[4] = Pose({0, 1.6f, 0});
+    auto fresh = SolveModelArmPose(f.poses, f.parents, f.bones, {0, 1.4f, .35f}, &pole);
+    check(fresh.valid && fresh.elbow.x > 0.f,
+          "absent budget yields the pole-side bend (endpoint unchanged)");
   }
 
   // A straight chain rotated 90 degrees retains authored twist. The unchanged
@@ -375,12 +453,56 @@ int main(int argc,char** argv) {
     check(OrientModelHandPose(poses,parents,2,desired,3),"physical forearm roll accepted");
     check(Near(Column(poses[1],0),{std::cos(angle),0,-std::sin(angle)}),
           "controller roll rotates forearm instead of pinching only the wrist");
-    check(std::fabs(Column(poses[3],0).z)>.5f,"forearm twist skin follows pronation");
+    // Pronation is one rigid rotation of the forearm and its twist skin, so
+    // every dot product between their bases is invariant: the skin cannot shear
+    // against the bone it skins. (The former check asserted a hardcoded axial
+    // sine > .5, which encoded the superseded half-angle split and cannot hold
+    // for a half-turn pronation, where the twist skin correctly lands on
+    // -column 0.) The skin must still actually move.
+    for(int a=0;a<3;++a)for(int b=0;b<3;++b)
+      check(Near(VDot(Column(poses[1],a),Column(poses[3],b)),
+                  VDot(Column(before[1],a),Column(before[3],b))),
+            "twist skin keeps its authored relative basis with the forearm");
+    bool twist_moved=false;
+    for(int a=0;a<3;++a)
+      if(!Near(Column(poses[3],a),Column(before[3],a)))twist_moved=true;
+    check(twist_moved,"forearm twist skin follows pronation");
     for(int bone:{0,1,2,3})check(Near(ArmPoseOrigin(poses[bone]),ArmPoseOrigin(before[bone])),
         "pronation preserves root and elbow/wrist/twist positions");
     for(int axis=0;axis<3;++axis)check(Near(Column(poses[2],axis),Column(desired,axis)),
         "hand still reaches the complete requested orientation");
   }
+  // Share arm swing with the clavicle instead of leaving the shoulder fixed.
+  {
+    Fixture f;
+    auto bones=f.bones;
+    bones.clavicle=1;
+    std::array<ArmPoseMatrix,11> scratch{};
+    const auto before=f.poses;
+    auto result=SolveModelArmPoseWithClavicle(f.poses,f.parents,bones,
+                                               {0.8f,1,0.4f},scratch);
+    check(result.valid && result.reached,"shoulder test target is reachable");
+    check(std::memcmp(&f.poses[1],&before[1],sizeof(ArmPoseMatrix))!=0,
+          "clavicle follows tracked upper-arm motion");
+    const float clavicle_angle=std::acos(std::clamp(
+        VDot(VNorm(Column(before[1],0)),VNorm(Column(f.poses[1],0))),-1.0f,1.0f));
+    check(clavicle_angle>1e-3f && clavicle_angle<=.3501f,
+          "clavicle contribution stays within the natural swing cap");
+  }
+
+  // Off-axis twist-skin origins stay fixed while their bases pronate.
+  for(float side:{-1.0f,1.0f}) {
+    std::array<ArmPoseMatrix,5> poses{Pose({}),Pose({side,0,0}),
+        Pose({side,1,0}),Pose({side,2,0}),Pose({side*1.08f,1.5f,.02f})};
+    const std::array<int,5> parents{-1,0,1,2,1};
+    const auto before=poses;
+    ArmPoseMatrix desired{{0,0,1,0,0,1,0,0,-1,0,0,0}};
+    check(OrientModelHandPose(poses,parents,3,desired,4),
+          "left and right forearm pronation accepted");
+    check(Near(ArmPoseOrigin(poses[4]),ArmPoseOrigin(before[4])),
+          "off-axis forearm twist pivot cannot shift and pinch the limb");
+  }
+
   // Wrist flexion has no axial component, including the ambiguous half-turn.
   for(float angle:{.6f,3.14159265f}) {
     std::array<ArmPoseMatrix,5> poses{Pose({}),Pose({0,1,0}),
@@ -414,6 +536,34 @@ int main(int argc,char** argv) {
         std::memcmp(poses.data(),before.data(),sizeof(poses))==0,
         "twist bone in the wrong branch refuses without modifying the hand");
   }
-  std::printf("arm pose math: %d failures\n", failures);
+  {
+      Fixture f;
+      auto bones=f.bones; bones.clavicle=1;
+      const auto native=f.poses;
+      std::array<ArmPoseMatrix,11> scratch{};
+      const Vec3 target{.8f,1.f,.4f},pole{.75f,-.3f,-.4f};
+      ArmBendState bend,probe_bend;
+      auto probe_poses=native;
+      check(SolveModelArmPose(probe_poses,f.parents,f.bones,target,&pole,nullptr,
+                             kArmBendMaxStepDeg,&probe_bend).valid,
+            "canonical pre-clavicle probe accepted");
+      check(SolveModelArmPoseWithClavicle(f.poses,f.parents,bones,target,scratch,&pole,
+                  nullptr,kArmBendMaxStepDeg,&bend).valid,
+            "stateful clavicle solve accepted");
+      check(std::memcmp(&bend.bend,&probe_bend.bend,sizeof(Vec3))==0,
+            "clavicle re-solve spends no second bend budget");
+      check(std::memcmp(bend.joints,probe_bend.joints,sizeof bend.joints)==0,
+            "bend replay key retains the pre-clavicle native chain");
+      const auto stable=f.poses;
+      for(int repeat=0;repeat<32;++repeat) {
+        f.poses=native;
+        check(SolveModelArmPoseWithClavicle(f.poses,f.parents,bones,target,scratch,&pole,
+                    nullptr,kArmBendMaxStepDeg,&bend).valid,
+              "identical native frame re-solve accepted");
+        check(std::memcmp(f.poses.data(),stable.data(),sizeof stable)==0,
+              "identical native frame cannot advance the bend budget");
+      }
+    }
+    std::printf("arm pose math: %d failures\n", failures);
   return failures ? 1 : 0;
 }

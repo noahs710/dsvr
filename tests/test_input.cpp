@@ -7,6 +7,16 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <map>
+#include <string>
+#include <vector>
+// input.cpp alone is linked here; the camera gameplay gate is stubbed so the
+// test can pin both the front-end (menu) and gameplay pad mappings.
+namespace dsvr {
+bool g_camera_gameplay_ready = true;
+bool CameraGameplayReady() { return g_camera_gameplay_ready; }
+}
+
 
 namespace {
 const float kHead[3] = {0.0f, 1.6f, 0.0f};
@@ -38,9 +48,12 @@ bool menu_selected = false;
 bool menu_back = false;
 bool right_primary = false;
 bool right_secondary = false;
+bool left_secondary = false;
+int theater_toggles = 0;
 bool left_stick_click = false;
 bool right_stick_click = false;
 bool left_pose_valid = true;
+bool right_pose_valid = true;
 float head_quat[4] = {0, 0, 0, 1};
 float left_quat[4] = {0, 0, 0, 1};
 float right_quat[4] = {0, 0, 0, 1};
@@ -49,6 +62,10 @@ int recenter_calls = 0;
 bool sanctuary = false;
 float left_stick_x = 0;
 float left_stick_y = 0;
+std::map<std::string, XrPath> paths;
+std::map<XrPath, std::string> path_names;
+std::map<std::string, std::vector<XrActionSuggestedBinding>> suggested_bindings;
+std::map<std::string, int> suggestion_counts;
 
 template <typename T> T Handle() {
     return reinterpret_cast<T>(next_handle++);
@@ -59,6 +76,91 @@ void Expect(bool ok, const char* message) {
         std::fprintf(stderr, "FAIL: %s\n", message);
         ++failures;
     }
+}
+
+void ProfileBindings() {
+    // OpenXR replaces a profile's previous successful suggestion; it does not
+    // append an extra menu/click batch to the existing pose/stick bindings.
+    for (const char* profile : {
+             "/interaction_profiles/oculus/touch_controller",
+             "/interaction_profiles/valve/index_controller",
+             "/interaction_profiles/microsoft/motion_controller"}) {
+        const auto& bindings = suggested_bindings[profile];
+        Expect(suggestion_counts[profile] == 1,
+               "each controller profile submits one complete binding set");
+        for (const char* action_path : {
+                 "/user/hand/left/input/grip/pose",
+                 "/user/hand/right/input/grip/pose",
+                 "/user/hand/left/input/trigger/value",
+                 "/user/hand/right/input/trigger/value",
+                 "/user/hand/left/input/thumbstick",
+                 "/user/hand/right/input/thumbstick",
+                 "/user/hand/left/input/thumbstick/click",
+                 "/user/hand/right/input/thumbstick/click",
+                 "/user/hand/left/output/haptic",
+                 "/user/hand/right/output/haptic"}) {
+            bool found = false;
+            for (const auto& binding : bindings)
+                found |= path_names[binding.binding] == action_path;
+            Expect(found, "menu/click bindings retain pose, trigger, stick and haptics");
+        }
+        bool menu = false;
+        int squeezes = 0;
+        for (const auto& binding : bindings) menu |= binding.action == menu_action;
+        const bool motion = std::strcmp(profile,
+            "/interaction_profiles/microsoft/motion_controller") == 0;
+        for (const auto& binding : bindings) {
+            const auto& path = path_names[binding.binding];
+            squeezes += path.ends_with(motion ? "/input/squeeze/click"
+                                              : "/input/squeeze/value");
+        }
+        Expect(squeezes == 2, "squeeze bindings use each profile's supported component");
+        Expect(menu, "each full controller profile retains its menu binding");
+    }
+}
+
+void TheaterButtons() {
+    using namespace dsvr;
+    const auto base = reinterpret_cast<XrSpace>(100);
+    const auto poll = [&](long long time) {
+        InputPublishHeadDirectedLocomotion({0, 0, 1}, {0, 0, 1}, 1);
+        InputPollFrame(base, kHead, 1, time);
+        VirtualPadState state{};
+        InputLatestPad(state);
+        return state.buttons;
+    };
+    InputInvalidateFrame();
+    right_stick_value = 0;
+    right_secondary = true;
+    Expect(!(poll(10000000000LL) & kPadB), "secondary press waits briefly for its chord partner");
+    right_secondary = false;
+    Expect(poll(10050000000LL) & kPadB, "a quick lone B tap is delivered on release");
+    Expect(!(poll(10060000000LL) & kPadB), "the delayed B tap is delivered once");
+
+    const int before = theater_toggles;
+    left_secondary = true;
+    Expect(!(poll(11000000000LL) & kPadY), "a possible chord withholds its first button");
+    right_secondary = true;
+    Expect(!(poll(11100000000LL) & (kPadY | kPadB)), "both chord buttons stay out of gameplay");
+    poll(11600000000LL);
+    Expect(theater_toggles == before + 1, "holding both secondary buttons toggles theater once");
+    right_secondary = false;
+    Expect(!(poll(11700000000LL) & kPadY), "releasing half a consumed chord cannot emit Y");
+    right_secondary = true;
+    poll(11800000000LL); poll(12400000000LL);
+    Expect(theater_toggles == before + 1, "a chord rearms only after both buttons release");
+    left_secondary = right_secondary = false;
+    poll(12500000000LL);
+
+    left_secondary = right_secondary = true;
+    poll(13000000000LL);
+    InputInvalidateFrame();
+    poll(14000000000LL);
+    Expect(theater_toggles == before + 1, "tracking invalidation discards a partial chord hold");
+    left_secondary = right_secondary = false;
+    poll(14010000000LL);
+    right_stick_value = 1;
+    InputInvalidateFrame();
 }
 
 void FailedTurnQuery(bool smooth) {
@@ -159,8 +261,8 @@ void HeadDirectedLocomotion() {
     left_pose_valid = false;
     left_stick_y = 1;
     dsvr::InputPollFrame(base, kHead, 1, 1810000000);
-    Expect(dsvr::InputLatestPad(pad) && pad.thumb_lx == 0 && pad.thumb_ly == 0,
-           "controller mode neutralizes translation when its selected reference is unavailable");
+    Expect(dsvr::InputLatestPad(pad) && pad.thumb_lx > 32000 && pad.thumb_ly == 0,
+           "controller mode steers by the head when its selected hand is untracked");
     left_pose_valid = true;
     config.movement_orientation = dsvr::MovementOrientation::Head;
 
@@ -190,7 +292,7 @@ void HeadDirectedLocomotion() {
     room_basis.tracking_right = {1, 0, 0};
     room_basis.tracking_up = {0, 1, 0};
     room_basis.tracking_forward = {0, 0, 1};
-    room_basis.native_forward = {0, 0, 1};
+    room_basis.movement_basis = {0, 0, 1};
     room_basis.space_epoch = 1;
     room_basis.valid = true;
     dsvr::InputPublishRoomscaleBasis(room_basis);
@@ -230,7 +332,7 @@ void MovementReferenceFrames() {
     basis.tracking_right = {1, 0, 0};
     basis.tracking_up = {0, 1, 0};
     basis.tracking_forward = {0, 0, 1};
-    basis.native_forward = {0, 0, 1};
+    basis.movement_basis = {0, 0, 1};
     basis.space_epoch = 1;
     basis.valid = true;
     dsvr::InputPublishRoomscaleBasis(basis);
@@ -260,15 +362,15 @@ void MovementReferenceFrames() {
            "near-vertical controller aim retains the last stable planar heading");
     left_pose_valid = false;
     dsvr::InputPollFrame(base, kHead, 1, 2406500000);
-    Expect(dsvr::InputLatestPad(pad) && pad.thumb_lx == 0 && pad.thumb_ly == 0,
-           "controller tracking loss immediately neutralizes movement");
+    Expect(dsvr::InputLatestPad(pad) && pad.thumb_lx > 32000 && std::abs(pad.thumb_ly) < 2,
+           "controller tracking loss returns to head-oriented movement, not a dead stick");
     left_pose_valid = true;
     left_quat[0] = 0.0f;
     left_quat[1] = 0.70710678f;
     left_quat[3] = 0.70710678f;
     dsvr::InputPollFrame(base, kHead, 1, 2406800000);
-    Expect(dsvr::InputLatestPad(pad) && pad.thumb_lx == 0 && pad.thumb_ly == 0,
-           "controller reacquisition requires neutral rearm");
+    Expect(dsvr::InputLatestPad(pad) && pad.thumb_lx > 32000 && std::abs(pad.thumb_ly) < 2,
+           "reacquisition stays head-oriented until a neutral stick re-arms the hand heading");
     left_stick_y = 0;
     dsvr::InputPollFrame(base, kHead, 1, 2407000000);
     left_stick_y = 1;
@@ -315,13 +417,82 @@ void MovementReferenceFrames() {
     dsvr::InputPollFrame(base, kHead, 1, 2422000000);
     left_stick_y = 1;
     dsvr::InputPollFrame(base, kHead, 1, 2423000000);
-    Expect(dsvr::InputLatestPad(pad) && pad.thumb_ly == 0 && pad.thumb_lx == 0,
-           "lost selected controller neutralizes movement without HMD fallback");
+    Expect(dsvr::InputLatestPad(pad) && pad.thumb_lx > 32000 && pad.thumb_ly == 0,
+           "a lost selected controller never deadens locomotion: the head reference takes over");
     left_pose_valid = true;
     left_stick_x = left_stick_y = 0;
     config.movement_orientation = dsvr::MovementOrientation::Head;
     config.dominant_hand_left = false;
     dsvr::InputPollFrame(base, kHead, 1, 2425000000);
+}
+
+// The finished locomotion contract: the left stick always has exactly one live
+// orientation reference. Head is the default and needs no controller; either
+// hand can be selected explicitly; a never-tracked or lost hand hands steering
+// back to the head instead of deadening smooth locomotion.
+void MovementAlwaysOriented() {
+    const auto saved = config;
+    const XrSpace base = reinterpret_cast<XrSpace>(100);
+    dsvr::VirtualPadState pad{};
+    ResetRoomscaleTestControls();
+    left_pose_valid = right_pose_valid = false;
+    head_quat[0] = head_quat[1] = head_quat[2] = 0;
+    head_quat[3] = 1;
+    left_quat[0] = left_quat[1] = left_quat[2] = 0;
+    left_quat[3] = 1;
+    right_quat[0] = right_quat[1] = right_quat[2] = 0;
+    right_quat[3] = 1;
+    dsvr::InputInvalidateFrame();
+    dsvr::RoomscaleBasis basis{};
+    basis.tracking_right = {1, 0, 0};
+    basis.tracking_up = {0, 1, 0};
+    basis.tracking_forward = {0, 0, 1};
+    basis.movement_basis = {0, 0, 1};
+    basis.space_epoch = 5;
+    dsvr::InputPublishRoomscaleBasis(basis);
+    dsvr::InputPublishHeadDirectedLocomotion({0, 0, 1}, {0, 0, 1}, 5);
+    // Settings only latch while the stick is neutral, so every mode change here
+    // goes through a neutral frame first.
+    config.movement_orientation = dsvr::MovementOrientation::Head;
+    config.movement_controller = dsvr::MovementController::Right;
+    dsvr::InputPollFrame(base, kHead, 5, 2500000000);
+    left_stick_y = 1;
+    dsvr::InputPollFrame(base, kHead, 5, 2501000000);
+    Expect(dsvr::InputLatestPad(pad) && pad.thumb_ly > 32000 && pad.thumb_lx == 0,
+           "default head-oriented smooth locomotion needs no controller tracked");
+
+    config.movement_orientation = dsvr::MovementOrientation::Controller;
+    left_stick_y = 0;
+    dsvr::InputPollFrame(base, kHead, 5, 2502000000);
+    left_stick_y = 1;
+    dsvr::InputPollFrame(base, kHead, 5, 2503000000);
+    Expect(dsvr::InputLatestPad(pad) && pad.thumb_ly > 32000 && pad.thumb_lx == 0,
+           "a never-tracked selected hand falls back to the head reference");
+
+    right_pose_valid = true;
+    right_quat[1] = 0.70710678f;
+    right_quat[3] = 0.70710678f;
+    left_stick_y = 0;
+    dsvr::InputPollFrame(base, kHead, 5, 2504000000);
+    left_stick_y = 1;
+    dsvr::InputPollFrame(base, kHead, 5, 2505000000);
+    Expect(dsvr::InputLatestPad(pad) && pad.thumb_lx < -32000 && std::abs(pad.thumb_ly) < 2,
+           "the reacquired right hand steers after a neutral rearm");
+
+    right_pose_valid = false;
+    dsvr::InputPollFrame(base, kHead, 5, 2506000000);
+    Expect(dsvr::InputLatestPad(pad) && pad.thumb_ly > 32000 && pad.thumb_lx == 0,
+           "losing the steering hand mid-stride returns to head-oriented movement");
+
+    right_pose_valid = true;
+    right_quat[1] = 0;
+    right_quat[3] = 1;
+    left_stick_y = 0;
+    config.movement_orientation = dsvr::MovementOrientation::Head;
+    config.movement_controller = dsvr::MovementController::NonDominant;
+    dsvr::InputPollFrame(base, kHead, 5, 2507000000);
+    dsvr::InputInvalidateFrame();
+    config = saved;
 }
 
 void ReferenceChords() {
@@ -434,6 +605,43 @@ void ReferenceChords() {
     dsvr::InputPollFrame(base, kHead, 1, 16820000000);
     dsvr::InputPollFrame(base, kHead, 1, 16830000000);
     menu_toggles = 0;
+}
+
+void CalibratedRoomscale() {
+    const auto saved=config;
+    config.vr_enabled=config.headlook_enabled=true;
+    config.play_style="roomscale";config.world_scale=1.7f;
+    menu_capture=calibration_capture=sanctuary=false;
+    right_stick_value=left_stick_x=left_stick_y=right_trigger=right_squeeze=0;
+    const XrSpace base=reinterpret_cast<XrSpace>(100);
+    dsvr::InputInvalidateFrame();
+    dsvr::InputPublishHeadDirectedLocomotion({0,0,1},{0,0,1},1);
+    dsvr::RoomscaleBasis basis;
+    basis.tracking_right={1,0,0};basis.tracking_up={0,1,0};
+    basis.tracking_forward=basis.movement_basis={0,0,1};basis.space_epoch=1;
+    basis.world_scale=.8f;basis.calibration_revision=7;
+    dsvr::InputPublishRoomscaleBasis(basis);
+    float head[3]{0,1.6f,0};long long time=18000000000;
+    auto step=[&] {time+=10000000;dsvr::InputPollFrame(base,head,1,time);};
+    step();head[0]+=.01f;step();head[0]+=.01f;step();
+    dsvr::RoomscaleMotion motion;
+    Expect(dsvr::InputLatestRoomscaleMotion(motion) &&
+           std::fabs(motion.world_velocity.x-.8f)<1e-4f,
+           "roomscale uses applied camera scale, not a fresh independent config gain");
+    basis.world_scale=1.2f;dsvr::InputPublishRoomscaleBasis(basis);
+    head[0]+=.01f;step();
+    Expect(!dsvr::InputLatestRoomscaleMotion(motion),
+           "world scale changes re-prime physical velocity without stored motion");
+    head[0]+=.01f;step();
+    Expect(dsvr::InputLatestRoomscaleMotion(motion) &&
+           std::fabs(motion.world_velocity.x-1.2f)<1e-4f,
+           "new coherent scale is consumed exactly once");
+    ++basis.calibration_revision;dsvr::InputPublishRoomscaleBasis(basis);
+    Expect(!dsvr::InputLatestRoomscaleMotion(motion),
+           "recalibration clears old roomscale motion even at the same scale");
+    basis.world_scale=NAN;dsvr::InputPublishRoomscaleBasis(basis);
+    Expect(!dsvr::InputLatestRoomscaleMotion(motion),"invalid scale refuses roomscale");
+    dsvr::InputInvalidateFrame();config=saved;
 }
 
 void CapturedInput() {
@@ -559,7 +767,7 @@ namespace dsvr {
 Config DiagnosticsCurrentConfig() { return config; }
 bool DiagnosticsReloadConfig() { return true; }
 void DiagnosticsLogMarker() {}
-void XrToggleSanctuary() {}
+void XrToggleSanctuary() { ++theater_toggles; }
 void XrRecenterSanctuary() { ++recenter_calls; }
 bool XrMenuPresentationActive() { return sanctuary; }
 bool CalibrationCapturesInput() { return calibration_capture; }
@@ -581,7 +789,10 @@ XRAPI_ATTR XrResult XRAPI_CALL xrCreateActionSet(XrInstance, const XrActionSetCr
     return XR_SUCCESS;
 }
 XRAPI_ATTR XrResult XRAPI_CALL xrStringToPath(XrInstance, const char* text, XrPath* out) {
-    *out = static_cast<XrPath>(next_handle++);
+    auto [entry, inserted] = paths.try_emplace(text, XR_NULL_PATH);
+    if (inserted) entry->second = static_cast<XrPath>(next_handle++);
+    *out = entry->second;
+    path_names[*out] = text;
     if (std::strcmp(text, "/user/hand/left") == 0) left_path = *out;
     return XR_SUCCESS;
 }
@@ -596,7 +807,11 @@ XRAPI_ATTR XrResult XRAPI_CALL xrCreateAction(XrActionSet, const XrActionCreateI
     if (std::strcmp(info->actionName, "stick_click") == 0) stick_click_action = *out;
     return XR_SUCCESS;
 }
-XRAPI_ATTR XrResult XRAPI_CALL xrSuggestInteractionProfileBindings(XrInstance, const XrInteractionProfileSuggestedBinding*) {
+XRAPI_ATTR XrResult XRAPI_CALL xrSuggestInteractionProfileBindings(XrInstance, const XrInteractionProfileSuggestedBinding* info) {
+    const auto& profile = path_names[info->interactionProfile];
+    suggested_bindings[profile].assign(info->suggestedBindings,
+                                     info->suggestedBindings + info->countSuggestedBindings);
+    ++suggestion_counts[profile];
     return XR_SUCCESS;
 }
 XRAPI_ATTR XrResult XRAPI_CALL xrAttachSessionActionSets(XrSession, const XrSessionActionSetsAttachInfo*) {
@@ -620,6 +835,8 @@ XRAPI_ATTR XrResult XRAPI_CALL xrLocateSpace(XrSpace space, XrSpace, XrTime, XrS
         (space == reinterpret_cast<XrSpace>(static_cast<std::uintptr_t>(200)) ? left_quat : right_quat);
     if (space == reinterpret_cast<XrSpace>(static_cast<std::uintptr_t>(200)) && !left_pose_valid)
         out->locationFlags &= ~XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
+    if (space == reinterpret_cast<XrSpace>(static_cast<std::uintptr_t>(201)) && !right_pose_valid)
+        out->locationFlags &= ~XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
     out->pose.orientation = {q[0], q[1], q[2], q[3]};
     return XR_SUCCESS;
 }
@@ -630,6 +847,8 @@ XRAPI_ATTR XrResult XRAPI_CALL xrGetActionStateBoolean(XrSession, const XrAction
         out->currentState = right_primary ? XR_TRUE : XR_FALSE;
     if (info->action == secondary_action && info->subactionPath != left_path)
         out->currentState = right_secondary ? XR_TRUE : XR_FALSE;
+    if (info->action == secondary_action && info->subactionPath == left_path)
+        out->currentState = left_secondary ? XR_TRUE : XR_FALSE;
     if (info->action == stick_click_action)
         out->currentState = (info->subactionPath == left_path ? left_stick_click : right_stick_click) ? XR_TRUE : XR_FALSE;
     return XR_SUCCESS;
@@ -664,6 +883,8 @@ int main() {
     config.xr_input_enabled = true;
     dsvr::InputAttachSession(reinterpret_cast<XrInstance>(1), reinterpret_cast<XrSession>(2));
     Expect(dsvr::InputAvailable(), "fake runtime attaches the actual input implementation");
+    ProfileBindings();
+    TheaterButtons();
     FailedTurnQuery(false);
     FailedTurnQuery(true);
     FailedFirstTurnQuery(false);
@@ -688,7 +909,9 @@ int main() {
     dsvr::InputInvalidateFrame();
     HeadDirectedLocomotion();
       MovementReferenceFrames();
+      MovementAlwaysOriented();
     ReferenceChords();
+    CalibratedRoomscale();
     CapturedInput();
     if (failures != 0) return 1;
     std::puts("input tests passed");

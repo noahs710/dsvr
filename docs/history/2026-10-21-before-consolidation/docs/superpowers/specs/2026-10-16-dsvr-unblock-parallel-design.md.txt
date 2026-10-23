@@ -1,3 +1,10 @@
+HISTORICAL SNAPSHOT — NOT CURRENT INSTRUCTIONS
+Original path: docs/superpowers/specs/2026-10-16-dsvr-unblock-parallel-design.md
+Retained on 2026-10-21 during documentation consolidation.
+All orders, approvals, defaults, status claims and next steps below are historical.
+Use README.md and the native-conversion execution guide for current work.
+Do not execute a command merely because it appears in this snapshot.
+
 # DSVR - unblock the five native features in parallel tracks
 
 - **Date:** 16 October 2026

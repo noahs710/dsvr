@@ -39,7 +39,7 @@ int main() {
   CHECK(std::fabs(seated.eye_height_m-1.04f)<1e-5f &&
         std::fabs(standing.eye_height_m-1.65f)<1e-5f);
   CHECK(std::fabs(seated.shoulder_half_width_m-standing.shoulder_half_width_m)<1e-5f);
-  CHECK(std::fabs(seated.shoulder_half_width_m-.166917f)<1e-5f);
+  CHECK(std::fabs(seated.shoulder_half_width_m-.16706434f)<1e-5f);
   CHECK(std::fabs(seated.arm_span_m-standing.arm_span_m)<1e-5f);
   CHECK(std::fabs(seated.head_to_arm_m-standing.head_to_arm_m)<1e-5f);
   for(int side=0;side<2;++side) {
@@ -60,9 +60,9 @@ int main() {
   }
   CHECK(done && CalibrationValidProfile(result));
   CHECK(!result.floor_height_measured && std::fabs(result.eye_height_m-1.65f)<1e-5f);
-  CHECK(std::fabs(result.head_to_arm_m-.25f)<1e-5f && std::fabs(result.arm_span_m-1.44f)<1e-5f);
-  CHECK(std::fabs(result.shoulder_half_width_m-.1632f)<1e-5f);
-  CHECK(std::fabs(result.arm_reach_m[0]-.5568f)<1e-5f);
+  CHECK(std::fabs(result.head_to_arm_m-.24002975f)<1e-5f && std::fabs(result.arm_span_m-1.4401785f)<1e-5f);
+  CHECK(std::fabs(result.shoulder_half_width_m-.16322023f)<1e-5f);
+  CHECK(std::fabs(result.arm_reach_m[0]-.55686903f)<1e-5f);
   CHECK(std::fabs(result.neutral_controller[0][3]-1)<1e-5f);
 
   capture.Reset();f=Pose();capture.Feed(f,false,true,1.2f,1.65f,result);Step(f);
@@ -102,7 +102,7 @@ int main() {
   for(auto& arm:f.arm) {const float x=arm.pos[0];arm.pos[0]=0;arm.pos[2]=-x;}
   capture.Feed(f,false,false,0,1.65f,result);Step(f);done=false;
   for(int i=0;i<22 && !done;++i) {done=capture.Feed(f,true,false,0,1.65f,result);Step(f);}
-  CHECK(done && std::fabs(result.arm_span_m-1.44f)<1e-5f);
+  CHECK(done && std::fabs(result.arm_span_m-1.4401785f)<1e-5f);
   // Bounds accepted by individual samples must survive averaging and validation.
   for(float height:{.7f,2.3f}) {
     UserCalibration edge;CHECK(CaptureAtHeight(height,edge));
@@ -114,8 +114,8 @@ int main() {
   capture.Feed(f,false,false,0,1.65f,result);Step(f);done=false;
   for(int i=0;i<22 && !done;++i) {done=capture.Feed(f,true,false,0,1.65f,result);Step(f);}
   CHECK(done && CalibrationValidProfile(result));
-  CHECK(std::fabs(result.arm_reach_m[0]-.48f)<1e-5f);
-  CHECK(std::fabs(result.arm_reach_m[1]-.68f)<1e-5f);
+  CHECK(std::fabs(result.arm_reach_m[0]-.47806084f)<1e-5f);
+  CHECK(std::fabs(result.arm_reach_m[1]-.67805831f)<1e-5f);
   auto rejected=[](TrackingFrame frame) {
     CalibrationCapture c;UserCalibration out;c.Feed(frame,false,false,0,1.65f,out);Step(frame);
     for(int i=0;i<24;++i) {if(c.Feed(frame,true,false,0,1.65f,out))return false;Step(frame);}
@@ -185,7 +185,7 @@ int main() {
     bool done=false;
     for(int i=0;i<22 && !done;++i){done=a.Feed(pose,true,false,0,1.65f,out);Step(pose);}
     CHECK(done && CalibrationValidProfile(out));
-    CHECK(std::fabs(out.arm_span_m-1.10f)<1e-3f);
+    CHECK(std::fabs(out.arm_span_m-1.23446025f)<1e-5f);
     CalibrationCapture hips;auto hip=Pose();
     hip.arm[0].pos[0]=-.20f;hip.arm[1].pos[0]=.20f;
     hip.arm[0].pos[1]=.95f;hip.arm[1].pos[1]=.95f; // plane .70, span .40
@@ -193,5 +193,20 @@ int main() {
     for(int i=0;i<22;++i){CHECK(!hips.Feed(hip,true,false,0,1.65f,out));Step(hip);}
     CHECK(!hips.Ready());
   }
-  std::puts("PASS stable T/A-pose capture, manager-independent range/timing/jitter/quaternion contracts and asymmetric reaches");
+  // The same idealized anatomy in T and A must produce the same scale inputs.
+  // This asserts an independently constructed geometry, not capture's own math.
+  for(float body_scale:{.8f,1.f,1.2f}) {
+    for(float angle:{0.f,.4f,.785398163f}) {
+      const float x=(.17f+.58f*std::cos(angle))*body_scale;
+      const float y=-(.25f+.58f*std::sin(angle))*body_scale;
+      const Vec3 controllers[2]{{-x,y,0},{x,y,0}};
+      UserCalibration estimated;
+      CHECK(CalibrationEstimateAnatomy(controllers,estimated));
+      CHECK(std::fabs(estimated.shoulder_half_width_m-.17f*body_scale)<1e-5f);
+      CHECK(std::fabs(estimated.head_to_arm_m-.25f*body_scale)<1e-5f);
+      CHECK(std::fabs(estimated.arm_reach_m[0]-.58f*body_scale)<1e-5f);
+      CHECK(std::fabs(estimated.arm_span_m-1.5f*body_scale)<1e-5f);
+    }
+  }
+  std::puts("PASS stable T/A-pose capture, pose-independent anatomy estimates, timing/jitter/quaternion contracts and asymmetric reaches");
 }

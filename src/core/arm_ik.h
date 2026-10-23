@@ -23,6 +23,15 @@ bool ArmIkHookInstall();
 void ArmIkHookUninstall();
 // Historical name: clears transient pose publication only, NEVER user calibration.
 void ArmIkResetCalibration();
+// Natural game/camera owner only. Read-only, fresh native-chain geometry for
+// automatic world/avatar fit; refuses stale/replaced models. Never a mesh scale.
+bool ArmIkNativeReach(float& native_reach, std::uint64_t& model_revision);
+// Same guarded chain and root scale: the upright native Head bone height above
+// the model origin and the native shoulder-socket spread, in world units. The
+// head fit anchors the camera on the avatar's own head with these; they are
+// never written back as a mesh, bone-base or collider scale.
+bool ArmIkNativeStature(float& head_above_origin, float& shoulder_width,
+                        std::uint64_t& model_revision);
 
 struct ArmIkHand {
   bool valid=false;

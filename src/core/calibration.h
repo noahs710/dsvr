@@ -13,10 +13,10 @@ struct UserCalibration {
   bool valid = false;
   bool floor_height_measured = false;
   float eye_height_m = 1.65f;
-  float head_to_arm_m = .25f;
+  float head_to_arm_m = .25f;  // anthropometric shoulder-plane estimate
   float shoulder_half_width_m = .17f;  // anthropometric estimate, not measured
-  float arm_reach_m[2] = {.55f, .55f};
-  float arm_span_m = 1.44f;
+  float arm_reach_m[2] = {.55f, .55f};  // inferred shoulder -> controller reach
+  float arm_span_m = 1.44f;  // inferred full extension, not A-pose hand spread
   // Controller grip quaternions in the calibration head's yaw-neutral frame.
   float neutral_controller[2][4] = {{0,0,0,1},{0,0,0,1}};
   std::uint64_t revision = 0;

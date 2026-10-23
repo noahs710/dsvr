@@ -40,6 +40,36 @@ int main() {
                                    {1, 0, 0}, {0, 1, 0}, {0, 0, -1}, 2.0f);
   CHECK(VNear(lean, 0.2f, 0.4f, -0.6f));
 
+  // Eye height band: physical kneeling/leaning must not put the eye inside
+  // the standing native model, and X/Z tracking is never touched.
+  {
+    const Vec3 anchor{1.0f, 0.0f, -2.0f};
+    // Inside the band -> untouched.
+    CHECK(VNear(ClampEyeAboveAnchor({1.5f, 1.30f, -2.5f}, anchor, 1.65f, 0.45f),
+                1.5f, 1.30f, -2.5f));
+    // Kneeling: eye 0.90 above a feet anchor -> held at 1.65 - 0.45 = 1.20.
+    CHECK(VNear(ClampEyeAboveAnchor({1.5f, 0.90f, -2.5f}, anchor, 1.65f, 0.45f),
+                1.5f, 1.20f, -2.5f));
+    // Raised stance / over-set eye height: 2.40 -> capped at 2.10.
+    CHECK(VNear(ClampEyeAboveAnchor({1.5f, 2.40f, -2.5f}, anchor, 1.65f, 0.45f),
+                1.5f, 2.10f, -2.5f));
+    // Anchor lifted (slope/physics): the band rides with the anchor, so a
+    // head 0.35 above the raised anchor is still legal.
+    Vec3 raised{1.0f, 1.2f, -2.0f};
+    CHECK(VNear(ClampEyeAboveAnchor({1.5f, 2.55f, -2.5f}, raised, 1.65f, 0.45f),
+                1.5f, 2.55f, -2.5f));
+    // Feet-anchor eye on a lifted anchor would be below the band floor
+    // (1.2 + 1.65 - 0.45 = 2.40) -> held at the floor.
+    CHECK(VNear(ClampEyeAboveAnchor({1.5f, 1.30f, -2.5f}, raised, 1.65f, 0.45f),
+                1.5f, 2.40f, -2.5f));
+    // clearance 0 disables the band: fully physical.
+    CHECK(VNear(ClampEyeAboveAnchor({1.5f, 0.10f, -2.5f}, anchor, 1.65f, 0.0f),
+                1.5f, 0.10f, -2.5f));
+    // Non-finite eye height never writes NaN into the camera matrix.
+    Vec3 nan_in{1.5f, std::nanf(""), -2.5f};
+    CHECK(Near(ClampEyeAboveAnchor(nan_in, anchor, 1.65f, 0.45f).y, 1.20f));
+  }
+
   // Identity delta -> zero yaw/pitch.
   {
     float q0[4] = {0, 0, 0, 1}, q[4] = {0, 0, 0, 1};

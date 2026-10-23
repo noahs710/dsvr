@@ -1,162 +1,70 @@
-# DSVR headset verification runbook
+# DSVR verification runbook
 
-[Master plan](../README.md) · [Testing and operation](TESTING.md) · Prepared
-2026-10-16 for build `0.16.0-render-host-preview` (offline gate: 62/62 CTest,
-doctor pass). This runbook verifies features in the real game. Offline tests
-remain source proof only; nothing here turns them into headset acceptance.
+Current: 21 October 2026. [Authority](../README.md#authority-and-maintenance). This file owns acceptance procedures/thresholds. [TESTING](TESTING.md) owns protected operation; the [execution guide](superpowers/plans/2026-10-21-native-conversion-execution.md) owns sequence and gates. Cases below are requirements, not claims of implemented features.
 
-## Verdict words (same meanings as TESTING.md)
+## Prepare and restore
 
-- **PASS** - the required observation below was recorded this run and met the
-  threshold declared here, before the run.
-- **FAIL** - the observation was recorded and missed the threshold, or the
-  wrong behavior occurred.
-- **UNVERIFIED** - not exercised this run (no headset, wrong route, skipped).
-- **BLOCKED** - cannot be exercised yet; the entry criterion is named. A
-  BLOCKED feature is never reported as working, hidden, or "on track" without
-  its criterion.
+1. Choose a ready gate and exact candidate. Check its prerequisites; do not ask for headset qualification of an absent binding. Record any independent work still possible when a gate is blocked.
+2. Follow TESTING's current protected transaction procedure and inspect `tools/verify_preflight.ps1` before using its flags. Record preflight, save/install inventory and hashes, offline/runtime state, rollback receipt and candidate package/config hashes.
+3. Fix scene/character/equipment/graphics/runtime for comparison. Record hardware and actual eye resolution. Existing reference environment: Quest 3/Touch, RX 9060 XT 16 GB, Ryzen 7 7700X, 64 GB; recheck actual hardware. Qualify VDXR and SteamVR separately. Do not change an active global runtime silently.
+4. Observe native behavior and capture bounded evidence first. For headset segments, provide exact controls and one feel/comfort question per segment. Stop for discomfort or invalid state.
+5. Collect evidence, restore per receipt and verify hashes after every transaction including failure. Record exact restoration status before another candidate.
 
-## Fixed environment for comparable runs
+Evidence folder: `build/verification/<run-id>/` with candidate identity, config, preflight, before/after manifests, raw timings/traces/captures, restoration receipt and results.md. Use PASS/FAIL/UNVERIFIED/BLOCKED as defined in TESTING. Name missing coverage; never average it away.
 
-| Item | Value |
+## Rendering, performance and usability gates
+
+| Case | Procedure and required result |
 |---|---|
-| Headset / controllers | Quest 3 + Quest 3 controllers |
-| PC | RX 9060 XT 16 GB, Ryzen 7 7700X, 64 GB DDR5 |
-| Route under test | Virtual Desktop / VDXR, Medium quality (qualify SteamVR separately; never mix FPS across routes) |
-| Rate target | Runtime and game cap at 90 Hz. A 72 Hz result is a reduced mode and is reported as 72, never as 90 |
-| Scene | One fixed scene per TESTING.md section 2: stationary reference, walk/strafe/backstep, stop; then sword/shield encounter |
-| Saves | Disposable character only, both save roots snapshotted before launch, originals hash-checked after exit |
+| True stereo | Inspect final left/right scene outputs with near/far occluders and asymmetric markers, linked from predicted views through consumed matrices/targets to submission. Correct eye order, parallax, scale and occlusion; headset fusion accepted. Different textures/hashes alone fail. |
+| Single simulation | Trace native update/animation/AI/collision/events/history/Present and compare game speed, costs/projectiles with baseline. Two eyes cannot duplicate gameplay or retire shared resources early. |
+| 90 Hz target | At fixed declared settings, complete eye-pair p95 <=11.11 ms with positive documented headroom; actual runtime period near 11,111,111 ns and measured game rate consistent with 90. Record p50/p95/p99, dropped/reprojected frames and CPU/GPU coverage over at least five steady rate-evidence windows. Reprojection/reduced-rate output cannot be labeled native 90 Hz. |
+| Reduced mode | If separately supported, declare rate/settings before testing; 72 Hz budget is 13.89 ms per pair. Label explicitly and leave the 90 Hz target open. |
+| Rate independence | Same captured motion/contact over supported rates: native damage/stamina variance <=5%, no duplicate first-impact reactions. Distinguish deterministic fixtures from noisy human trials. |
+| Calibration | Once-per-launch capture, explicit recalibration/cancel, seated/standing, death/load/equipment/focus and recenter. Measurements persist within session; recenter does not change anatomy; failed/cancelled replacement retains usable prior data. |
+| Coherent world/body fit | Compare T and relaxed A captures for the same person; record estimated anatomy and the `CalibrationFit` native-units/m log. Exercise short/tall standing profiles, seated posture, world/player trim and a model replacement. A lowered arm must not shrink estimated reach; sitting must not shrink anatomy. Head, reachable grips and physical path use one applied conversion, with no arm-only gain, scaled bone bases or collision edits. Independently qualify native mesh proportions and stereo eye scale when those bindings exist; global apparent sizing alone does not close them. |
+| Visibility/attachments | Native head/face/hair/helmet exclusion across supported models/armor/LOD without mesh collapse; rendered arms/equipment remain aligned during walking and grip changes. Unsupported forearm-only mode cannot claim success. |
+| Controller usability | Title, Home, calibration, settings save/restart, recenter, HUD/quick slots, inventory/equipment, dialogue/shop and native progression actions usable without keyboard. No input leak or hidden essential prompt. |
+| Interaction | Each supported pickup/door/lever/bonfire/chest/NPC/ladder/elevator class passes eligibility, line-of-sight/reach, one activation, release/cancel and load/death/target-reuse cases. Physical manipulation qualified per supported object class. |
+| Ranged/breadth | Native weapon-family support matrix and bow/crossbow/catalyst paths preserve projectile origin/aim, ammo/resources, timing, costs, defenses, swaps and handedness. Representative native encounters per declared family. |
+| Campaign | Distinct area/rendering/traversal/boss/special-action matrix plus longer progression session; rolls, grabs, ripostes, ladders, falling, cutscenes and transitions preserve gameplay with comfortable camera ownership. |
+| Runtime recovery | Inactive-headset startup, focus/session loss, disconnect/reconnect, resize, image errors/timeouts and shutdown restore usable state without stale images/pointers/input or indefinite waits. |
+| Install/package | Exact build/config/hash linkage; clean install/upgrade/uninstall and interrupted rollback; original files restored; immutable version and no game-derived payloads. |
 
-## Thresholds declared before running
+## Detailed combat, roomscale, body and comfort matrix
 
-| Check | Pass threshold |
-|---|---|
-| Native 90 Hz | Eye-pair frame time p95 within 11.11 ms with headroom; predicted period near 11,111,111 ns in `RateMatch`/`RateEvidence` |
-| Native 72 Hz (reduced) | Eye-pair p95 within 13.89 ms; reported explicitly as 72 Hz |
-| Mono work | First-frame source copies = 1, periodic CPU readbacks = 0 (already proven offline; re-confirm from the run log/metrics) |
-| Calibration stability | Same saved profile across death, load and restart: no visible wrist/hand drift growth per respawn; recalibration only from the menu |
-| Combat variance | Recorded motion/contact at supported rates: damage/stamina variance at most 5%, no duplicate first-hit reactions (qualification tolerance from TESTING.md) |
-| Safety | Personal-save hashes identical before/after; no unexpected file mutations; bounded shutdown |
-| Comfort | Human verdict per segment (scale, fusion, latency, clipping, hit feel, fatigue). Stop immediately on discomfort |
+These are proposed engineering pass thresholds, not measured performance or platform guarantees. Record them before qualification. Change a threshold only with a documented engineering reason; never relax one simply to label a failing run successful.
 
-## Order of operations
-
-1. `pwsh -File tools\verify_preflight.ps1 -OutDir build\verification` - every
-   BLOCKED line must be resolved first. WARN lines are read aloud into the
-   run notes (stale install and a 72 fps profile are the expected first ones).
-2. Fresh backup of both save roots (`Documents\NBGI\DARK SOULS REMASTERED`
-   and `%APPDATA%\DarkSoulsRemastered`) plus Steam `userdata\<id>\570940`;
-   record SHA-256 of every `DRAKS0005.sl2` in the run evidence.
-3. With the game closed: `DSVR-Setup.exe --doctor`, then install the packaged
-   build (`--install`), then re-run preflight. Installed `dinput8.dll` and
-   `DSVR.dll` hashes must equal `dist\DSVR-latest-verification.json`.
-4. Set the test profile in the installed `DSVR.toml` (or Setup GUI):
-   `frame_limit_fps=90`; arm IK live only on segments that test native arms;
-   `observer_only=false`. Restart the game for host/action/resource changes.
-5. Confirm Steam Offline and the exact-EXE outbound block; leave Steam open.
-   Never return Steam online with test saves or mod DLLs in place.
-6. Launch through Steam, confirm the registered runtime matches the route
-   (VDXR for this runbook), and follow the segment route below. One segment
-   per launch where a restart is required; otherwise note every transition.
-7. After exit: re-hash saves and installed files, copy `DSVR.log`, any
-   `DSVR-trace-*.jsonl` and crash dumps into the run evidence folder, fill
-   the results table, and restore/uninstall per Rollback.
-
-## Evidence layout (one folder per run)
-
-`build\verification\<yyyyMMdd-HHmm>-<route>\` containing: `preflight-*.txt`
-(before and after install), `saves-before.sha256` / `saves-after.sha256`,
-`DSVR.log`, optional trace JSONL, eye captures or clip (20-45 s for any
-user-facing claim), `results.md` (the table at the end, filled), and the
-exact package identity (`dist\DSVR-latest-verification.json` copied in).
-Incomplete traces or dropped-event intervals invalidate claims for that
-interval; say so in `results.md` instead of averaging over them.
-
-## Segment route (3-5 minutes per segment, one feel question each)
-
-Run segments in this order; later segments assume earlier ones passed.
-Answer the one named question per segment in `results.md`.
-
-| # | Feature | In-game procedure | Observable / pass rule | Feel question |
-|---|---|---|---|---|
-| 1 | Calibration screen | Fresh profile (rename the saved calibration first): load to gameplay; screen must appear before gameplay input | "Hold arms out and hold trigger to start" shown; capture needs a stable one-second hold; gameplay input held until Ready | Was the instruction readable without removing the headset? |
-| 2 | Calibration persistence | Complete calibration, die, reload, restart game; then menu Recalibrate and cancel | Same hand/wrist alignment after death/load/restart (no growing mismatch); cancel keeps the old profile; successful recal replaces it only after capture | Did wrists stay where your real hands are? |
-| 3 | Gameplay recenter | In gameplay, use the recenter control; repeat in theater (F8/F6) | Gameplay recenter moves origin/heading only; wrist offsets unchanged; theater recenter still anchors the screen | Did the world stay put after recentering? |
-| 4 | Arm IK vertical | Horizontal swings, overhead swings, slow lowering, small vertical moves, at rest and walking | Elbow/upper arm follow vertical motion (compare with the horizontal baseline); no frozen elbow; native arms/weapons stay aligned while moving | Do overhead swings feel like your arm? |
-| 5 | Head and forearm visibility | Toggle head hiding and forearm-only in the Home menu; look down, raise shield/weapon | No obstructive head geometry; forearm mode shows forearms, hands and held equipment only; menus keep the native head per config notes | Can you see your body without it blocking the view? |
-| 6 | Home menu | Press Home in VR and on desktop; open all six panels; change, save, reset one setting; controller shortcut (left Menu + right grip) | Menu opens/closes, captures input, settings persist across restart, logs filter, calibration/combat panels show true capability status | Could you find and change a setting without help? |
-| 7 | Mono performance | Fixed scene, VDXR Medium, `frame_limit_fps=90`, render scale 100, then one lower scale | Five `RateEvidence` windows minimum; report game FPS beside effective/runtime/requested; p95 eye-pair budget from the Thresholds table; no rate flipping mid-window (the 72/90 churn in the old log is a FAIL to reproduce or explain) | Was motion smooth during fast head turns? |
-| 8 | UI immersion / theater | Toggle hide-UI in VR; switch to theater and back; open the DSVR menu in both | VR hides native UI only; theater reveals UI as normal; DSVR menu stays reachable in both. Native suppression is not yet bound (see Blocked), so this segment currently verifies config/theater behavior only | Did theater still feel like a safe fallback? |
-| 9 | Lifecycle recovery | Title, load, death, equipment change, menu open/close, focus loss (remove headset briefly), session pause/resume | Combat/turn state neutralizes on transitions; no stale eye pair, indefinite wait, stuck input or stale tracking after any transition | Did anything stay broken after a transition? |
-| 10 | Two-hand grips (grip math) | Equip a two-hand-capable weapon; hold support grip near the handle, move, release | Support hand attaches only while grip is held near the handle and detaches on release; saved per-weapon placements reload after restart. Physical damage attribution stays BLOCKED below | Did the support hand sit where you grabbed? |
-
-## Blocked features: entry criteria before any headset claim
-
-Do not spend headset time "testing" these until the criterion is met in
-source and in the offline suite; until then the correct verdict is BLOCKED
-and the menu must keep saying so.
-
-| Feature | Entry criterion | Current status |
+| Gate | Procedure | Required result |
 |---|---|---|
-| True stereo | Native draw boundary verified: same simulation state renders two real eye views into runtime targets with correct view/projection, proven by captured left/right images with near/far parallax (different pixel hashes alone fail) | BLOCKED - production still submits the mono image; `NativeStereoFrame` API exists without native scene wiring |
-| AFR (alternating eyes) | True stereo first, then an opt-in experimental mode with per-eye freshness measured during fast head motion | BLOCKED - no implementation; menu correctly labels it unavailable |
-| Motion-blur enforcement | A bound, reversible suppression of the game's motion blur while the mod is installed, restored on uninstall, with the original preference preserved | BLOCKED - not bound; menu correctly says so. The config-file `Blur` value alone is not enforcement |
-| Native UI suppression | A bound VR-only UI hide that theater reverses (config `hide_ui_in_vr` exists; the native binding does not) | BLOCKED - segment 8 verifies theater/config behavior only |
-| Physical damage, shield block, parry | Qualified native contact/damage ABI: attributed contacts, damage, stamina/poise and reactions, with misses causing no damage (see `CombatNativeLimitation`) | BLOCKED - equipment read is bound and read-only; damage/guard/parry deliberately have no substitute (no HP edits, no canned attacks) |
-| 90 FPS on target hardware | Segments 1-7 PASS on the packaged build at VDXR Medium, scale 100, with p95 inside 11.11 ms | UNVERIFIED - last installed-build log mixes 18-90 fps with a 72 fps request; that is not a measurement of current source |
+| Real damage | Ten deliberate hits and ten misses against a repeatable vulnerable target with one qualified sword; record swing/contact/context/target generation and native outcome. | Each hit has exactly one expected native result; each miss has none. HP or native defense outcome is attributable to that contact. Native comparison context produces matching rules. |
+| Physical rules | Repeat against shield block, parry, dodge invulnerability, solid wall and two-handed stance; inspect native costs/reaction/status. | Correct native mitigation/invulnerability, stamina/poise/reaction, no through-wall hit or duplicate side effects. |
+| Resting and false hits | Hold overlap 10 s; walk, strafe and right-stick turn with a still weapon; recenter; lose/recover tracking; swap equipment and reuse actor addresses. | Zero unintended attacks, resting repeat damage or stale-target calls. A fresh valid swing can attack again. |
+| Sweep and timing | Replay the same captured slash/thrust, including fast rotational motion, with varied tracking/native rates and duplicate render visits. | Same target/contact episode and attack variant; no tunneling/duplicate outcomes. Deterministic native fixture has equal damage/costs; noisy human repetitions are analyzed separately. |
+| HMD-relative stick | All cardinal/diagonal stick directions at HMD yaw 0/90/180/270, both hands pointing elsewhere, head pitched up/down. | Horizontal intent within 2 degrees of expected HMD-relative direction; diagonal speed no greater than full cardinal speed; no controller-derived steering. |
+| Controller-relative stick | Repeat cardinal/diagonal tests with the selected controller heading fixed and HMD scanning left/right/up/down; then intentionally yaw the reference controller. Test non-dominant and explicit left/right. | Head scanning changes view without changing the intended travel heading; intent follows selected controller yaw within 2 degrees. The unselected controller does not steer. |
+| Reference stability/preferences | Lower/raise the selected hand through vertical, lose/recover controller tracking, change orientation/reference/handedness while holding forward, then release/rearm and restart. Set the reference in DSVR-Setup and in the mod menu, reload (F7) and restart, and confirm a fresh install default. | No accidental forward reversal. The left stick is never dead: an untracked or vertically-aimed selected hand returns steering to the head reference, and a reacquired hand re-engages only after a neutral stick. Artificial translation neutralizes only when the locomotion packet is stale or epoch-mismatched, while valid physical walking continues. Setting changes apply after neutral, persist to DSVR.toml, and legacy hand settings migrate as specified; fresh installs default to Head-oriented smooth locomotion. |
+| Turn-relative travel (23 Oct regression) | On open ground push forward, then turn the view 90, 180 and 270 degrees with the right stick and push forward again at each heading; repeat while already travelling, and repeat after a snap turn. | Travel direction matches the view heading within 2 degrees at every heading. No reversal, no residual heading from the previous turn, no pushing into a wall. The capsule turns toward the camera-relative request through native's own movement, with no player-facing write. |
+| Local player visibility | Look down at the body with `hide_player_model` and `hide_second_model` both true, then with only `hide_second_model` true, and after a load/rebirth. | At most one of the two local-player render models is ever hidden. With both flags true the body still renders (the 23 Oct run had a completely invisible player for the whole session) and `DSVR.log` logs the conflicting-settings warning once. |
+| Body fit anchor (23 Oct addition) | Stand still on flat floor and look down with `embodiment_fit = "head"` (default), and read the `CalibrationFit:` line in `DSVR.log`; switch to `"arm"`, reload with F7 and compare; then crouch, roll, kneel and lunge and re-read the line; finally set the anchor in DSVR-Setup and in the mod menu and confirm both persist to DSVR.toml. | Head mode puts the eye at the native Head-bone height and the body occupies the wearer's space with no head clipping; arm mode matches the hands exactly and may leave the head off that bone. The logged native head/shoulder numbers stay frozen through crouch, roll, kneel and airborne frames. One ratio moves world and player together; no bone base, collider or independent mesh resize changes, and a missing upright measurement falls back to the arm fit with one logged warning instead of a guess. |
+| Physical displacement | Mark and walk a 1 m path forward/back/sideways on open level ground, return to start, then repeat with stick input. | View maps physical motion directly; after native follow settles, avatar displacement attributable to the physical path is within 5 cm or 5%, whichever is larger. No doubled travel; no discarded samples during stick use. |
+| Follow latency | Log coherent HMD displacement, issued movement, resolved root and camera at native update boundaries during ordinary walking. | Physical-follow root response p95 within 100 ms on the qualification machine, without filtering/delaying the tracked camera to obtain that number. Report tracking/native rates and saturation. |
+| Turn stability | Ten 360-degree turns each direction, physical and snap/smooth, standing and moving with physical offset from origin. | No wrap snap, accumulating twist, uncommanded artificial yaw, or turn-induced positional orbit; no artificial turn after neutral input is consumed. |
+| Collision/forced motion | Walk into/along wall, step back, use stairs/slope, then repeat with mixed stick motion and a native knockback. | Native body collision remains valid; no floor penetration, stored-debt lunge or incorrect roomscale credit for forced motion. Wall occlusion response remains coherent. |
+| Head obstruction | Lean/step into a thin wall, corner, closed door or low ceiling; take a larger step across; recenter while obstructed; repeat with comfort vignette Off. | Invalid world imagery is obscured before hidden space becomes visible. No far-side reveal, through-wall interaction or forced view push-back. Clearance/valid-side checks and hysteresis govern recovery; return guidance remains readable. |
+| Lean/ledge anchor | Lean over a supported low obstacle/ledge within the configured allowance, return, then take a deliberate supported step. | Lean offset does not pull the native body off the ledge; supported walking still moves the avatar. No claim of perfect lean/step classification from head/controllers; tested thresholds and edge behavior are recorded. |
+| Physical crouch/clearance | Compare standing and crouched traversal under a qualified low obstacle; physically stand under the ceiling; repeat looking down without lowering HMD position and in seated mode. | HMD position lowers view, collider/body height and relevant native hurt geometry together. Looking down alone does not shrink the collider. Qualified low space is traversable crouched; blocked expansion causes no penetration, launch or camera clamp. Saved stature/scale does not change. |
+| Geometric ducking | Use the same verified projectile trajectory that intersects the standing upper body; duck and repeat, then use a lower trajectory intersecting the crouched body. Observe native hit tests/outcomes. | Upper trajectory misses the crouched hurt volume and hits the standing one; lower intersecting trajectory still produces normal native damage. No synthetic invulnerability, damage suppression or view-only dodge substitutes. |
+| Dynamic vignette | Compare artificial travel, travel plus fast head turns, smooth turns, physical-only motion and rest. Test Off and Low/High, restart, vary render rate, and capture both eye outputs. | Requested movement cases produce a smooth feathered mask with bounded aperture/envelope; the combined case has the configured boost. Physical-only look/walk stays clear by default. Off removes only the comfort effect. No projection change, eye mismatch or stale black frame. |
+| Artificial horizon/tracked pose | While stationary and moving, physically pitch/roll the HMD; separately inject native bob/animation/slope tilt and perform right-stick turns. Compare view quaternion with the calibrated full tracked pose plus artificial yaw. | Physical tilt is preserved within 1 degree in the CPU pose fixture; unintended artificial pitch/roll residual is <=0.5 degree. Walking/turning does not clamp tracked head tilt or inherit native camera bob/shake. |
+| Body and attachments | Standing/lean/crouch, physical/stick/combined walking, overhead/cross-body swings, two-hand support, slow/fast full turns. | Tracked hands/eyes align within calibrated tolerance (target <=3 cm in reachable poses); settled floor contacts target <=2 cm error; no joint flip, mesh collapse, animation overwrite or attachment separation. Qualify visual results as well as logs. |
+| Transitions | Menu/calibration cancel/commit, focus loss, runtime pause/recovery, load, death/respawn, equipment and model replacement. | No stale input, contact, actor pointers or motion debt; saved measurements persist; supported gameplay restores tracking/body/combat correctly. |
+| Encounter | Complete the fixed sword/shield and two-handed encounters using physical contact, physical and stick walking, physical ducking, both orientation modes and snap/smooth turning; compare comfort settings. | Operator confirms playable coherent embodiment and predictable controls; all earlier native/trace gates pass on the same package. Discomfort or a failed required case triggers correction and rerun. |
 
-## Log checks after the run (PowerShell, read-only)
+At least one tested representative per declared stock melee family is required for broad melee support. The first sword success is an intermediate milestone, not completion of the full weapon matrix.
 
-```powershell
-Select-String -Path "$game\DSVR.log" -Pattern "RateMatch|RateEvidence" | Select-Object -Last 20
-Select-String -Path "$game\DSVR.log" -Pattern "sanctuary|Menu:|Calibration|ArmIK:" | Select-Object -Last 40
-python -B tools\vr_trace.py <run-evidence>\DSVR-trace-<pid>-<n>-1.jsonl
-.\build\src\setup\Release\DSVR-Setup.exe --doctor
-```
+## Result record
 
-Record the package SHA values, the runtime string, and every FAIL line
-verbatim in `results.md`. A segment with no log line, capture or human
-answer is UNVERIFIED, however good it felt.
+For each case record: gate/case, candidate hashes, environment, predeclared threshold, procedure, actual result, evidence level/path, verdict, missing coverage, defect/next action and restoration status. Include operator verdict for scale, fusion, latency, clipping, combat predictability and fatigue. CPU matrices, video and synthetic tracking cannot replace headset feel.
 
-## Stop rules and rollback
-
-- Stop the run on discomfort, a crash, save-hash mismatch, unexpected file
-  mutation, or the game going online. Preserve logs/dumps before retrying.
-- Never drive the game while the user is active at the desktop (idle under
-  60 s); check idle first, keep driven sessions short, kill only exact PIDs.
-- Rollback: close the game, `DSVR-Setup.exe --uninstall`, confirm installed
-  hashes/files match the pre-run manifest, restore only test-owned save
-  changes, and only then consider returning Steam online.
-
-## Results template (copy into the run folder as results.md)
-
-| Segment | Verdict | Evidence file(s) | Rate / threshold numbers | Human answer |
-|---|---|---|---|---|
-| 1 Calibration screen |  |  |  |  |
-| 2 Calibration persistence |  |  |  |  |
-| 3 Recenter |  |  |  |  |
-| 4 Arm IK vertical |  |  |  |  |
-| 5 Head / forearm |  |  |  |  |
-| 6 Home menu |  |  |  |  |
-| 7 Mono performance |  |  |  |  |
-| 8 UI / theater |  |  |  |  |
-| 9 Lifecycle |  |  |  |  |
-| 10 Two-hand grips |  |  |  |  |
-| Stereo / AFR / blur / UI suppression / physical damage | BLOCKED | n/a | n/a | n/a |
-
-## Embodiment and physical-combat acceptance
-
-Offline readiness: the Release suite passes 86/86 tests. `movement_reference` is persisted and validated; hand-relative stick mapping and the three-second stick-click menu/double-A recalibration chords have input tests. The IK owner includes leg calibration/solving. These are implementation and offline-test observations only, not headset acceptance.
-
-The remaining acceptance is a guided headset run on the packaged build. Use an offline test save and an empty play area; keep the game offline. Record build/version, headset/runtime, controller type, config, DSVR log, and a short video or notes for each result. Stop if tracking is lost, menus capture gameplay unexpectedly, or any unverified native effect appears.
-
-| Check | Exact action | Pass evidence |
-|---|---|---|
-| Locomotion reference | Test `head`, `left_hand`, then `right_hand`; face a fixed landmark, move the selected controller heading without moving feet, and walk forward/back/sideways. Repeat with the other controller/head aimed elsewhere. | Each setting follows only its selected heading; neutral sticks and roomscale walking do not rotate the body or create unexpected motion. Record any stale/lost-tracking response. |
-| Turning continuity | With each reference, perform slow and fast full 360-degree turns in both directions, then release the stick. | No accumulated heading jump, wrap snap, or continued rotation after release. |
-| IK ownership and legs | Enable arm IK only if safe; look at hands, torso/pelvis, knees and feet while standing, crouching, leaning, turning, and walking. Repeat across a gameplay animation and a pause/menu transition. | Tracked head/arms and estimated body pose remain coherent; no animation overwrite, foot teleport, joint flip, or visible mesh collapse. Otherwise mark the exact pose/action and keep full-body acceptance blocked. |
-| Menu entry and controls | Open Home with the existing left-Menu + right-grip chord; separately hold both stick clicks for 3 seconds. Try keyboard and controller navigation/selection. Hold left stick click and press A twice with a deliberate release between presses to request recalibration; cancel, then repeat and complete. | Menu opens once per hold; chord inputs do not leak to gameplay; recalibration starts only on the intended double press and cancellation preserves the prior calibration. Record pointer availability separately: a controller-ray pointer is not implemented/verified by offline tests. |
-| Physical combat | In the offline proving ground, test swing/miss/contact classification only. Do not treat logs/haptics as game damage. Native physical damage stays disabled. | For future damage qualification, provide pinned game build/hash, verified call/argument path to the target damage sink, and a controlled in-game contact with before/after target health or authoritative outcome plus a miss control. Stop if a native write is attempted without these guards. |
-
-After the run, copy observed results and evidence filenames into the Results template above. Do not change BLOCKED/UNVERIFIED rows based on source inspection, offline tests, or contact classification alone.
-
+The final gate requires all required A–K ledger entries to pass on the packaged candidate. Optional features and declared supported-runtime variants must be identified before qualification. An unresolved core requirement stays open; the agent cannot remove it to declare completion.

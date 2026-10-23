@@ -27,6 +27,7 @@ unsigned locomotion_publishes=0, locomotion_invalidations=0;
 dsvr::Vec3 locomotion_head{}, locomotion_native{};
 std::uint64_t locomotion_epoch=0;
 dsvr::UserCalibration calibration;
+dsvr::RoomscaleBasis published_roomscale;
 std::uint64_t recenter_generation=0;
 template<class T> std::uintptr_t Ptr(T& v) { return reinterpret_cast<std::uintptr_t>(v.data()); }
 template<class T,class V> void Put(T& v,unsigned offset,V value) { std::memcpy(v.data()+offset,&value,sizeof(value)); }
@@ -56,7 +57,7 @@ bool ArmIkHeadWorldDelta(Vec3&, std::uint64_t& sequence, std::uint64_t& epoch) {
   sequence = 0; epoch = 0; return false;
 }
 bool ArmIkCombatBench(CombatBenchSnapshot& out) { out = {}; return false; }
-void InputPublishRoomscaleBasis(const RoomscaleBasis&) {}
+void InputPublishRoomscaleBasis(const RoomscaleBasis& basis) {published_roomscale=basis;}
 bool InputLatestRoomscaleMotion(RoomscaleMotion&) { return false; }
 void InputInvalidateRoomscaleBasis() {}
 void InputPublishHeadDirectedLocomotion(Vec3 head, Vec3 native, std::uint64_t epoch) {
@@ -155,7 +156,13 @@ int main() {
   CameraPublishHeadDirectedLocomotion(9);
   CHECK(locomotion_publishes == 1 && locomotion_epoch == 9);
   CHECK(VDot(locomotion_head,turned_forward) > .999f);
-  CHECK(VDot(locomotion_native,{.04822187f,0,.99883664f}) > .999f);
+  // Movement basis contract (23 Oct): native is asked to walk in the heading of
+  // the camera the mod actually wrote, never the rendered model's root facing.
+  // Pre-rotating the stick into the model facing double-counted every right-
+  // stick turn, which is the reported "walking the wrong way, worse after
+  // turning the camera" failure. The model facing stays a read-only gate.
+  CHECK(VDot(locomotion_native,locomotion_head) > .999f);
+  CHECK(VDot(locomotion_native,{.04822187f,0,.99883664f}) < .99f);
   CHECK(CameraApplyFirstPerson(follow.data(),.70710678f,0,0,.70710678f,.12f,1.35f,.04f,
       1.6f,1,0,0,1.4f,1.1f));
   CameraPublishHeadDirectedLocomotion(9);
@@ -245,6 +252,47 @@ int main() {
   CHECK(std::fabs(Float(0x44)-3.65f)<1e-5f && calibration.eye_height_m==1.04f);
   CHECK(CameraTrackingFrame(head,r,u,f,reference,&anchor));
   CHECK(VDot(f,{.04822187f,0,.99883664f})>.999f);
+  // eye_clearance_m height band: physically kneeling must not push the real
+  // eye inside the standing native model, and the knob at 0 restores exact
+  // physical tracking. X/Z are never touched by the band.
+  {
+    const float raw_x = Float(0x40), raw_z = Float(0x48);
+    CHECK(CameraApplyFirstPerson(follow.data(),0,0,0,1,1,.09f,0,1.65f,1,0,0,1.4f,1.1f,0.45f));
+    CHECK(std::fabs(Float(0x44)-3.20f)<1e-5f);        // floor: 3.65 - 0.45
+    CHECK(Float(0x40)==raw_x && Float(0x48)==raw_z);  // horizontal tracking intact
+    CHECK(CameraApplyFirstPerson(follow.data(),0,0,0,1,1,1.59f,0,1.65f,1,0,0,1.4f,1.1f,0.45f));
+    CHECK(std::fabs(Float(0x44)-4.10f)<1e-5f);        // ceiling: 3.65 + 0.45
+    CHECK(CameraApplyFirstPerson(follow.data(),0,0,0,1,1,.09f,0,1.65f,1,0,0,1.4f,1.1f,0.0f));
+    CHECK(std::fabs(Float(0x44)-2.90f)<1e-5f);        // knob off = fully physical
+    CHECK(std::fabs(Float(0x44)-2.90f)<1e-5f);        // knob off = fully physical
+  }
+  {
+    // Scale/height/revisions travel as one applied-camera packet, all the way
+    // to roomscale publication. Changing a profile cannot rewrite that packet.
+    const auto mapping=ResolveCalibrationMapping(calibration,1.65f,true,1.f,.495f,42);
+    CHECK(mapping.valid && mapping.fitted);
+    CameraTrackingSpaceChanged(9);
+    CHECK(CameraApplyFirstPerson(follow.data(),0,0,0,1,1,1.04f,0,
+        mapping.eye_height,mapping.world_scale,0,0,1.4f,1.1f,0,&mapping));
+    CHECK(CameraApplyFirstPerson(follow.data(),0,0,0,1,1.2f,.94f,0,
+        mapping.eye_height,mapping.world_scale,0,0,1.4f,1.1f,0,&mapping));
+    CalibrationMapping applied;
+    CHECK(CameraTrackingFrame(head,r,u,f,reference,&anchor,&applied));
+    const Vec3 offset=VAdd(head,VScale(anchor,-1));
+    CHECK(std::fabs(VDot(offset,r)-.2f*mapping.world_scale)<1e-5f);
+    CHECK(std::fabs(offset.y-(mapping.eye_height-.1f*mapping.world_scale))<1e-5f);
+    CHECK(applied.world_scale==mapping.world_scale && applied.model_revision==42);
+    CameraPublishHeadDirectedLocomotion(9);
+    CHECK(published_roomscale.world_scale==mapping.world_scale &&
+          published_roomscale.calibration_revision==mapping.calibration_revision);
+    ++calibration.revision;
+    CHECK(CameraTrackingFrame(head,r,u,f,reference,&anchor,&applied));
+    CHECK(applied.calibration_revision==mapping.calibration_revision);
+    auto invalid=mapping;invalid.valid=false;
+    CHECK(!CameraApplyFirstPerson(follow.data(),0,0,0,1,1,1.04f,0,
+        mapping.eye_height,mapping.world_scale,0,0,1.4f,1.1f,0,&invalid));
+    CHECK(!CameraTrackingFrame(head,r,u,f,reference,&anchor,&applied));
+  }
   Matrix(0x10,0,4,-8); CameraTraceFollowCam(follow.data()); CHECK(CameraIsTitle());
   CHECK(!CameraGameplayReady());
   Sleep(270); CHECK(!CameraIsTitle()); // stale observation is unknown

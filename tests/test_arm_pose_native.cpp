@@ -31,6 +31,7 @@ std::array<unsigned char,0x30> flver{};
 std::array<unsigned char,80*0x30> entries{}, rebound_entries{};
 std::array<std::array<wchar_t,24>,80> names{};
 std::array<ArmPoseMatrix,80> poses{}, native{};
+std::array<ArmPoseMatrix,80> copied_body{};
 Config cfg;
 TrackingFrame latest{};
 bool signature=true,latest_ok=true,camera_ok=true,menu=false;
@@ -38,9 +39,11 @@ std::uintptr_t player_pose_method=0;
 bool head_basis_ok=false; Vec3 stub_head_fwd{.04822187f,0,.99883664f};
 std::uint64_t camera_sequence=0;
 UserCalibration calibration;
+CalibrationMapping camera_mapping_override;
 bool capture_input=false;
 bool equipment_available=false;
 unsigned mutate_after_pose_read=0;
+unsigned output_root_mode=0;
 unsigned originals=0,writes=0,forbidden=0,creates=0,disables=0;
 std::array<unsigned,80> writes_by_bone{};
 bool write_this_original=false;
@@ -59,7 +62,16 @@ template<class T> std::uintptr_t Ptr(T& v) { return reinterpret_cast<std::uintpt
 template<class T,class V> void Put(T& v,unsigned offset,V value) { std::memcpy(v.data()+offset,&value,sizeof(value)); }
 ArmPoseMatrix Pose(float x,float y,float z) { return {{1,0,0,x,0,1,0,y,0,0,1,z}}; }
 void __fastcall Original(void*) {
-  ++originals;if(ReadScopeActive())++original_scope_leaks;poses=native;
+  ++originals;if(ReadScopeActive())++original_scope_leaks;poses=copied_body=native;
+  // Native FUN_140207f10 copies the model root into the separate assembly
+  // root, even when the assembly palette data aliases the model palette.
+  ArmPoseMatrix output_root;
+  std::memcpy(&output_root,model.data()+0x30,sizeof(output_root));
+  if(output_root_mode==1) output_root.m[3]+=.05f;
+  if(output_root_mode==2) output_root.m[0]*=1.1f;
+  if(output_root_mode==3) output_root.m[0]=NAN;
+  if(output_root_mode==4) output_root.m[1]=-output_root.m[1]; // +/-zero equal
+  std::memcpy(pose_output.data()+0x20,&output_root,sizeof(output_root));
   writes_by_bone.fill(0);write_this_original=false;
 }
 void Fresh() { latest.captured_ms=GetTickCount64();camera_sequence=latest.sequence; }
@@ -69,7 +81,7 @@ bool Copy(std::uintptr_t address,void* out,std::size_t size) {
       {Ptr(other),other.size()},{Ptr(model),model.size()},{Ptr(pose_output),pose_output.size()},
       {Ptr(flver),flver.size()},
       {Ptr(entries),entries.size()},{Ptr(rebound_entries),rebound_entries.size()},
-      {Ptr(poses),sizeof(poses)}};
+       {Ptr(poses),sizeof(poses)},{Ptr(copied_body),sizeof(copied_body)}};
   for (auto& text:names) ranges.push_back({Ptr(text),sizeof(text)});
   for (const auto& r:ranges) if (address>=r.start && address-r.start<=r.size && size<=r.size-(address-r.start)) {
     std::memcpy(out,reinterpret_cast<void*>(address),size);return true;
@@ -114,6 +126,12 @@ bool GuardedReadBytes(std::uintptr_t address,void* out,std::size_t size) {
     if (mutation==2) Put(model,0x18,static_cast<std::uintptr_t>(0));
     if (mutation==3) Put(flver,0x18,static_cast<std::uintptr_t>(0));
     if (mutation==4) Put(pose_output,0x60,Ptr(other));
+    if (mutation==5) {
+      ArmPoseMatrix changed;
+      std::memcpy(&changed,pose_output.data()+0x20,sizeof(changed));
+      changed.m[3]+=.05f;
+      std::memcpy(pose_output.data()+0x20,&changed,sizeof(changed));
+    }
   }
   return copied;
 }
@@ -137,12 +155,17 @@ bool CombatNativeReadEquipment(std::uintptr_t actor,CombatEquipment& out) {
   out.player=actor;out.weapon_id[0]=200000;out.weapon_id[1]=100000;return true;
 }
 void CombatNativeInvalidateEquipment() {}
-bool CameraTrackingFrame(Vec3& head,Vec3& right,Vec3& up,Vec3& forward,float ref[4],Vec3* anchor) {
+bool CameraTrackingFrame(Vec3& head,Vec3& right,Vec3& up,Vec3& forward,float ref[4],Vec3* anchor,
+                         CalibrationMapping* mapping) {
   if (!camera_ok) return false;
   // Run-9 model convention, matching real camera render-root calibration.
   head=VAdd(camera_anchor,VAdd(Vec3{0,1.5f,0},camera_lean));right={.99883664f,0,-.04822187f};
   up={0,1,0};forward={.04822187f,0,.99883664f};
-  ref[0]=ref[1]=ref[2]=0;ref[3]=1;if(anchor)*anchor=camera_anchor;return true;
+  ref[0]=ref[1]=ref[2]=0;ref[3]=1;if(anchor)*anchor=camera_anchor;
+  if(mapping) *mapping=ResolveCalibrationMapping(calibration,cfg.eye_height,
+      cfg.play_style=="seated",cfg.world_scale);
+  if(mapping && camera_mapping_override.valid) *mapping=camera_mapping_override;
+  return true;
 }
 bool CameraHeadBasis(Vec3& right,Vec3& up,Vec3& fwd) {
   if (!head_basis_ok) return false;
@@ -301,7 +324,41 @@ int main() {
   native[41]=native[56]=Pose(-.15f,1.3f,0);native[42]=Pose(-.35f,1.15f,0);
   native[43]=Pose(-.45f,.95f,0);native[53]=Pose(-.45f,.95f,-.1f);
   native[18]=Pose(0,1.5f,0);native[19]=Pose(0,1.65f,0);
+  // Joint placement follows the captured rig: its clavicle joint sits 0.118 m
+  // inboard of the shoulder (measured shoulder -> clavicle = (.114,-.004,-.022)
+  // left, mirrored right) and LUpArmTwist / L_ForeTwist share the UpperArm /
+  // Forearm joint origins exactly (tests/native_idle_pose.inc). A clavicle left
+  // at the model root would orbit the shoulder 1.3 m per radian of swing, which
+  // no rig does and which the reachability clip then has to cancel.
+  native[23]=Pose(.0357f,1.3044f,.0215f);native[40]=Pose(-.0397f,1.3107f,-.0355f);
+  native[39]=native[24];native[38]=native[25];
+  native[56]=native[41];native[55]=native[42];
   native[79]={}; // real native palette has unused zero-basis slots outside either arm
+  // Arm bone bases use the convention measured on every frame of the captured
+  // palette (docs/ARM_IK_EVIDENCE.md): column 0 runs along the bone toward the
+  // child joint (|dot| = 1.0000 for the upper arm, forearm and both twist bones,
+  // both sides), column 1 is the elbow bend-plane normal (|dot| = 1.0000) and
+  // column 2 closes the right-handed frame inside the bend plane on the elbow
+  // side (dot = +0.97 with the native elbow offset). SolveModelArmPose aims the
+  // upper-arm basis at the solved directions (hinge_aim), which only carries the
+  // joint chain when the palette authors that convention; with identity arm
+  // bases the aim rolls the basis in place and leaves the elbow 0.48 m away.
+  const auto aim_chain=[](ArmPoseMatrix& upper,ArmPoseMatrix& forearm,
+                          const ArmPoseMatrix& hand,ArmPoseMatrix& upper_twist,
+                          ArmPoseMatrix& fore_twist) {
+    const Vec3 u=VNorm(arm_pose_detail::Sub(ArmPoseOrigin(forearm),ArmPoseOrigin(upper)));
+    const Vec3 f=VNorm(arm_pose_detail::Sub(ArmPoseOrigin(hand),ArmPoseOrigin(forearm)));
+    const Vec3 plane=VNorm(VCross(u,f));
+    const auto aim=[&](ArmPoseMatrix& bone,const Vec3& axis) {
+      const Vec3 col0=axis,col2=VNorm(VCross(col0,plane)),col1=VCross(col2,col0);
+      bone.m[0]=col0.x;bone.m[1]=col1.x;bone.m[2]=col2.x;
+      bone.m[4]=col0.y;bone.m[5]=col1.y;bone.m[6]=col2.y;
+      bone.m[8]=col0.z;bone.m[9]=col1.z;bone.m[10]=col2.z;
+    };
+    aim(upper,u);aim(upper_twist,u);aim(forearm,f);aim(fore_twist,f);
+  };
+  aim_chain(native[24],native[25],native[26],native[39],native[38]);
+  aim_chain(native[41],native[42],native[43],native[56],native[55]);
   poses=native;
   cfg.vr_enabled=cfg.arm_ik_enabled=cfg.headlook_enabled=true;cfg.arm_ik_log_only=false;
   // Isolate tracking rotation; configured roll is exercised separately below.
@@ -324,6 +381,8 @@ int main() {
     CHECK(std::memcmp(&poses[bone],&native[bone],sizeof(ArmPoseMatrix))!=0);
   CHECK(VLen(VAdd(ArmPoseOrigin(poses[26]),{-.35f,-1.f,.2f}))<1e-5f);
   CHECK(VLen(VAdd(ArmPoseOrigin(poses[43]),{.35f,-1.f,.2f}))<1e-5f);
+  CHECK(std::memcmp(&poses[23],&native[23],sizeof(ArmPoseMatrix))!=0);
+  CHECK(std::memcmp(&poses[40],&native[40],sizeof(ArmPoseMatrix))!=0);
   // The XR target is the grip pose: the weapon mount, not the wrist joint,
   // must land on it. Native grip offset here is (0,0,-0.1) from the hand.
   CHECK(VLen(VAdd(ArmPoseOrigin(poses[36]),{-.35f,-1.1f,.2f}))<1e-5f);
@@ -332,6 +391,14 @@ int main() {
   Put(pose_output,0x60,Ptr(other));
   Fresh();ArmIkTick(latest);callback(player.data());
   CHECK(writes==after_first_commit); // output buffer must alias selected ChrModel poses
+  // Qwen: retained run-7 after-copy samples have TWO valid, distinct palettes.
+  // Keep that real pattern distinct from a bad pointer: this adapter still
+  // refuses it until source->body remapping/scale/attachment ownership is proven.
+  // A synthetic aliased fixture passing above is not live retarget acceptance.
+  Put(pose_output,0x60,Ptr(copied_body));
+  Fresh();ArmIkTick(latest);callback(player.data());
+  CHECK(writes==after_first_commit);
+  CHECK(std::memcmp(copied_body.data(),native.data(),sizeof native)==0);
   Put(pose_output,0x60,Ptr(poses));
   // Native head/neck geometry filtering is separate from skeletal retargeting.
   // Bone matrices stay nonsingular even while the head-visibility setting is on.
@@ -352,6 +419,68 @@ int main() {
   Fresh();ArmIkTick(latest);callback(player.data());
   CHECK(CheckMirroredGripRoll() == 0);
   CHECK(CheckCombatBench() == 0);
+  {
+    for(unsigned mode:{1u,2u,3u,4u}) {
+      output_root_mode=mode;
+      ++latest.sequence;Fresh();ArmIkTick(latest);
+      const auto old_writes=writes;
+      callback(player.data());
+      if(mode==4) CHECK(writes==old_writes+1);
+      else {
+        CHECK(writes==old_writes);
+        CHECK(std::memcmp(poses.data(),native.data(),sizeof poses)==0);
+        ArmIkHands refused;CHECK(!ArmIkLatestHands(refused));
+      }
+      CHECK(std::memcmp(model.data()+0x30,&root,sizeof root)==0);
+    }
+    output_root_mode=0;
+    ++latest.sequence;Fresh();ArmIkTick(latest);callback(player.data());
+  }
+  {
+    // Regression at the actual native write boundary: calibration must not
+    // replace a world-space tracked grip with a shoulder-local motion gain.
+    const auto saved_tracking=latest;const auto saved_profile=calibration;
+    const auto saved_config=cfg;
+    calibration.valid=true;calibration.eye_height_m=1.5f;++calibration.revision;
+    cfg.grip_roll_correction_deg=0;
+    for(float scale:{.9f,1.f,1.1f}) {
+      cfg.world_scale=scale;
+      for(int side=0;side<2;++side) {
+        latest.arm[side].pos[0]=side?.25f:-.25f;
+        latest.arm[side].pos[1]=1.2f;latest.arm[side].pos[2]=-.12f;
+      }
+      ArmIkResetCalibration();++latest.sequence;Fresh();ArmIkTick(latest);
+      const auto before_scale=writes;callback(player.data());CHECK(writes==before_scale+1);
+      for(int side=0;side<2;++side) {
+        const Vec3 expected{-latest.arm[side].pos[0]*scale,
+            1.5f+(latest.arm[side].pos[1]-latest.head_pos[1])*scale,
+            latest.arm[side].pos[2]*scale};
+        CHECK(VLen(arm_pose_detail::Sub(ArmPoseOrigin(poses[side?53:36]),expected))<1e-5f);
+        for(int bone:{side?41:24,side?42:25,side?43:26})
+          for(int axis=0;axis<3;++axis)
+            CHECK(std::fabs(VLen(arm_pose_detail::Column(poses[bone],axis))-1.f)<1e-5f);
+      }
+      CHECK(std::memcmp(model.data()+0x30,&root,sizeof(root))==0);
+    }
+    float reach=0;std::uint64_t revision=0;
+    CHECK(ArmIkNativeReach(reach,revision) && revision>0);
+    CHECK(std::fabs(reach-(.25f+std::sqrt(.05f)))<1e-5f);
+    const auto old_revision=revision;
+    Put(flver,0x18,Ptr(rebound_entries));
+    CHECK(!ArmIkNativeReach(reach,revision) && reach==0 && revision==0);
+    Put(flver,0x18,Ptr(entries));
+    CHECK(ArmIkNativeReach(reach,revision) && revision==old_revision);
+    camera_mapping_override=ResolveCalibrationMapping(calibration,cfg.eye_height,false,
+        cfg.world_scale,reach,revision);
+    ++latest.sequence;Fresh();ArmIkTick(latest);
+    const auto stale_writes=writes;
+    rebound_entries=entries;Put(flver,0x18,Ptr(rebound_entries));
+    callback(player.data());CHECK(writes==stale_writes); // changed after camera
+    CHECK(ArmIkNativeReach(reach,revision) && revision!=old_revision);
+    camera_mapping_override={};Put(flver,0x18,Ptr(entries));
+    latest=saved_tracking;calibration=saved_profile;cfg=saved_config;
+    ArmIkResetCalibration();Fresh();ArmIkTick(latest);callback(player.data());
+  }
   {
     // Exercise the real post-animation callback and real grip solver together:
     // the support hand changes the primary weapon only while grip is held.
@@ -390,12 +519,19 @@ int main() {
   ArmIkHands published{};
   CHECK(ArmIkLatestHands(published) && published.sequence==latest.sequence && published.side[0].valid);
   // Respawn/scene rebinding cannot capture another animation as neutral wrist.
-  const auto stable=poses;
+  const auto tracked = poses;
+    ArmIkResetCalibration();++latest.space_epoch;++latest.sequence;
+    Fresh();ArmIkTick(latest);callback(player.data());
+    for(int hand:{26,43})for(int j=0;j<12;++j)
+      CHECK(std::fabs(poses[hand].m[j]-tracked[hand].m[j])<1e-5f);
+    const auto stable = poses;
   for(int i=0;i<20;++i) {
     ArmIkResetCalibration();++latest.space_epoch;++latest.sequence;
     Fresh();ArmIkTick(latest);callback(player.data());
     for(int hand:{26,43})for(int j=0;j<12;++j)
       CHECK(std::fabs(poses[hand].m[j]-stable[hand].m[j])<1e-5f);
+    for(int arm:{24,25,26,41,42,43})for(int j=0;j<12;++j)
+      CHECK(std::fabs(poses[arm].m[j]-stable[arm].m[j])<1e-5f);
   }
   cfg.forearm_only=true;Fresh();ArmIkTick(latest);callback(player.data());
   // A visibility request must never collapse pelvis/upper-arm skinning bones.
@@ -621,7 +757,7 @@ int main() {
   Put(model,0x128,Ptr(model)+0x20);callback(player.data());CHECK(writes==before);Put(model,0x128,Ptr(model)+0x60);
   Put(model,0x78,static_cast<std::uintptr_t>(1));callback(player.data());CHECK(writes==before);Put(model,0x78,static_cast<std::uintptr_t>(0));
   // Ownership can change after the initial pose snapshot; refuse the stale write.
-  for (unsigned mutation=1;mutation<=4;++mutation) {
+  for (unsigned mutation=1;mutation<=5;++mutation) {
     mutate_after_pose_read=mutation;callback(player.data());CHECK(writes==before);
     CHECK(std::memcmp(poses.data(),native.data(),sizeof(poses))==0);
     Put(model,0x78,static_cast<std::uintptr_t>(0));Put(model,0x18,Ptr(flver));Put(flver,0x18,Ptr(entries));

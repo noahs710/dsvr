@@ -67,8 +67,12 @@ int main(){
   CHECK(primary[0x92]==1 && alternate[0xaa]==1);
   theater=true;callback(player.data());CHECK(primary[0x92]==1 && alternate[0xaa]==1);theater=false;
   running=false;callback(player.data());CHECK(primary[0x92]==1 && alternate[0xaa]==1);running=true;
+  // At most one of the two render models may be hidden. The live 23 Oct run
+  // had hide_player_model and hide_second_model both true and the player was
+  // completely invisible for the whole session, so hiding the primary keeps the
+  // body model rendering instead of hiding everything.
   config.forearm_only=false;config.hide_player_model=true;callback(player.data());
-  CHECK(primary[0x92]==0 && alternate[0xaa]==0);
+  CHECK(primary[0x92]==0 && alternate[0xaa]==1);
   config.hide_player_model=false;native_primary_visible=false;
   const std::uintptr_t absent=0;std::memcpy(player.data()+0x60,&absent,sizeof(absent));
   callback(player.data());CHECK(alternate[0xaa]==1);

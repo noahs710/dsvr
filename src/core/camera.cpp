@@ -141,13 +141,22 @@ bool g_wrote = false;
 float g_last_yaw = 0.0f;  // last stable head yaw (pole continuity)
 Vec3 g_last_right{1, 0, 0};    // written right vector (vertical-look fallback)
 Vec3 g_tracking_head{0, 0, 0};  // calibrated camera anchor shared with IK
+CalibrationMapping g_tracking_mapping;
 Vec3 g_head_right{1, 0, 0}, g_head_up{0, 1, 0}, g_head_fwd{0, 0, 1};
 std::uint64_t g_planar_heading_epoch = 0;
 Vec3 g_last_planar_heading{0, 0, 1};
 bool g_have_planar_heading = false;
+// Diagnostic only: how far native's own turn assist carries the rendered
+// model away from the heading we steer in. Never feeds the view or the stick.
+std::uint64_t g_render_facing_epoch = 0;
+Vec3 g_last_render_facing{0, 0, 1};
+bool g_have_render_facing = false;
+int g_render_facing_logs = 0;
 Vec3 g_last_player{0, 0, 0};
 bool g_have_last_player = false;
 int g_turn_logs = 0;
+int g_clamp_logs = 0;   // rate limit for eye-height clamp diagnostics
+int g_override_logs = 0;  // rate limit for native-owner rewrite diagnostics
 // Follow-cam projection source (traced 2026-10-13: vfov at self+0x50,
 // aspect at self+0x54; no working-copy pair near +0x310).
 std::uintptr_t g_follow_projection_owner = 0;
@@ -257,9 +266,15 @@ bool CameraApplyFirstPerson(void* follow_cam_self, float qx, float qy,
                             float qz, float qw, float px, float py, float pz,
                             float eye_height, float world_scale,
                             float forward_offset_m, float turn_yaw_rad,
-                            float vfov_rad, float fov_aspect) {
+                            float vfov_rad, float fov_aspect,
+                            float eye_clearance_m,
+                            const CalibrationMapping* mapping) {
   GuardedReadScope memory_reads;
   g_wrote = false;  // every refused application invalidates the previous arm frame
+  if (!std::isfinite(eye_height) || !(eye_height > 0.f) ||
+      !std::isfinite(world_scale) || !(world_scale > 0.f) ||
+      (mapping && (!mapping->valid || mapping->world_scale != world_scale ||
+                   mapping->eye_height != eye_height))) return false;
   static std::uint64_t recenter_seen=0;
   const auto recenter=CalibrationRecenterGeneration();
   if (recenter_seen!=recenter) {
@@ -312,6 +327,13 @@ bool CameraApplyFirstPerson(void* follow_cam_self, float qx, float qy,
              teleported ? "anchor rebound after teleport" : "anchor bound",
              player.x, player.y, player.z,
              have_logic ? "logic" : "physics-fallback", native_forward.x, native_forward.z);
+    // Anchor-convention diagnostic only. The native matrix we hook is the
+    // THIRD-PERSON follow camera, so its translation sits well above the
+    // feet; it is not the eye height and is never adopted as one. Logged
+    // once per bind so the anchor-vs-model height relationship is on record.
+    DSVR_LOG("Camera: native follow camera sits %.2fm above the player anchor "
+             "(third-person follow camera, NOT eye height; eye_height=%.2f)",
+             (double)(gp.y - player.y), (double)eye_height);
   }
 
   reads_time.Stop();
@@ -364,10 +386,21 @@ bool CameraApplyFirstPerson(void* follow_cam_self, float qx, float qy,
     VrTraceEvent event{};
     event.event = "camera_heading";
     float native_yaw = 0;
-    if (ReadPlayerYaw(native_yaw)) { event.values[0] = native_yaw; event.flags = 1; }
+    if (ReadPlayerYaw(native_yaw)) { event.values[0] = native_yaw; event.flags |= 1; }
     event.values[1] = turn_yaw_rad;
     event.values[2] = g_fwd0.x;
     event.values[3] = g_fwd0.z;
+    // Ownership probe for the next functional test, read-only: the rendered
+    // model's planar facing beside ChrPosData yaw and the heading the stick is
+    // steered in. Whether native turn assist carries the model facing toward
+    // the camera heading is the open locomotion-attribution question, and this
+    // answers it without any player-facing write.
+    Vec3 render_facing{};
+    if (ReadPlayerRenderFacing(render_facing)) {
+      event.values[4] = std::atan2(render_facing.x, render_facing.z);
+      event.flags |= 2;
+    }
+    event.values[5] = std::atan2(g_fwd0.x, g_fwd0.z);
     VrTraceRecord(event);
   }
 
@@ -390,6 +423,30 @@ bool CameraApplyFirstPerson(void* follow_cam_self, float qx, float qy,
   Vec3 head_pos = VAdd(anchor, HeadTranslationFromReference(
       delta, g_q0, g_right0, g_up0, g_fwd0, world_scale));
   head_pos = VAdd(head_pos, VScale(g_fwd0, forward_offset_m));
+  // Height guard: the eye is the player (feet/body) anchor plus eye_height
+  // plus the wearer's head translation since recenter, so physical kneeling
+  // or a forward lean puts a real eye inside the standing native torso.
+  // Bounded around the nominal eye height (ClampEyeAboveAnchor); X/Z keep
+  // tracking exactly. `player` is the anchor here: the `anchor` above is
+  // already anchor + eye_height and must not be passed in.
+  {
+    const Vec3 bounded =
+        ClampEyeAboveAnchor(head_pos, player, eye_height, eye_clearance_m);
+    if (bounded.y != head_pos.y) {
+      if (g_clamp_logs < 4) {
+        ++g_clamp_logs;
+        DSVR_LOG("Camera: eye Y clamped %.2f -> %.2f (tracked head sits %.2f "
+                 "above the anchor, band %.2f..%.2f, eye_height=%.2f "
+                 "clearance=%.2f)",
+                 (double)head_pos.y, (double)bounded.y,
+                 (double)(head_pos.y - player.y),
+                 (double)(player.y + eye_height - eye_clearance_m),
+                 (double)(player.y + eye_height + eye_clearance_m),
+                 (double)eye_height, (double)eye_clearance_m);
+      }
+      head_pos = bounded;
+    }
+  }
   // The head bone always ends at the real camera-facing position just
   // below the eyes (head_rider.h) instead of watching the torso solver
   // carry the neck away. Outrunning roots are clipped inside that
@@ -405,8 +462,18 @@ bool CameraApplyFirstPerson(void* follow_cam_self, float qx, float qy,
       head_pos.x,head_pos.y,head_pos.z,1};
   for(unsigned i=0;i<2;++i) {
     if(!(g_follow_pose_mask&(1u<<i)) ||
-        std::memcmp(native_pose[i],g_follow_written_pose[i],sizeof(written))!=0)
+        std::memcmp(native_pose[i],g_follow_written_pose[i],sizeof(written))!=0) {
       std::memcpy(g_follow_native_pose[i],native_pose[i],sizeof(written));
+      // Rate-limited: once we own this matrix, any difference means the native
+      // owner wrote over our pose. Log the height it wants instead of guessing
+      // where the model's eye actually is.
+      if((g_follow_pose_mask&(1u<<i)) && g_override_logs < 4) {
+        ++g_override_logs;
+        DSVR_LOG("Camera: native owner rewrote follow pose %u (its Y=%.2f, "
+                 "ours=%.2f, anchor Y=%.2f)", i, (double)native_pose[i][13],
+                 (double)head_pos.y, (double)player.y);
+      }
+    }
     std::memcpy(g_follow_written_pose[i],written,sizeof(written));
     g_follow_pose_mask|=1u<<i;
   }
@@ -439,6 +506,15 @@ bool CameraApplyFirstPerson(void* follow_cam_self, float qx, float qy,
   }
 
   g_tracking_head = head_pos;
+  if (mapping) g_tracking_mapping = *mapping;
+  else {
+    g_tracking_mapping = {};
+    g_tracking_mapping.valid = true;
+    g_tracking_mapping.world_scale = world_scale;
+    g_tracking_mapping.eye_height = eye_height;
+    g_tracking_mapping.world_trim = world_scale;
+    g_tracking_mapping.calibration_revision = CalibrationCurrent().revision;
+  }
   g_head_right = hb.r; g_head_up = hb.u; g_head_fwd = hb.f;
   g_wrote = true;
   if (++g_frames % 300 == 0) {
@@ -454,10 +530,12 @@ bool CameraApplyFirstPerson(void* follow_cam_self, float qx, float qy,
 }
 
 bool CameraTrackingFrame(Vec3& head_world, Vec3& right, Vec3& up, Vec3& fwd,
-                         float reference_quat[4], Vec3* anchor_world) {
+                         float reference_quat[4], Vec3* anchor_world,
+                         CalibrationMapping* mapping) {
   if (!g_captured || !g_wrote) return false;
   head_world = g_tracking_head;
   if (anchor_world) *anchor_world = g_last_player;
+  if (mapping) *mapping = g_tracking_mapping;
   right = g_right0; up = g_up0; fwd = g_fwd0;
   for (int i = 0; i < 4; ++i) reference_quat[i] = g_q0[i];
   return true;
@@ -500,6 +578,22 @@ void CameraPublishHeadDirectedLocomotion(std::uint64_t space_epoch) {
     InputInvalidateHeadDirectedLocomotion();
     return;
   }
+  if (g_render_facing_epoch != space_epoch) {
+    g_render_facing_epoch = space_epoch;
+    g_have_render_facing = false;
+  }
+  if (g_have_render_facing && g_render_facing_logs < 3) {
+    const float turn = std::atan2(VCross(g_last_render_facing, native_forward).y,
+                                  VDot(g_last_render_facing, native_forward));
+    if (std::fabs(turn) > 0.35f) {
+      ++g_render_facing_logs;
+      DSVR_LOG("Camera: native render facing changed %.1fdeg since the previous "
+               "camera sample (read-only; the stick follows the written camera "
+               "heading)", turn * 57.29578f);
+    }
+  }
+  g_last_render_facing = native_forward;
+  g_have_render_facing = true;
   if (g_planar_heading_epoch != space_epoch) {
     g_planar_heading_epoch = space_epoch;
     g_have_planar_heading = false;
@@ -513,7 +607,18 @@ void CameraPublishHeadDirectedLocomotion(std::uint64_t space_epoch) {
     InputInvalidateHeadDirectedLocomotion();
     return;
   }
-  InputPublishHeadDirectedLocomotion(g_last_planar_heading, native_forward, space_epoch);
+  // Movement basis: the follow camera we just wrote is the frame native
+  // interprets both the left stick and a roomscale walk in, so its planar
+  // heading IS the movement basis. Pre-rotating the stick into the rendered
+  // model's root facing double-counts the turn the right stick already applied
+  // to this camera: the error equals (camera heading - model facing) and grows
+  // with every stick turn, which is the reported "walking the wrong way, worse
+  // after turning the camera" failure. The model facing stays a diagnostic
+  // only - native's own turn assist rotates the capsule toward the direction
+  // the camera-relative stick asks for, so vision and travel stay oriented
+  // without any player-facing write.
+  InputPublishHeadDirectedLocomotion(g_last_planar_heading, g_last_planar_heading,
+                                     space_epoch);
   RoomscaleBasis roomscale{};
   roomscale.tracking_right = HeadTranslationFromReference(
       {1, 0, 0}, g_q0, g_right0, g_up0, g_fwd0, 1.0f);
@@ -521,8 +626,10 @@ void CameraPublishHeadDirectedLocomotion(std::uint64_t space_epoch) {
       {0, 1, 0}, g_q0, g_right0, g_up0, g_fwd0, 1.0f);
   roomscale.tracking_forward = HeadTranslationFromReference(
       {0, 0, -1}, g_q0, g_right0, g_up0, g_fwd0, 1.0f);
-  roomscale.native_forward = native_forward;
+  roomscale.movement_basis = g_last_planar_heading;
   roomscale.space_epoch = space_epoch;
+  roomscale.world_scale = g_tracking_mapping.world_scale;
+  roomscale.calibration_revision = g_tracking_mapping.calibration_revision;
   roomscale.valid = true;
   InputPublishRoomscaleBasis(roomscale);
 }

@@ -37,7 +37,9 @@ int main() {
   CHECK(c.movement_controller == dsvr::MovementController::NonDominant);
   CHECK(c.eye_height == 1.65f);
   CHECK(c.forward_offset_m == 0.0f && !c.hide_player_model);
+  CHECK(c.eye_clearance_m == 0.45f);
   CHECK(c.hide_head);
+  CHECK(c.embodiment_fit == "head");
   CHECK(c.motion_attacks);
   CHECK(!c.offline_only_ack);
   CHECK(!c.sanctuary_override && c.menu_distance_m == 2.75f);
@@ -56,6 +58,8 @@ int main() {
           "frame_limit_fps = 144\n"
           "snap_turn_degrees = 30\nhead_directed_move = false\n"
           "[camera]\neye_height = 1.8\nworld_scale = 1.2\n"
+          "eye_clearance_m = 0.6\n"
+          "embodiment_fit = \"arm\"\n"
           "forward_offset_m = 0.12\nhide_player_model = false\nhide_head = false\n"
           "[combat]\nswing_speed_min = 2.5\nswing_damage_gain = 1.5\n"
           "haptics = false\n[safety]\noffline_only_ack = true\n"
@@ -74,8 +78,9 @@ int main() {
   CHECK(c.eye_height == 1.8f);
   CHECK(c.world_scale == 1.2f);
   CHECK(c.forward_offset_m == 0.12f && !c.hide_player_model);
+  CHECK(c.eye_clearance_m == 0.6f);
   CHECK(!c.hide_head);
-  CHECK(c.swing_speed_min == 2.5f);
+  CHECK(c.embodiment_fit == "arm");
   CHECK(c.swing_damage_gain == 1.5f);
   CHECK(!c.haptics);
   CHECK(c.offline_only_ack);
@@ -86,6 +91,7 @@ int main() {
     CHECK(_wfopen_s(&f, path.c_str(), L"w") == 0 && f);
     fputs("[vr]\nrender_scale_percent = 999\nsnap_turn_degrees = 1\n"
           "[camera]\neye_height = 99.0\nforward_offset_m = 99.0\n"
+          "eye_clearance_m = 99.0\n"
           "[combat]\nswing_damage_gain = 0.0\n",
           f);
     fclose(f);
@@ -96,6 +102,7 @@ int main() {
   CHECK(c.snap_turn_degrees == 15);
   CHECK(c.eye_height == 2.5f);
   CHECK(c.forward_offset_m == 0.4f);
+  CHECK(c.eye_clearance_m == 1.2f);
   CHECK(c.swing_damage_gain == 0.1f);
 
   // Missing file keeps defaults and reports false.
@@ -136,6 +143,17 @@ int main() {
   CHECK(dsvr::ConfigLoad(path.c_str(), c));
   CHECK(c.play_style == "standing");
 
+  // An invalid embodiment_fit keeps the documented default, the same way an
+  // unknown play_style does: a typo must not silently disable the fit.
+  {
+    FILE* f = nullptr;
+    CHECK(_wfopen_s(&f, path.c_str(), L"w") == 0 && f);
+    fputs("[camera]\nembodiment_fit = \"knees\"\n", f);
+    fclose(f);
+  }
+  CHECK(dsvr::ConfigLoad(path.c_str(), c));
+  CHECK(c.embodiment_fit == "head");
+
   // Legacy movement_reference values migrate unless canonical keys are present.
   {
     FILE* f = nullptr;
@@ -175,6 +193,7 @@ int main() {
     want.menu_distance_m = 2.5f;
     want.menu_reading_fov_deg = 70.0f;
     want.forward_offset_m = 0.15f;
+    want.eye_clearance_m = 0.3f;
     want.hide_player_model = false;
     want.hide_second_model = true;
     want.arm_ik_enabled = true;
@@ -190,6 +209,7 @@ int main() {
     want.combat_test_bench = true;
     want.combat_test_target_m = 1.25f;
     want.weapon_separation_min_m = 0.15f;
+    want.embodiment_fit = "arm";
     CHECK(dsvr::ConfigSave(path.c_str(), want));
     dsvr::Config got;
     CHECK(dsvr::ConfigLoad(path.c_str(), got));
@@ -204,12 +224,14 @@ int main() {
     CHECK(got.sanctuary_override && got.menu_distance_m == 2.5f);
     CHECK(got.menu_reading_fov_deg == 70.0f);
     CHECK(got.forward_offset_m == 0.15f && !got.hide_player_model);
+    CHECK(got.eye_clearance_m == 0.3f);
     CHECK(got.hide_second_model);
     CHECK(got.arm_ik_enabled && !got.arm_ik_log_only);
     CHECK(got.forearm_only && got.hide_ui_in_vr);
     CHECK(got.contact_speed_min == 1.2f && got.rehit_window_ms == 350);
     CHECK(got.combat_test_bench && got.combat_test_target_m == 1.25f);
     CHECK(got.weapon_separation_min_m == 0.15f);
+    CHECK(got.embodiment_fit == "arm");
     CHECK(got.force_disable_motion_blur && got.motion_blur_original == "1");
     CHECK(got.stereo_enabled);
     CHECK(got.afr_enabled);

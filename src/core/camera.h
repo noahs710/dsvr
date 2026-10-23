@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include "camera_math.h"
+#include "calibration_fit.h"
 
 namespace dsvr {
 // Only a real XR reference-space change invalidates the physical origin.
@@ -17,7 +18,9 @@ bool CameraApplyFirstPerson(void* follow_cam_self, float qx, float qy,
                             float qz, float qw, float px, float py, float pz,
                             float eye_height, float world_scale,
                             float forward_offset_m, float turn_yaw_rad,
-                            float vfov_rad, float fov_aspect);
+                            float vfov_rad, float fov_aspect,
+                            float eye_clearance_m = 0.0f,
+                            const CalibrationMapping* mapping = nullptr);
 void CameraResetHeadlook();
 // Natural camera owner only, immediately before its native update. Restore
 // still-owned render overrides so native follow/collision logic sees its own
@@ -25,7 +28,8 @@ void CameraResetHeadlook();
 void CameraPrepareNativeUpdate(void* follow_cam_self);
 // Game-thread IK consumes exactly the camera's anchor/calibration/body frame.
 bool CameraTrackingFrame(Vec3& head_world, Vec3& right, Vec3& up, Vec3& fwd,
-                         float reference_quat[4], Vec3* anchor_world = nullptr);
+                         float reference_quat[4], Vec3* anchor_world = nullptr,
+                         CalibrationMapping* mapping = nullptr);
 // Head orientation basis from the same written frame (the body frame above
 // only carries heading). Lets the torso follow where the user looks.
 bool CameraHeadBasis(Vec3& right, Vec3& up, Vec3& fwd);

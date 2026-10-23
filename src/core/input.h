@@ -54,10 +54,15 @@ struct RoomscaleBasis {
   Vec3 tracking_right{};
   Vec3 tracking_up{};
   Vec3 tracking_forward{};  // OpenXR -Z forward mapped to native world
-  Vec3 native_forward{};
+  // The frame native interprets artificial travel in: the planar heading of
+  // the follow camera the mod actually wrote, never the rendered model's root
+  // facing (native turn assist rotates that independently).
+  Vec3 movement_basis{};
   std::uint64_t space_epoch = 0;
   std::uint64_t published_ms = 0;
   bool valid = false;
+  float world_scale = 1.f;  // same applied camera packet, native units / metre
+  std::uint64_t calibration_revision = 0;
 };
 
 struct RoomscaleMotion {
@@ -80,9 +85,12 @@ void InputPollFrame(void* base_space, const float head_pos[3],
                     long long predicted_display_time);
 // Render thread: clear stale targets/pad/turns on skipped tracking or loss.
 void InputInvalidateFrame();
-// Game thread publishes a validated head/native movement frame; render input
-// uses it only for fresh, matching-epoch head-directed locomotion.
-void InputPublishHeadDirectedLocomotion(Vec3 head_forward, Vec3 native_forward,
+// Game thread publishes the applied camera frame: the head steering reference
+// and the movement basis native will interpret travel in. Both are the written
+// camera's planar heading unless a hand reference overrides the first. Render
+// input uses it only for fresh, matching-epoch head-directed locomotion.
+void InputPublishHeadDirectedLocomotion(Vec3 head_forward,
+                                        Vec3 movement_basis_forward,
                                         std::uint64_t space_epoch);
 void InputInvalidateHeadDirectedLocomotion();
 

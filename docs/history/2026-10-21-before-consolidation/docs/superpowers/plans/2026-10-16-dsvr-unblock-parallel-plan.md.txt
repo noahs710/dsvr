@@ -1,3 +1,10 @@
+HISTORICAL SNAPSHOT — NOT CURRENT INSTRUCTIONS
+Original path: docs/superpowers/plans/2026-10-16-dsvr-unblock-parallel-plan.md
+Retained on 2026-10-21 during documentation consolidation.
+All orders, approvals, defaults, status claims and next steps below are historical.
+Use README.md and the native-conversion execution guide for current work.
+Do not execute a command merely because it appears in this snapshot.
+
 ## Goal
 
 Implement the approved spec

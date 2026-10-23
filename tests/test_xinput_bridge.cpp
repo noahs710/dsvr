@@ -19,7 +19,7 @@ int creates=0, removes=0, enables=0;
 MH_STATUS script[4]={};
 int script_len=0, script_pos=0;
 using Poll = DWORD(WINAPI*)(DWORD, XINPUT_STATE*);
-Poll callback = nullptr;
+Poll callback = nullptr, caps_callback = nullptr;
 int disables = 0;
 MH_STATUS enable_status = MH_OK;
 bool motion = false, pause_poll = false, entered = false, resume = false;
@@ -48,7 +48,10 @@ MH_STATUS WINAPI MH_CreateHook(LPVOID, LPVOID detour, LPVOID* original) {
     const MH_STATUS status = script[script_pos++];
     if (status != MH_OK) return status;
   }
-  callback = reinterpret_cast<Poll>(detour);
+  // Install order is state first, capabilities second: the first detour handed
+  // to the stub is the state one.
+  if (!callback) callback = reinterpret_cast<Poll>(detour);
+  else caps_callback = reinterpret_cast<Poll>(detour);
   *original = reinterpret_cast<void*>(&FakeOriginal);
   return MH_OK;
 }
@@ -90,7 +93,7 @@ int main(int argc, char** argv) {
     CHECK(state.Gamepad.wButtons == XINPUT_GAMEPAD_X);
     enable_status = MH_OK;
     CHECK(XInputBridgeInstall(true));
-    CHECK(creates == 1);
+    CHECK(creates == 2 && caps_callback);  // capabilities installs after state recovers
     CHECK(callback(0, &state) == ERROR_SUCCESS);
     CHECK(state.Gamepad.wButtons == (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_X));
     XInputBridgeUninstall();
@@ -98,8 +101,10 @@ int main(int argc, char** argv) {
   } else {
     Script(MH_ERROR_MEMORY_ALLOC, MH_OK);
     CHECK(XInputBridgeInstall(true));
-    CHECK(creates == 2 && enables == 1 && callback);
-    CHECK(XInputBridgeInstall(true) && creates == 2 && enables == 1);
+    // A healthy install now bridges both exports: state (attempt 1 fails, 2
+    // succeeds) plus a best-effort capabilities hook = 3 creates / 2 enables.
+    CHECK(creates == 3 && enables == 2 && callback && caps_callback);
+    CHECK(XInputBridgeInstall(true) && creates == 3 && enables == 2);
     motion = true;
     XINPUT_STATE state{};
     CHECK(callback(0, &state) == ERROR_SUCCESS);
@@ -115,12 +120,12 @@ int main(int argc, char** argv) {
     poll_cv.notify_all();
     poll.join();
     pause_poll = false;
-    CHECK(removes == 0 && disables == 1);
+    CHECK(removes == 0 && disables == 2);
     CHECK(state.Gamepad.wButtons == XINPUT_GAMEPAD_X);
     CHECK(callback(0, &state) == ERROR_SUCCESS);
     CHECK(state.Gamepad.wButtons == XINPUT_GAMEPAD_X);
     CHECK(XInputBridgeInstall(true));
-    CHECK(creates == 2 && enables == 2);
+    CHECK(creates == 3 && enables == 4);
     CHECK(callback(0, &state) == ERROR_SUCCESS);
     CHECK(state.Gamepad.wButtons == (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_X));
     XInputBridgeUninstall();

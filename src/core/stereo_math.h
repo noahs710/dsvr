@@ -155,6 +155,11 @@ inline float EyeOffsetAlongRight(Vec3 eye_pos, Vec3 head_mid, Vec3 body_right) {
 // is supported. This is a per-view transform, never a pass/camera classifier.
 // Eye origin/basis are expressed in CENTER VIEW axes, in native scene units;
 // the caller must establish XR-to-native scale and orientation before calling.
+// Integration note: use the SAME applied CameraTrackingFrame mapping as the
+// head/hands, not a fresh config.world_scale. That setting is only a trim on
+// automatic body/world fit. Scale eye origins once; never scale unit axes or
+// rewrite runtime-owned physical eye poses. This helper is not a native eye
+// rendering binding; leaving that gate open is better than a convincing fake.
 // Keep the center-relative model/bone palettes unchanged. Moving those as well
 // would apply the eye translation twice.
 inline bool NativeEyeClip(const float center[16], const EyeFrustum& eye,

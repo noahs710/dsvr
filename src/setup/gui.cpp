@@ -46,6 +46,9 @@ enum {
   CTL_PRESET_PERF = 125,
   CTL_PRESET_VETERAN = 126,
   CTL_FPS = 127,
+  CTL_MOVE_MODE = 128,
+  CTL_MOVE_HAND = 129,
+  CTL_BODY_FIT = 130,
 };
 
 HWND g_game_edit = nullptr, g_status = nullptr, g_log = nullptr;
@@ -54,6 +57,8 @@ HWND g_haptics = nullptr, g_motion = nullptr;
 HWND g_scale = nullptr, g_snapdeg = nullptr, g_eye = nullptr;
 HWND g_hand = nullptr, g_style = nullptr, g_chain = nullptr;
 HWND g_fps = nullptr;
+HWND g_move_mode = nullptr, g_move_hand = nullptr;
+HWND g_body_fit = nullptr;
 HWND g_main = nullptr;
 std::wstring g_exe;  // resolved exe path (empty = not found)
 
@@ -112,6 +117,14 @@ void PopulateControls(const dsvr::Config& c) {
   swprintf_s(eye, L"%.2f", (double)c.eye_height);
   SetText(g_eye, eye);
   SendMessageW(g_hand, CB_SETCURSEL, c.dominant_hand_left ? 1 : 0, 0);
+  SendMessageW(g_move_mode, CB_SETCURSEL,
+               c.movement_orientation == dsvr::MovementOrientation::Controller ? 1 : 0, 0);
+  SendMessageW(g_move_hand, CB_SETCURSEL,
+               c.movement_controller == dsvr::MovementController::Left
+                   ? 1
+               : c.movement_controller == dsvr::MovementController::Right ? 2 : 0,
+               0);
+   SendMessageW(g_body_fit, CB_SETCURSEL, c.embodiment_fit == "arm" ? 1 : 0, 0);
   {
     const int limits[] = {60, 72, 90, 120, 144, 240};
     int fps_idx = 0;
@@ -140,6 +153,20 @@ dsvr::Config ReadControls(dsvr::Config base) {
   if (eye > 0) base.eye_height = (float)eye;
   base.dominant_hand_left =
       SendMessageW(g_hand, CB_GETCURSEL, 0, 0) == 1;
+  {
+    const int mode = (int)SendMessageW(g_move_mode, CB_GETCURSEL, 0, 0);
+    if (mode == 1)
+      base.movement_orientation = dsvr::MovementOrientation::Controller;
+    else if (mode == 0)
+      base.movement_orientation = dsvr::MovementOrientation::Head;
+    const int hand = (int)SendMessageW(g_move_hand, CB_GETCURSEL, 0, 0);
+    base.movement_controller =
+        hand == 1 ? dsvr::MovementController::Left
+                  : hand == 2 ? dsvr::MovementController::Right
+                              : dsvr::MovementController::NonDominant;
+     const int fit = (int)SendMessageW(g_body_fit, CB_GETCURSEL, 0, 0);
+    base.embodiment_fit = fit == 1 ? "arm" : "head";
+  }
   {
     const int limits[] = {60, 72, 90, 120, 144, 240};
     int fps_idx = (int)SendMessageW(g_fps, CB_GETCURSEL, 0, 0);
@@ -290,6 +317,33 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       g_chain = Add(hwnd, L"EDIT", L"", ES_AUTOHSCROLL | WS_BORDER, 514, 230,
                     208, 22, CTL_CHAIN);
 
+  Add(hwnd, L"STATIC", L"Left stick oriented by:", SS_LEFT, 16, 282, 130, 20, 0);
+  g_move_mode = Add(hwnd, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_BORDER, 150, 280,
+                    140, 110, CTL_MOVE_MODE);
+  SendMessageW(g_move_mode, CB_ADDSTRING, 0, (LPARAM)L"Head (default)");
+  SendMessageW(g_move_mode, CB_ADDSTRING, 0, (LPARAM)L"Controller hand");
+  SendMessageW(g_move_mode, CB_SETCURSEL, 0, 0);
+  Add(hwnd, L"STATIC", L"Hand:", SS_LEFT, 300, 282, 40, 20, 0);
+  g_move_hand = Add(hwnd, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_BORDER, 344, 280,
+                    140, 110, CTL_MOVE_HAND);
+  SendMessageW(g_move_hand, CB_ADDSTRING, 0, (LPARAM)L"Non-dominant");
+  SendMessageW(g_move_hand, CB_ADDSTRING, 0, (LPARAM)L"Left");
+  SendMessageW(g_move_hand, CB_ADDSTRING, 0, (LPARAM)L"Right");
+  SendMessageW(g_move_hand, CB_SETCURSEL, 0, 0);
+  Add(hwnd, L"STATIC",
+      L"Movement stays head-oriented if that hand is lost.", SS_LEFT, 494, 282,
+      228, 20, 0);
+
+    Add(hwnd, L"STATIC", L"Body fit:", SS_LEFT, 16, 306, 80, 20, 0);
+    g_body_fit = Add(hwnd, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_BORDER, 106,
+                   304, 190, 110, CTL_BODY_FIT);
+    SendMessageW(g_body_fit, CB_ADDSTRING, 0, (LPARAM)L"Native head bone (default)");
+    SendMessageW(g_body_fit, CB_ADDSTRING, 0, (LPARAM)L"Native arm reach");
+    SendMessageW(g_body_fit, CB_SETCURSEL, 0, 0);
+    Add(hwnd, L"STATIC",
+      L"Head fit puts the camera in the avatar's own head; arm fit matches your hands.",
+      SS_LEFT, 306, 306, 416, 20, 0);
+
       Add(hwnd, L"STATIC",
           L"F9 in-game = log marker for bug reports. F7 = reload settings. "
           L"Hotkeys need the game focused.",
@@ -297,7 +351,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       g_log = Add(hwnd, L"EDIT", L"",
                   ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY | WS_BORDER |
                       WS_VSCROLL,
-                  16, 284, 706, 300, CTL_LOG);
+                  16, 332, 706, 252, CTL_LOG);
       GuiLog(L"DSVR Setup " +
              dsvr::WideFromUtf8(dsvr::kModVersion) +
              L" -- offline only while installed. Click Verify, then Install.");
@@ -445,7 +499,7 @@ int RunGui() {
   g_main = CreateWindowW(
       wc.lpszClassName, L"DSVR Setup -- Dark Souls: Remastered VR",
       WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, CW_USEDEFAULT,
-      CW_USEDEFAULT, 754, 640, nullptr, nullptr, wc.hInstance, nullptr);
+      CW_USEDEFAULT, 754, 664, nullptr, nullptr, wc.hInstance, nullptr);
   if (!g_main) return 1;
   ShowWindow(g_main, SW_SHOW);
   UpdateWindow(g_main);

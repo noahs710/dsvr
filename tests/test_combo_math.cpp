@@ -43,6 +43,31 @@ int main() {
   d.Reset();
   check(d.Update(menuY) == kComboTheater);
 
+  // Sustained chord (Quest Y+B -> theater toggle): fires once after the hold
+  // window, never twice, and re-arms on release.
+  {
+    const long long k500ms = 500000000LL;
+    HoldChordDetector h{k500ms};
+    check(!h.Update(false, 0));
+    check(!h.Update(true, 0));                 // start of hold
+    check(!h.Update(true, 300000000LL));       // 0.3s: not yet
+    check(h.Update(true, 500000000LL));        // 0.5s: fires exactly once
+    check(!h.Update(true, 900000000LL));       // held: no repeat
+    check(!h.Update(true, 5000000000LL));
+    check(!h.Update(false, 5100000000LL));     // release re-arms
+    check(!h.Update(true, 5200000000LL));
+    check(h.Update(true, 5700000000LL));       // second hold fires
+    h.Reset();
+    check(!h.Update(true, 5800000000LL));      // reset does not fire
+    check(h.Update(true, 6300000000LL));
+    // Clock going backwards restarts the hold instead of firing early.
+    h.Reset();
+    check(!h.Update(true, 10000000000LL));
+    check(!h.Update(true, 9000000000LL));      // backwards: restart
+    check(!h.Update(true, 9300000000LL));
+    check(h.Update(true, 9500000000LL));
+  }
+
   if (failures) { std::printf("%d check(s) failed\n", failures); return 1; }
   std::printf("combo_math: all checks passed\n");
   return 0;

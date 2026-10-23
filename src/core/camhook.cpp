@@ -100,10 +100,60 @@ void __fastcall FollowCamUpdateDetour(void* self, float dt, void* arg3,
     // range or the write is refused downstream.
     const float comfort_vfov = std::isfinite(cfg.fov_scale) && cfg.fov_scale > 0.0f
         ? frame.vfov_rad * cfg.fov_scale : frame.vfov_rad;
+    float native_reach = 0.f, native_head = 0.f, native_shoulders = 0.f;
+    std::uint64_t model_revision = 0, stature_revision = 0;
+    ArmIkNativeReach(native_reach, model_revision);
+    // A missing upright head measurement clears its own output revision. It
+    // must not erase the valid reach revision needed by the arm-fit fallback.
+    if (ArmIkNativeStature(native_head, native_shoulders, stature_revision)) {
+      if (model_revision && model_revision != stature_revision) {
+        XrRecordCameraSequence(0);
+        InputInvalidateHeadDirectedLocomotion();
+        return;
+      }
+      model_revision = stature_revision;
+    }
+    const auto mapping = ResolveCalibrationMapping(CalibrationCurrent(),
+        cfg.eye_height, cfg.play_style == "seated", cfg.world_scale,
+        native_reach, model_revision, native_head, native_shoulders,
+        cfg.embodiment_fit != "arm");
+    if (!mapping.valid) {
+      XrRecordCameraSequence(0);
+      InputInvalidateHeadDirectedLocomotion();
+      return;
+    }
+    static CalibrationMapping reported;
+    if (!reported.valid || reported.world_scale!=mapping.world_scale ||
+        reported.calibration_revision!=mapping.calibration_revision ||
+        reported.model_revision!=mapping.model_revision ||
+        reported.fit!=mapping.fit) {
+      DSVR_LOG("CalibrationFit: %.5f native units/m, eye %.3f native, trim %.3f, "
+               "native head %.3f native, shoulders %.3f native, calibration=%llu "
+               "model=%llu anchor=%s (independent mesh resize unverified)",
+               (double)mapping.world_scale,(double)mapping.eye_height,(double)mapping.world_trim,
+               (double)mapping.native_head_height,(double)mapping.native_shoulder_width,
+               (unsigned long long)mapping.calibration_revision,
+               (unsigned long long)mapping.model_revision,
+               mapping.fit==CalibrationFit::Head?"native head bone":
+               mapping.fit==CalibrationFit::Arm?"native arm geometry":"manual fallback");
+      // A requested head anchor with no upright native head measurement yet is
+      // a real difference in where the camera sits, so say so once instead of
+      // letting the user wonder why the avatar still does not match.
+      static bool head_fallback_warned=false;
+      if (cfg.embodiment_fit!="arm"&&mapping.fit!=CalibrationFit::Head&&
+          !head_fallback_warned) {
+        head_fallback_warned=true;
+        DSVR_WARN("CalibrationFit: embodiment_fit=\"head\" requested, but no upright "
+                  "native Head-bone measurement is available yet; using arm fit "
+                  "when available, otherwise manual scale, until an upright pose is observed");
+      }
+      reported=mapping;
+    }
     const bool applied = CameraApplyFirstPerson(self, q[0], q[1], q[2], q[3], p[0], p[1], p[2],
-                             CalibrationViewHeight(CalibrationCurrent(),cfg.eye_height,cfg.play_style=="seated"), cfg.world_scale,
-                             cfg.forward_offset_m, InputTakeTurnYaw(),
-                             comfort_vfov, frame.fov_aspect);
+                             mapping.eye_height, mapping.world_scale,
+                              cfg.forward_offset_m * mapping.world_scale, InputTakeTurnYaw(),
+                              comfort_vfov, frame.fov_aspect,
+                              cfg.eye_clearance_m * mapping.world_scale, &mapping);
   apply_time.Stop();
   if (!applied) {
     InputInvalidateHeadDirectedLocomotion();

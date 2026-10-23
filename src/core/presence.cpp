@@ -59,9 +59,15 @@ void __fastcall PlayerVisibilityDetour(void* player) {
   // Equipped players normally render only the alternate (+838 == 1). Hide it
   // as a duplicate only when native code also selected the primary model.
   unsigned char primary_visible = 0;
-  const bool hide_alternate = cfg.hide_player_model ||
-      (cfg.hide_second_model && !cfg.forearm_only && regular && regular != alternate &&
-       GuardedRead(regular + 0x92, primary_visible) && (primary_visible & 1));
+  const bool primary_shown =
+      regular && GuardedRead(regular + 0x92, primary_visible) && (primary_visible & 1);
+  // At most one of the two local-player render models may ever be hidden. The
+  // live 23 Oct run had hide_player_model and hide_second_model both true and
+  // the player was completely invisible for the whole session, so hiding the
+  // primary is now an escape hatch for the headgear shell that keeps the body
+  // model rendering instead of hiding everything.
+  const bool hide_alternate = !cfg.hide_player_model && cfg.hide_second_model &&
+      !cfg.forearm_only && regular && alternate && regular != alternate && primary_shown;
   bool write_ok = read_ok;
   if (cfg.hide_player_model) write_ok = write_ok && HideModel(regular, 0x84, 0x92);
   if (hide_alternate) write_ok = write_ok && HideModel(alternate, 0x9c, 0xaa);
@@ -70,6 +76,9 @@ void __fastcall PlayerVisibilityDetour(void* player) {
     DSVR_LOG("Presence: primary=%p alternate=%p hide_all=%d hide_alternate=%d forearm_only=%d",
         (void*)regular, (void*)alternate, (int)cfg.hide_player_model,
         (int)hide_alternate, (int)cfg.forearm_only);
+    if (cfg.hide_player_model && cfg.hide_second_model)
+      DSVR_WARN("Presence: hide_player_model and hide_second_model are both true; "
+                "keeping the second model visible so the player is never invisible");
   }
   if (!write_ok && !g_failure_logged) {
     g_failure_logged = true;

@@ -18,6 +18,10 @@ HMODULE image = nullptr;
 const auto provider = reinterpret_cast<HMODULE>(1);
 int creates = 0;
 bool motion_available = false;
+bool capabilities_available = false;
+bool capabilities_hook_created = false;
+using CapsPoll = DWORD(WINAPI*)(DWORD, DWORD, XINPUT_CAPABILITIES*);
+CapsPoll capabilities_callback = nullptr;
 std::atomic<bool> pause_original{false};
 std::mutex pause_mutex;
 std::condition_variable pause_cv;
@@ -36,6 +40,9 @@ DWORD WINAPI Physical(DWORD user, XINPUT_STATE* state) {
   return ERROR_SUCCESS;
 }
 DWORD WINAPI Foreign(DWORD, XINPUT_STATE*) { return ERROR_DEVICE_NOT_CONNECTED; }
+DWORD WINAPI PhysicalCaps(DWORD, DWORD, XINPUT_CAPABILITIES*) {
+  return ERROR_DEVICE_NOT_CONNECTED;
+}
 HMODULE WINAPI BridgeModuleW(LPCWSTR name) { return name ? provider : image; }
 HMODULE WINAPI BridgeModuleA(LPCSTR name) {
   return _stricmp(name, "xinput1_3.dll") == 0 ? provider : nullptr;
@@ -46,8 +53,10 @@ FARPROC WINAPI BridgeProc(HMODULE module, LPCSTR name) {
   auto key = reinterpret_cast<std::uintptr_t>(name);
   if (key < 65536) return key == 2 ? reinterpret_cast<FARPROC>(&Physical) :
                                     reinterpret_cast<FARPROC>(&Foreign);
-  return std::strcmp(name, "XInputGetState") == 0 ?
-      reinterpret_cast<FARPROC>(&Physical) : nullptr;
+  if (std::strcmp(name, "XInputGetState") == 0)
+    return reinterpret_cast<FARPROC>(&Physical);
+  return capabilities_available && std::strcmp(name, "XInputGetCapabilities") == 0
+      ? reinterpret_cast<FARPROC>(&PhysicalCaps) : nullptr;
 }
 constexpr DWORD kSlot = 0x704;  // Four-mod-eight, like the pinned executable.
 int protect_calls = 0, protect_fail_at = 0, protect_fail_from = 0;
@@ -128,11 +137,20 @@ DWORD Protection() {
 #undef GetModuleHandleExW
 
 MH_STATUS WINAPI MH_Initialize() { return MH_OK; }
-MH_STATUS WINAPI MH_CreateHook(LPVOID, LPVOID, LPVOID*) {
+MH_STATUS WINAPI MH_CreateHook(LPVOID target, LPVOID detour, LPVOID* original) {
   ++creates;
+  if (target == reinterpret_cast<void*>(&PhysicalCaps)) {
+    capabilities_hook_created = true;
+    capabilities_callback = reinterpret_cast<CapsPoll>(detour);
+    *original = reinterpret_cast<void*>(&PhysicalCaps);
+    return MH_OK;
+  }
   return MH_ERROR_MEMORY_ALLOC;
 }
-MH_STATUS WINAPI MH_EnableHook(LPVOID) { return MH_OK; }
+MH_STATUS WINAPI MH_EnableHook(LPVOID target) {
+  return capabilities_hook_created && target == reinterpret_cast<void*>(&PhysicalCaps)
+      ? MH_OK : MH_ERROR_NOT_CREATED;
+}
 MH_STATUS WINAPI MH_DisableHook(LPVOID) { return MH_OK; }
 MH_STATUS WINAPI MH_RemoveHook(LPVOID) { return MH_OK; }
 const char* WINAPI MH_StatusToString(MH_STATUS) { return "forced allocation failure"; }
@@ -233,6 +251,7 @@ int main() {
   XINPUT_STATE state{};
   CHECK(detour(0, nullptr) == ERROR_BAD_ARGUMENTS);
   CHECK(detour(1, &state) == ERROR_DEVICE_NOT_CONNECTED);
+
   CHECK(detour(0, &state) == ERROR_SUCCESS);
   CHECK(state.Gamepad.wButtons == XINPUT_GAMEPAD_X);
   motion_available = true;
@@ -291,7 +310,26 @@ int main() {
   imports[1] = imports[0];
   CHECK(!XInputBridgeInstall(true));
   CHECK(LoadSlot() == reinterpret_cast<void*>(&Physical));
-  CHECK(FailureCases() == 0); CHECK(AdditionalRefusals() == 0); VirtualFree(image, 0, MEM_RELEASE);
+  CHECK(FailureCases() == 0); CHECK(AdditionalRefusals() == 0);
+  // Exports can choose different bridge routes. Reinstall must restore the
+  // state IAT patch and re-enable the retained capabilities trampoline.
+  Fixture();
+  capabilities_available = true;
+  CHECK(XInputBridgeInstall(true));
+  CHECK(capabilities_callback && capabilities_hook_created);
+  XINPUT_CAPABILITIES caps{};
+  CHECK(capabilities_callback(0, 0, &caps) == ERROR_SUCCESS);
+  XInputBridgeUninstall();
+  CHECK(LoadSlot() == reinterpret_cast<void*>(&Physical));
+  CHECK(capabilities_callback(0, 0, &caps) == ERROR_DEVICE_NOT_CONNECTED);
+  CHECK(XInputBridgeInstall(true));
+  detour = reinterpret_cast<decltype(detour)>(LoadSlot());
+  CHECK(detour != &Physical && detour(0, &state) == ERROR_SUCCESS);
+  CHECK(state.Gamepad.wButtons == (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_X));
+  CHECK(capabilities_callback(0, 0, &caps) == ERROR_SUCCESS);
+  XInputBridgeUninstall();
+  CHECK(LoadSlot() == reinterpret_cast<void*>(&Physical));
+  VirtualFree(image, 0, MEM_RELEASE);
   std::puts("PASS XInput game-local IAT fallback (synthetic PE, not live game)");
   return 0;
 }

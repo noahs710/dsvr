@@ -1,3 +1,10 @@
+HISTORICAL SNAPSHOT — NOT CURRENT INSTRUCTIONS
+Original path: docs/superpowers/plans/2026-10-17-dsvr-execution-plan.md
+Retained on 2026-10-21 during documentation consolidation.
+All orders, approvals, defaults, status claims and next steps below are historical.
+Use README.md and the native-conversion execution guide for current work.
+Do not execute a command merely because it appears in this snapshot.
+
 # DSVR detailed execution plan
 
 Date: 17 October 2026. Updated 18 October: E0 complete; E1/E2 native acceptance

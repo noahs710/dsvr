@@ -63,9 +63,43 @@ inline void Multiply(const float a[4],const float b[4],float out[4]) {
 }
 }
 
-// A one-second stable T-pose measures arm plane and span. Shoulder width and
-// upper/forearm split are unobservable from one pose: width is explicitly an
-// estimate, and the IK retains the native segment proportions.
+// One capture cannot locate shoulder joints. Fit the explicit anthropometric
+// proportions already used by setup to the full head-relative controller
+// vectors, not just their horizontal spread. In an A pose a lowered hand is
+// not a shorter arm, nor is the hand plane the shoulder plane. Floor height
+// never enters this estimate, so sitting cannot shrink the user's anatomy.
+inline bool CalibrationEstimateAnatomy(const Vec3 positions[2], UserCalibration& out) {
+  if (!positions || !std::isfinite(positions[0].x) || !std::isfinite(positions[0].y) ||
+      !std::isfinite(positions[0].z) || !std::isfinite(positions[1].x) ||
+      !std::isfinite(positions[1].y) || !std::isfinite(positions[1].z)) return false;
+  constexpr float shoulder=.17f, head_to_shoulder=.25f, reach=.58f;
+  const float lateral=(positions[1].x-positions[0].x)*.5f;
+  const float down=-(positions[0].y+positions[1].y)*.5f;
+  const float radius2=(VDot(positions[0],positions[0])+VDot(positions[1],positions[1]))*.5f;
+  const float a=reach*reach-shoulder*shoulder-head_to_shoulder*head_to_shoulder;
+  const float b=lateral*shoulder+down*head_to_shoulder;
+  // a*k^2 + 2*b*k - radius2 = 0. This form avoids subtractive cancellation.
+  const float divisor=std::sqrt(b*b+a*radius2)+b;
+  if (!(divisor>1e-6f) || !std::isfinite(divisor)) return false;
+  const float k=std::clamp(radius2/divisor,.12f/shoulder,.25f/shoulder);
+  UserCalibration candidate=out;
+  candidate.shoulder_half_width_m=shoulder*k;
+  candidate.head_to_arm_m=head_to_shoulder*k;
+  candidate.arm_span_m=2*candidate.shoulder_half_width_m;
+  for (int side=0;side<2;++side) {
+    const Vec3 delta{positions[side].x-(side?1.f:-1.f)*candidate.shoulder_half_width_m,
+                     positions[side].y+candidate.head_to_arm_m,positions[side].z};
+    candidate.arm_reach_m[side]=VLen(delta);
+    if (!std::isfinite(candidate.arm_reach_m[side]) || candidate.arm_reach_m[side]<.2f ||
+        candidate.arm_reach_m[side]>1.05f) return false;
+    candidate.arm_span_m+=candidate.arm_reach_m[side];
+  }
+  out=candidate;return true;
+}
+
+// A one-second stable T/A pose observes controller geometry and estimates
+// anatomy. Shoulder sockets and upper/forearm split are unobservable from one
+// pose; the IK retains native segment proportions, not invented bone scales.
 class CalibrationCapture {
  public:
   void Reset() { *this=CalibrationCapture{}; }
@@ -114,8 +148,8 @@ class CalibrationCapture {
     if (!trigger) { released_=true; RestartHold();return false; }
     if (!ready_ || !released_) { RestartHold();return false; }
     if (!started_) {
-      started_=f.captured_ms; samples_=0; sum_plane_=sum_span_=0;
-      sum_lateral_[0]=sum_lateral_[1]=0;
+      started_=f.captured_ms; samples_=0;
+      for(auto& position:sum_position_) position={};
       baseline_head_={f.head_pos[0],f.head_pos[1],f.head_pos[2]};
       for(int i=0;i<4;++i)baseline_head_q_[i]=headq[i];
       for (int s=0;s<2;++s) {
@@ -135,8 +169,12 @@ class CalibrationCapture {
       if (std::fabs(dot)<.9914f) { RestartHold();return false; }  // 15 degrees
       for (int i=0;i<4;++i) sum_q_[s][i]+=quats[s][i]*(dot<0?-1.f:1.f);
     }
-    ++samples_;sum_plane_+=plane;sum_span_+=span;
-    sum_lateral_[0]-=positions[0].x;sum_lateral_[1]+=positions[1].x;
+    ++samples_;
+    for(int side=0;side<2;++side) {
+      sum_position_[side][0]+=positions[side].x;
+      sum_position_[side][1]+=positions[side].y;
+      sum_position_[side][2]+=positions[side].z;
+    }
     if (floor_valid && std::isfinite(floor_height) && floor_height>=.7f && floor_height<=2.3f) {
       floor_sum_+=floor_height;++floor_samples_;
     }
@@ -145,17 +183,13 @@ class CalibrationCapture {
     UserCalibration result;
     result.valid=true;result.floor_height_measured=floor_samples_==samples_;
     result.eye_height_m=result.floor_height_measured?static_cast<float>(floor_sum_/floor_samples_):fallback_height;
-    result.head_to_arm_m=static_cast<float>(sum_plane_/samples_);
-    result.arm_span_m=static_cast<float>(sum_span_/samples_);
-    // An arms-out pose measures controller span, not shoulder joints. Estimate
-    // shoulder width using the avatar's .17m half-width / .58m arm proportions;
-    // seated floor-to-eye height must not alter anatomy or calibrated reach.
-    constexpr float kAvatarShoulderHalf=.17f,kAvatarArmReach=.58f;
-    constexpr float kShoulderSpanRatio=kAvatarShoulderHalf/
-        (2.f*(kAvatarShoulderHalf+kAvatarArmReach));
-    result.shoulder_half_width_m=std::clamp(result.arm_span_m*kShoulderSpanRatio,.12f,.25f);
+    Vec3 average_position[2];
+    for(int side=0;side<2;++side)
+      average_position[side]={static_cast<float>(sum_position_[side][0]/samples_),
+                              static_cast<float>(sum_position_[side][1]/samples_),
+                              static_cast<float>(sum_position_[side][2]/samples_)};
+    if (!CalibrationEstimateAnatomy(average_position,result)) {RestartHold();return false;}
     for (int s=0;s<2;++s) {
-      result.arm_reach_m[s]=static_cast<float>(sum_lateral_[s]/samples_)-result.shoulder_half_width_m;
       float average[4];for(int i=0;i<4;++i)average[i]=sum_q_[s][i]/static_cast<float>(samples_);
       if (!calibration_detail::UnitQuaternion(average,result.neutral_controller[s])) { RestartHold();return false; }
     }
@@ -179,7 +213,8 @@ class CalibrationCapture {
   Vec3 last_positions_[2]{};
   unsigned samples_=0,floor_samples_=0;
   float progress_=0;
-  double sum_plane_=0,sum_span_=0,floor_sum_=0,sum_lateral_[2]{};
+  double floor_sum_=0;
+  std::array<double,3> sum_position_[2]{};
   Vec3 baseline_[2]{};
   Vec3 baseline_head_{};
   float baseline_head_q_[4]{};
