@@ -23,9 +23,9 @@ int main() {
   // Near misses snap to the nearest supported cap.
   check(QuantizePeriodToFps(period(89)) == 90);
   check(QuantizePeriodToFps(period(75)) == 72);
-  // Midpoint between 72 and 90 is 81 Hz: at/above picks 90, below picks 72.
-  check(QuantizePeriodToFps(period(80)) == 72);
-  check(QuantizePeriodToFps(period(82)) == 90);
+  // 80 Hz is its own physical display cadence, not a 72/90 midpoint.
+  check(QuantizePeriodToFps(period(80)) == 80);
+  check(QuantizePeriodToFps(period(82)) == 80);
   // Out-of-span rates clamp to the nearest end; invalid periods refuse.
   check(QuantizePeriodToFps(period(30)) == 60);
   check(QuantizePeriodToFps(period(360)) == 240);
@@ -71,12 +71,12 @@ int main() {
   }
 
   // Native-application decision: once per change, live owner only.
-  check(ShouldApplyNativeRate(60, 72, 0));
-  check(!ShouldApplyNativeRate(72, 72, 0));   // already at target
-  check(!ShouldApplyNativeRate(60, 72, 72));  // already applied
-  check(!ShouldApplyNativeRate(0, 72, 0));    // owner rate unknown
-  check(!ShouldApplyNativeRate(60, 0, 0));    // no effective rate
-  check(ShouldApplyNativeRate(60, 90, 72));   // new target after old apply
+  check(ShouldApplyNativeRate(60, 72));
+  check(!ShouldApplyNativeRate(72, 72));   // already at target
+  check(ShouldApplyNativeRate(60, 72));   // native owner reset after our apply
+  check(!ShouldApplyNativeRate(0, 72));    // owner rate unknown
+  check(!ShouldApplyNativeRate(60, 0));    // no effective rate
+  check(ShouldApplyNativeRate(60, 90));   // new target after old apply
 
   // VDXR may throttle the next application frame to a divisor of the headset
   // cadence. Replaying the observed 90 -> 18 -> 90 sequence must not alternate
@@ -113,6 +113,44 @@ int main() {
     check(s.Update(90, period(45)).effective_fps == 90);
   }
 
+  {
+    RateStabilizer s;
+    const auto before = s.Update(90, 0);
+    const auto after = s.Update(72, 0);
+    check(after.effective_fps == 72 && after.generation > before.generation);
+    const auto stable = s.Update(72, 0);
+    check(stable.generation == after.generation);
+  }
+  check(ResolveEffectiveRate(80, 0).effective_fps == 80);
+  for (double display : {60.0, 72.0, 80.0, 90.0, 120.0, 144.0, 240.0}) {
+    RateStabilizer s;
+    auto live = s.Update(90, period(display), display);
+    check(live.from_display && live.display_hz == display);
+    for (int divisor : {2, 3, 4}) {
+      auto throttled = s.Update(90, period(display / divisor), display);
+      check(throttled.effective_fps == static_cast<int>(display));
+      check(throttled.runtime_throttled && throttled.from_display);
+      check(throttled.runtime_period_ns == period(display / divisor));
+    }
+    const auto stable = s.Current().generation;
+    check(s.Update(90, period(display / 4), display).generation == stable);
+    check(!s.Update(90, 0, display).from_display);
+  }
+  {
+    RateStabilizer s;
+    s.Update(90, period(60), 120);
+    check(s.Current().effective_fps == 120);
+    check(s.Update(90, period(60), 80).effective_fps == 120);
+    check(s.Update(90, period(60), 80).effective_fps == 120);
+    check(s.Update(90, period(60), 80).effective_fps == 80);
+    check(s.Current().display_hz == 80 && s.Current().runtime_throttled);
+    for (int i=0;i<kStableRateSamples;++i) s.Update(90, period(90), -1);
+    check(!s.Current().from_display);
+  }
+  check(!ResolveEffectiveRate(90, period(90), NAN).from_display);
+  check(!ResolveEffectiveRate(90, period(90), INFINITY).from_display);
+  check(!ResolveEffectiveRate(90, period(90), 0).from_display);
+  check(!ResolveEffectiveRate(90, period(90), 1000).from_display);
   if (failures) { std::printf("%d check(s) failed\n", failures); return 1; }
   std::printf("display_rate: all checks passed\n");
   return 0;

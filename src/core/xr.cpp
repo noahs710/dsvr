@@ -74,6 +74,8 @@ ID3D11SamplerState* g_blit_sampler = nullptr;
 ID3D11BlendState* g_blit_blend = nullptr;
 ID3D11DepthStencilState* g_blit_depth = nullptr;
 ID3D11RasterizerState* g_blit_raster = nullptr;
+ID3D11Buffer* g_blit_constants = nullptr;
+ComfortVignette g_comfort_vignette;
 bool g_views_logged = false;
 bool g_fov_logged = false;
 // Per-eye virtual-screen rect (pixels) for mono mode: the game image is
@@ -87,6 +89,26 @@ std::mutex g_camera_tag_mutex;
 std::uint64_t g_camera_sequence = 0;
 DWORD g_camera_thread = 0;
 long long g_last_period_ns = 0;
+// Optional, read-only physical refresh source. Only the render thread touches
+// this cache: initialize at session creation/begin, then consume FB events.
+PFN_xrGetDisplayRefreshRateFB g_get_display_refresh_rate = nullptr;
+double g_display_refresh_hz = 0.0;
+
+bool ValidDisplayRefresh(float hz) {
+  return std::isfinite(hz) && hz > 0.0f;
+}
+
+void QueryDisplayRefresh() {
+  g_display_refresh_hz = 0.0;
+  if (!g_session || !g_get_display_refresh_rate) return;
+  float hz = 0.0f;
+  const auto result = g_get_display_refresh_rate(g_session, &hz);
+  if (result == XR_SUCCESS && ValidDisplayRefresh(hz))
+    g_display_refresh_hz = hz;
+  else
+    DSVR_WARN("XR: physical display refresh unavailable result=%d hz=%.3f; using predicted period",
+              static_cast<int>(result), static_cast<double>(hz));
+}
 // Effective-rate authority (display_rate.h). Stabilizer is render-thread
 // only; the snapshot is mutex-published for XrEffectiveRate readers.
 RateStabilizer g_rate_stabilizer;
@@ -100,16 +122,19 @@ GpuFrameTimer g_gpu_timer;
 
 void PublishRate(long long period_ns) {
   const int requested = DiagnosticsCurrentConfig().frame_limit_fps;
-  const EffectiveRate rate = g_rate_stabilizer.Update(requested, period_ns);
+  const EffectiveRate rate = g_rate_stabilizer.Update(
+      requested, period_ns, period_ns > 0 ? g_display_refresh_hz : 0.0);
   g_last_period_ns = period_ns;
   std::lock_guard<std::mutex> lock(g_rate_mutex);
   g_rate_snapshot = rate;
   if (rate.generation != g_rate_logged_generation) {
     g_rate_logged_generation = rate.generation;
     if (rate.from_runtime)
-      DSVR_LOG("RateMatch: source=%s period_ns=%lld runtime=%.3fHz "
+      DSVR_LOG("RateMatch: source=%s period_ns=%lld runtime=%.3fHz display=%.3fHz "
                "effective=%d requested=%d%s (see FrameRate for native application)",
-               rate.runtime_throttled?"runtime-cap-held":"runtime",rate.runtime_period_ns, rate.runtime_hz, rate.effective_fps,
+               rate.from_display ? "physical-display" :
+                   (rate.runtime_throttled ? "runtime-cap-held" : "runtime"),
+               rate.runtime_period_ns, rate.runtime_hz, rate.display_hz, rate.effective_fps,
                rate.requested_fps, rate.mismatch ? " MISMATCH" : "");
     else
       DSVR_LOG("RateMatch: source=config-fallback effective=%d requested=%d "
@@ -222,6 +247,7 @@ double QpcElapsedMs(long long ticks) {
 }
 
 void InvalidateTracking(bool new_space = false) {
+  g_comfort_vignette.Reset();
   g_tracking_frames.Invalidate(new_space);
   InputInvalidateFrame();
   std::lock_guard<std::mutex> lock(g_camera_tag_mutex);
@@ -265,6 +291,7 @@ void AdvanceSessionLifecycle() {
     begin.primaryViewConfigurationType=XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
     g_session_begin_pending=false;
     if(Ok(xrBeginSession(g_session,&begin),"xrBeginSession")) {
+      QueryDisplayRefresh();
       g_inactive_pump.ResetSession(g_session);g_pump_fault_logged=false;g_pump_failed.store(false);
       InvalidateTracking(true);g_last_period_ns=0;g_space_change_pending=false;
       g_running.store(true);
@@ -316,7 +343,38 @@ void PollEvents() {
     XrEventDataBuffer ev{XR_TYPE_EVENT_DATA_BUFFER};
     XrResult r = xrPollEvent(g_instance, &ev);
     if (r == XR_EVENT_UNAVAILABLE) break;
-    if (XR_FAILED(r)) break;
+    if (XR_FAILED(r)) {
+      if (r == XR_ERROR_INSTANCE_LOST || r == XR_ERROR_SESSION_LOST) {
+        g_display_refresh_hz = 0.0;
+        g_running.store(false);
+        g_session_begin_pending = false;
+        g_session_finish = SessionFinish::Loss;
+        InvalidateTracking(true);
+        PublishRate(0);
+      }
+      break;
+    }
+    if (ev.type == XR_TYPE_EVENT_DATA_DISPLAY_REFRESH_RATE_CHANGED_FB &&
+        g_get_display_refresh_rate &&
+        g_state != XR_SESSION_STATE_STOPPING &&
+        g_state != XR_SESSION_STATE_EXITING &&
+        g_state != XR_SESSION_STATE_LOSS_PENDING) {
+      const auto* refresh = reinterpret_cast<const XrEventDataDisplayRefreshRateChangedFB*>(&ev);
+      g_display_refresh_hz = ValidDisplayRefresh(refresh->toDisplayRefreshRate)
+          ? refresh->toDisplayRefreshRate : 0.0;
+      // Publication still happens at the existing frame boundary, retaining
+      // rate hysteresis without another runtime call on every frame.
+    }
+    if (ev.type == XR_TYPE_EVENT_DATA_EVENTS_LOST && g_running.load())
+      QueryDisplayRefresh(); // a missing FB event may have changed the cache
+    if (ev.type == XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING) {
+      g_display_refresh_hz = 0.0;
+      g_running.store(false);
+      g_session_begin_pending = false;
+      g_session_finish = SessionFinish::Loss;
+      InvalidateTracking(true);
+      PublishRate(0);
+    }
     if (ev.type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED) {
       auto* sc = (XrEventDataSessionStateChanged*)&ev;
       if(sc->session!=g_session)continue;
@@ -328,6 +386,7 @@ void PollEvents() {
         g_session_begin_pending=true;
       }
       if (g_state == XR_SESSION_STATE_STOPPING && g_session) {
+        g_display_refresh_hz = 0.0;
         g_session_begin_pending=false;
         g_session_finish=SessionFinish::End;
         g_inactive_pump.PauseAndIdle();
@@ -338,6 +397,7 @@ void PollEvents() {
       }
       if (g_state == XR_SESSION_STATE_EXITING ||
           g_state == XR_SESSION_STATE_LOSS_PENDING) {
+        g_display_refresh_hz = 0.0;
         g_session_begin_pending=false;g_session_finish=SessionFinish::Loss;
         g_inactive_pump.PauseAndIdle();
         InvalidateTracking(true);
@@ -419,15 +479,29 @@ bool DestroySwapchains() {
 }
 
 bool EnsureBlit() {
-  if (g_blit_vs && g_blit_ps && g_blit_sampler) return true;
+  if (g_blit_vs && g_blit_ps && g_blit_sampler && g_blit_blend &&
+      g_blit_depth && g_blit_raster && g_blit_constants) return true;
+  // A failed creation retries cleanly rather than leaking the partial pipeline.
+  const auto release = [](auto*& p) { if (p) p->Release(); p = nullptr; };
+  release(g_blit_vs); release(g_blit_ps); release(g_blit_sampler);
+  release(g_blit_blend); release(g_blit_depth); release(g_blit_raster);
+  release(g_blit_constants);
   static const char* kShader =
       "Texture2D tex : register(t0); SamplerState samp : register(s0);"
+      "cbuffer Comfort : register(b0) { float4 tangents; float4 vignette; };"
       "struct PSIn { float4 pos : SV_Position; float2 uv : TEXCOORD0; };"
       "PSIn VSMain(uint id : SV_VertexID) { PSIn o;"
       "  o.uv = float2((id << 1) & 2, id & 2);"
       "  o.pos = float4(o.uv * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);"
       "  return o; }"
-      "float4 PSMain(PSIn i) : SV_Target { return tex.Sample(samp, i.uv); }";
+      "float4 PSMain(PSIn i) : SV_Target {"
+      "  float4 c = tex.Sample(samp, i.uv);"
+      "  float2 uv = i.pos.xy * vignette.yz;"
+      "  float2 t = float2(lerp(tangents.x,tangents.y,uv.x),"
+      "                    lerp(tangents.z,tangents.w,uv.y));"
+      "  float inner = lerp(1.4,0.55,vignette.x);"
+      "  c.rgb *= 1.0-vignette.x*smoothstep(inner,inner+0.35,length(t));"
+      "  return c; }";
   ID3DBlob* vs_blob = nullptr;
   ID3DBlob* ps_blob = nullptr;
   ID3DBlob* err = nullptr;
@@ -436,7 +510,7 @@ bool EnsureBlit() {
       FAILED(D3DCompile(kShader, strlen(kShader), nullptr, nullptr, nullptr,
                         "PSMain", "ps_4_0", 0, 0, &ps_blob, &err))) {
     DSVR_ERROR("XR: blit shader compile failed");
-    if (err) err->Release();
+    release(vs_blob); release(ps_blob); release(err);
     return false;
   }
   g_device->CreateVertexShader(vs_blob->GetBufferPointer(),
@@ -445,6 +519,7 @@ bool EnsureBlit() {
                               ps_blob->GetBufferSize(), nullptr, &g_blit_ps);
   vs_blob->Release();
   ps_blob->Release();
+  release(err);
   D3D11_SAMPLER_DESC sd{};
   sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
   sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
@@ -466,8 +541,13 @@ bool EnsureBlit() {
   rd.ScissorEnable = FALSE;
   rd.DepthClipEnable = TRUE;
   g_device->CreateRasterizerState(&rd, &g_blit_raster);
+  D3D11_BUFFER_DESC constants{};
+  constants.ByteWidth = 8 * sizeof(float);
+  constants.Usage = D3D11_USAGE_DEFAULT;
+  constants.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+  g_device->CreateBuffer(&constants, nullptr, &g_blit_constants);
   return g_blit_vs && g_blit_ps && g_blit_sampler && g_blit_blend &&
-         g_blit_depth && g_blit_raster;
+         g_blit_depth && g_blit_raster && g_blit_constants;
 }
 
 bool PrepareMonoSource(ID3D11Texture2D* backbuffer,
@@ -511,7 +591,8 @@ bool PrepareMonoSource(ID3D11Texture2D* backbuffer,
   return g_blit_srv != nullptr;
 }
 
-bool BlitToEye(int eye, uint32_t index, const D3D11_TEXTURE2D_DESC& src_desc) {
+bool BlitToEye(int eye, uint32_t index, const D3D11_TEXTURE2D_DESC& src_desc,
+               const XrFovf& fov, float vignette) {
   if (!g_blit_srv || index >= g_rtvs[eye].size()) return false;
   ID3D11RenderTargetView* rtv = g_rtvs[eye][index];
   if (!rtv) {
@@ -563,6 +644,11 @@ bool BlitToEye(int eye, uint32_t index, const D3D11_TEXTURE2D_DESC& src_desc) {
   g_context->CSSetShader(nullptr, nullptr, 0);
   g_context->PSSetShaderResources(0, 1, &g_blit_srv);
   g_context->PSSetSamplers(0, 1, &g_blit_sampler);
+  const float constants[8]{std::tan(fov.angleLeft), std::tan(fov.angleRight),
+      std::tan(fov.angleUp), std::tan(fov.angleDown), vignette,
+      1.f / g_eye_width, 1.f / g_eye_height, 0};
+  g_context->UpdateSubresource(g_blit_constants, 0, nullptr, constants, 0, 0);
+  g_context->PSSetConstantBuffers(0, 1, &g_blit_constants);
   g_context->IASetInputLayout(nullptr);
   g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
   g_context->Draw(3, 0);
@@ -752,8 +838,9 @@ void XrOnDeviceCaptured(void* d3d11_device) {
   app.applicationVersion = 1;
   strcpy_s(app.engineName, "DSVR");
   app.engineVersion = 1;
-  // Request OpenXR 1.0 exactly: everything DSVR uses is 1.0 core +
-  // XR_KHR_D3D11_enable. XR_CURRENT_API_VERSION (1.1.49) is rejected with
+  // Request OpenXR 1.0 exactly: required APIs are 1.0 core +
+  // XR_KHR_D3D11_enable (physical refresh reporting is optional).
+  // XR_CURRENT_API_VERSION (1.1.49) is rejected with
   // XR_ERROR_API_VERSION_UNSUPPORTED (-4) by runtimes capped at 1.0 --
   // seen live when SteamVR theater hosted the launch (2026-10-12), while
   // the same binary worked against VirtualDesktopXR directly. 1.0 keeps
@@ -762,15 +849,22 @@ void XrOnDeviceCaptured(void* d3d11_device) {
 
   // Check D3D11 extension before creating anything session-bound.
   uint32_t ext_count = 0;
-  xrEnumerateInstanceExtensionProperties(nullptr, 0, &ext_count, nullptr);
+  if (!Ok(xrEnumerateInstanceExtensionProperties(nullptr, 0, &ext_count, nullptr),
+          "xrEnumerateInstanceExtensionProperties(count)")) return;
   std::vector<XrExtensionProperties> exts(
       ext_count, {XR_TYPE_EXTENSION_PROPERTIES});
-  xrEnumerateInstanceExtensionProperties(nullptr, ext_count, &ext_count,
-                                         exts.data());
-  bool has_d3d11 = false;
-  for (auto& e : exts)
+  const uint32_t ext_capacity = ext_count;
+  if (!Ok(xrEnumerateInstanceExtensionProperties(nullptr, ext_capacity, &ext_count,
+                                                 exts.data()),
+          "xrEnumerateInstanceExtensionProperties") || ext_count > ext_capacity) return;
+  exts.resize(ext_count);
+  bool has_d3d11 = false, has_display_refresh = false;
+  for (const auto& e : exts) {
     if (!strcmp(e.extensionName, XR_KHR_D3D11_ENABLE_EXTENSION_NAME))
       has_d3d11 = true;
+    if (!strcmp(e.extensionName, XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME))
+      has_display_refresh = true;
+  }
   if (!has_d3d11) {
     DSVR_ERROR("XR: runtime lacks XR_KHR_D3D11_enable -- cannot bind D3D11. "
                "Try SteamVR/Link if using another runtime. VR skipped.");
@@ -779,11 +873,22 @@ void XrOnDeviceCaptured(void* d3d11_device) {
 
   XrInstanceCreateInfo create{XR_TYPE_INSTANCE_CREATE_INFO};
   create.applicationInfo = app;
-  const char* enabled[] = {XR_KHR_D3D11_ENABLE_EXTENSION_NAME};
+  const char* enabled[] = {XR_KHR_D3D11_ENABLE_EXTENSION_NAME,
+                           XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME};
   create.enabledExtensionNames = enabled;
-  create.enabledExtensionCount = 1;
+  create.enabledExtensionCount = has_display_refresh ? 2 : 1;
   if (!Ok(xrCreateInstance(&create, &g_instance), "xrCreateInstance")) return;
-  DSVR_LOG("XR: instance created");
+  g_get_display_refresh_rate = nullptr;
+  g_display_refresh_hz = 0.0;
+  if (has_display_refresh) {
+    PFN_xrVoidFunction query = nullptr;
+    if (XR_SUCCEEDED(xrGetInstanceProcAddr(g_instance, "xrGetDisplayRefreshRateFB", &query)))
+      g_get_display_refresh_rate = reinterpret_cast<PFN_xrGetDisplayRefreshRateFB>(query);
+    if (!g_get_display_refresh_rate)
+      DSVR_WARN("XR: advertised display refresh query unavailable; using predicted period");
+  }
+  DSVR_LOG("XR: instance created (physical refresh query %s)",
+           g_get_display_refresh_rate ? "enabled" : "unavailable");
 
   XrInstanceProperties props{XR_TYPE_INSTANCE_PROPERTIES};
   if (XR_SUCCEEDED(xrGetInstanceProperties(g_instance, &props)))
@@ -880,6 +985,7 @@ void XrOnDeviceCaptured(void* d3d11_device) {
   if (!Ok(xrCreateSession(g_instance, &session_create, &g_session),
           "xrCreateSession"))
     return;
+  QueryDisplayRefresh();
   DSVR_LOG("XR: D3D11 session created (waiting for READY via Present poll)");
   InputAttachSession(g_instance, g_session);  // no-op unless P4 enabled
 }
@@ -1016,7 +1122,7 @@ void XrSubmitMonoFrame(void* backbuffer_texture2d) {
     return;
   if (g_xr_thread != GetCurrentThreadId() || g_mono_in_frame) return;
   PollEvents();
-  if(!GraphicsFrameReady()){ServiceInactiveFrames();return;}
+  if(!GraphicsFrameReady()){g_comfort_vignette.Reset();ServiceInactiveFrames();return;}
   if (g_destroy_pending && !DestroySwapchains()) { InvalidateTracking(); return; }
   if (g_native_owns_present) { g_native_owns_present = false; return; }
   if (g_native_frame.Busy()) return;
@@ -1043,7 +1149,7 @@ void XrSubmitMonoFrame(void* backbuffer_texture2d) {
     }
   } metrics_guard{metrics, frame_start};
   if (!g_running.load()) return;
-  if (!DrainMonoImages()) {++g_mono_lease_skips;return;} // fresh pose retains its normal age limit
+  if (!DrainMonoImages()) {g_comfort_vignette.Reset();++g_mono_lease_skips;return;} // fresh pose retains its normal age limit
   auto* backbuffer = (ID3D11Texture2D*)backbuffer_texture2d;
   std::uint64_t camera_sequence_at_entry = 0;
   DWORD camera_thread_at_entry = 0;
@@ -1320,6 +1426,12 @@ void XrSubmitMonoFrame(void* backbuffer_texture2d) {
       metrics.eye_width = g_eye_width;
       metrics.eye_height = g_eye_height;
       metrics.theater = menu;
+      const float head_quat[4]{head.orientation.x, head.orientation.y,
+                               head.orientation.z, head.orientation.w};
+      const float vignette = g_comfort_vignette.Update(InputLatestComfortMotion(),
+          head_quat, state.predictedDisplayTime, g_tracking_frames.CurrentEpoch(),
+          render && published && g_immersive && presentation_cfg.comfort_vignette,
+          presentation_cfg.vignette_strength);
       if (render) {
         g_gpu_timer.BeginFrame(g_device, g_context, metrics.frame_sequence);
         g_gpu_timer.BeginRange(g_context, 0);
@@ -1355,7 +1467,7 @@ void XrSubmitMonoFrame(void* backbuffer_texture2d) {
         }
         g_gpu_timer.BeginRange(g_context, 1 + eye);
         const auto blit_start = QpcNow();
-        render = BlitToEye(eye, index, src_desc);
+        render = BlitToEye(eye, index, src_desc, views[eye].fov, vignette);
         metrics.eye_blit_cpu_ms += QpcElapsedMs(QpcNow() - blit_start);
         if (render) ++metrics.eye_draws;
         g_gpu_timer.EndRange(g_context, 1 + eye);
@@ -1426,6 +1538,7 @@ void XrSubmitMonoFrame(void* backbuffer_texture2d) {
   }
 
   if (tracking_failed) InvalidateTracking();
+  if (!render) g_comfort_vignette.Reset();
   if (published && (published_sequence == 1 || published_sequence % 300 == 0))
     DSVR_LOG("XRTiming: submit_pose_seq=%llu camera_applied_seq_at_entry=%llu "
              "camera_tid=%lu render_tid=%lu predicted_ns=%lld wait_ms=%.3f "
@@ -1530,7 +1643,8 @@ MenuPointerState XrMenuPointerInput(unsigned display_width,
   const float aspect = display_height
       ? static_cast<float>(display_width) / display_height : 0.0f;
   auto pointer = ProjectMenuPointer(spatial_menu, g_menu_anchored, tracking_valid,
-      select, {right.aim_pos[0], right.aim_pos[1], right.aim_pos[2]}, forward,
+      select, {frame.head_pos[0], frame.head_pos[1], frame.head_pos[2]},
+      {right.aim_pos[0], right.aim_pos[1], right.aim_pos[2]}, forward,
       g_menu_anchor, MenuWidth(cfg.menu_distance_m,
           title ? 60.0f : cfg.menu_reading_fov_deg), aspect,
       display_width, display_height);

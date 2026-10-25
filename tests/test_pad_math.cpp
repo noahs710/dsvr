@@ -122,7 +122,40 @@ int main() {
         "IK: off-hand squeeze does not fire LB (physical guard instead)");
   check(ikpad.left_trigger == 0, "IK: off-hand trigger does not fire LT");
 
-  if (failures) return 1;
+  // The physical attack bridge is deliberately outside that suppression: with
+  // the IK body applied the swing IS the attack input, and the IK still owns
+  // the arm chain, so the press rides the physical blade, not an animation.
+  ik.swing_buttons = dsvr::kPadRightShoulder;
+  ik.swing_heavy = true;
+  const dsvr::VirtualPadState swung = dsvr::MapVrPad(ik);
+  check((swung.buttons & dsvr::kPadRightShoulder) != 0,
+        "IK: a physical swing still fires the light attack");
+  check(swung.right_trigger == 255, "IK: a strong swing still drives RT");
+
+  // The physical guard rides the same suppression: the shield hand replaces the
+  // buttons the player no longer presses: LB blocks and LT parries.
+  ik.guard_block = true;
+  const dsvr::VirtualPadState guarded = dsvr::MapVrPad(ik);
+  check(guarded.left_trigger == 0, "IK: holding a guard must not issue parry LT");
+  check((guarded.buttons & dsvr::kPadLeftShoulder) != 0,
+        "IK: a raised shield holds native block LB");
+  ik.guard_block = false;
+  ik.guard_parry = true;
+  const dsvr::VirtualPadState tapped = dsvr::MapVrPad(ik);
+  check(tapped.left_trigger == 255, "IK: a shield flick taps native parry LT");
+  check((tapped.buttons & dsvr::kPadLeftShoulder) == 0,
+        "IK: a parry does not also hold block LB");
+  ik.guard_parry = false;
+  check(dsvr::MapVrPad(ik).left_trigger == 0,
+        "IK: a dropped guard or finished parry releases LT again");
+
+  ik.guard_block = true;
+  const auto menu = dsvr::MapVrPad(ik, true);
+    check((menu.buttons & dsvr::kPadRightShoulder) == 0 && menu.right_trigger == 0,
+          "native menu navigation cannot consume a swing attack preview");
+    check(menu.left_trigger == 0,
+          "native menu navigation cannot consume a physical guard");
+    if (failures) return 1;
   std::cout << "pad_math tests passed\n";
   return 0;
 }

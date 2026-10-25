@@ -12,7 +12,7 @@ namespace dsvr {
 // pure (no XR/Windows/file deps) so the policy is unit-testable; xr.cpp owns
 // publication and logging. Requested != actual stays visible: nothing here
 // claims a native limiter has been applied.
-inline constexpr int kSupportedFps[] = {60, 72, 90, 120, 144, 240};
+inline constexpr int kSupportedFps[] = {60, 72, 80, 90, 120, 144, 240};
 inline constexpr int kStableRateSamples = 3;  // hysteresis, see RateStabilizer
 
 inline bool IsSupportedFps(int fps) {
@@ -39,21 +39,22 @@ inline int QuantizePeriodToFps(long long period_ns) {
 
 // Native-application decision (frame_rate.cpp): apply once per change,
 // only to a live owner with a known current rate.
-inline bool ShouldApplyNativeRate(int current_fps, int effective_fps,
-                                  int applied_fps) {
-  return current_fps > 0 && effective_fps > 0 &&
-         effective_fps != current_fps && effective_fps != applied_fps;
+inline bool ShouldApplyNativeRate(int current_fps, int effective_fps) {
+  return current_fps > 0 && IsSupportedFps(effective_fps) &&
+         effective_fps != current_fps;
 }
 
 struct EffectiveRate {
-  int requested_fps = 90;            // sanitized config fallback
-  long long runtime_period_ns = 0;   // 0 = no live runtime sample
-  double runtime_hz = 0.0;
-  bool runtime_throttled = false;   // raw cadence is below native supported caps
-  int effective_fps = 90;            // the single target consumers use
+  int requested_fps = 90;
+  long long runtime_period_ns = 0;
+  double runtime_hz = 0.0;          // application cadence, possibly reprojected
+  double display_hz = 0.0;          // physical refresh, only when reported by XR
+  bool from_display = false;
+  bool runtime_throttled = false;
+  int effective_fps = 90;
   bool from_runtime = false;
-  bool mismatch = false;             // effective != requested
-  std::uint64_t generation = 0;      // bumps on every adopted change
+  bool mismatch = false;
+  std::uint64_t generation = 0;
 };
 
 inline int SanitizeRequestedFps(int requested_fps) {
@@ -61,7 +62,8 @@ inline int SanitizeRequestedFps(int requested_fps) {
   // Config load already restricts to the supported set; stay fail-safe.
   return 90;
 }
-inline EffectiveRate ResolveEffectiveRate(int requested_fps, long long period_ns) {
+inline EffectiveRate ResolveEffectiveRate(int requested_fps, long long period_ns,
+                                           double display_hz = 0.0) {
   EffectiveRate out;
   out.requested_fps = SanitizeRequestedFps(requested_fps);
   out.effective_fps = out.requested_fps;
@@ -70,11 +72,18 @@ inline EffectiveRate ResolveEffectiveRate(int requested_fps, long long period_ns
   out.runtime_period_ns = period_ns;
   out.runtime_hz = 1e9 / (double)period_ns;
   out.from_runtime = true;
-  // Do not round 18/22.5/30/45 Hz reprojection periods up to 60 Hz. The native
-  // setter clears its pacing epoch/history, so doing so feeds runtime
-  // throttling back into native pacing. Allow normal 59.94 Hz clock rounding.
-  out.runtime_throttled = out.runtime_hz < kSupportedFps[0] - 0.5;
-  if (!out.runtime_throttled) out.effective_fps = q;
+  out.from_display = std::isfinite(display_hz) && display_hz >= 59.5 &&
+                     display_hz <= 240.5;
+  if (out.from_display) {
+    out.display_hz = display_hz;
+    out.effective_fps = QuantizePeriodToFps(
+        static_cast<long long>(std::llround(1e9 / display_hz)));
+    out.runtime_throttled = std::isless(out.runtime_hz, display_hz - 0.5);
+  } else {
+    // Application periods below 60 Hz are not proof of a display refresh change.
+    out.runtime_throttled = std::isless(out.runtime_hz, kSupportedFps[0] - 0.5);
+    if (!out.runtime_throttled) out.effective_fps = q;
+  }
   out.mismatch = out.effective_fps != out.requested_fps;
   return out;
 }
@@ -85,65 +94,52 @@ inline EffectiveRate ResolveEffectiveRate(int requested_fps, long long period_ns
 // game target. Single-writer (render thread); readers use snapshots.
 class RateStabilizer {
  public:
-  EffectiveRate Update(int requested_fps, long long period_ns) {
-    const EffectiveRate candidate = ResolveEffectiveRate(requested_fps, period_ns);
+  EffectiveRate Update(int requested_fps, long long period_ns,
+                       double display_hz = 0.0) {
+    EffectiveRate candidate = ResolveEffectiveRate(requested_fps, period_ns, display_hz);
     if (!candidate.from_runtime) {
       last_supported_fps_ = 0;
-      if (current_.from_runtime || current_.generation == 0) {
-        Adopt(candidate);
-      } else {
-        current_.requested_fps = candidate.requested_fps;
-        current_.effective_fps = candidate.effective_fps;
-        current_.mismatch = false;
-      }
-      pending_fps_ = 0; pending_count_ = 0;
+      Publish(candidate);
+      ClearPending();
       return current_;
     }
-    if (candidate.runtime_throttled) {
-      EffectiveRate held = candidate;
-      if (last_supported_fps_) held.effective_fps = last_supported_fps_;
-      held.mismatch = held.effective_fps != held.requested_fps;
-      if (!current_.from_runtime || !current_.runtime_throttled ||
-          current_.effective_fps != held.effective_fps) Adopt(held);
-      else {
-        const auto generation = current_.generation;
-        current_ = held;
-        current_.generation = generation;
-      }
-      pending_fps_ = 0; pending_count_ = 0;
+    if (candidate.runtime_throttled && !candidate.from_display) {
+      if (last_supported_fps_) candidate.effective_fps = last_supported_fps_;
+      candidate.mismatch = candidate.effective_fps != candidate.requested_fps;
+      Publish(candidate);
+      ClearPending();
       return current_;
     }
-    if (!last_supported_fps_) {
-      Adopt(candidate); last_supported_fps_ = candidate.effective_fps;
-      return current_;
-    }
-    if (candidate.effective_fps == current_.effective_fps) {
-      if (current_.runtime_throttled) ++current_.generation;
-      current_.runtime_period_ns = candidate.runtime_period_ns;
-      current_.runtime_hz = candidate.runtime_hz;
-      current_.runtime_throttled = false;
-      current_.requested_fps = candidate.requested_fps;
-      current_.mismatch = candidate.mismatch;
-      pending_fps_ = 0; pending_count_ = 0;
+    if (!last_supported_fps_ || candidate.effective_fps == current_.effective_fps) {
+      Publish(candidate);
+      last_supported_fps_ = candidate.effective_fps;
+      ClearPending();
       return current_;
     }
     if (pending_fps_ == candidate.effective_fps) ++pending_count_;
     else { pending_fps_ = candidate.effective_fps; pending_count_ = 1; }
     if (pending_count_ >= kStableRateSamples) {
-      Adopt(candidate);
+      Publish(candidate);
       last_supported_fps_ = candidate.effective_fps;
-      pending_fps_ = 0; pending_count_ = 0;
+      ClearPending();
     }
     return current_;
   }
   const EffectiveRate& Current() const { return current_; }
 
  private:
-  void Adopt(const EffectiveRate& next) {
-    const auto gen = current_.generation + 1;
+  void Publish(const EffectiveRate& next) {
+    const bool changed = current_.generation == 0 ||
+        current_.effective_fps != next.effective_fps ||
+        current_.requested_fps != next.requested_fps ||
+        current_.from_runtime != next.from_runtime ||
+        current_.from_display != next.from_display ||
+        current_.runtime_throttled != next.runtime_throttled;
+    const auto generation = current_.generation + (changed ? 1 : 0);
     current_ = next;
-    current_.generation = gen;
+    current_.generation = generation;
   }
+  void ClearPending() { pending_fps_ = 0; pending_count_ = 0; }
   EffectiveRate current_{};
   int pending_fps_ = 0;
   int pending_count_ = 0;

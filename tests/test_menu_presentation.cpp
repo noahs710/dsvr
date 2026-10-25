@@ -77,27 +77,122 @@ int main() {
   {
     const dsvr::MenuAnchor anchor{0, 0, 0, 0};
     const auto pointer = dsvr::ProjectMenuPointer(true, true, true, true,
-        {0, 0, 2}, {0, 0, -1}, anchor, 2, 2, 1280, 720);
+        {0, 0, 3}, {0, 0, 2}, {0, 0, -1}, anchor, 2, 2, 1280, 720);
     check(pointer.spatial_menu && pointer.valid && pointer.select);
     check(near(pointer.x, 640) && near(pointer.y, 360));
     check(dsvr::MenuPointerMouseDown(pointer));
-    check(!dsvr::MenuGamepadSelect(pointer, true));
+    check(!dsvr::MenuGamepadSelect(pointer, false));
+    check(dsvr::MenuGamepadSelect(pointer, true));
+
+    // The beam tail is where the hand APPEARS on the panel, seen from the head,
+    // not where it casts a shadow on the panel. A hand out to the right and
+    // above the centre, closer than the panel, projects well outside the quad
+    // and clamps to its far upper corner.
+    const auto angled = dsvr::ProjectMenuPointer(true, true, true, false,
+        {0, 0, 3}, {0.5f, 0.2f, 2}, {-0.5f, -0.2f, -2}, anchor, 2, 2, 1280, 720);
+    check(angled.valid && near(angled.x, 640) && near(angled.y, 360));
+    check(angled.beam_valid && std::fabs(angled.beam_x - 1254.4f) < 0.5f &&
+          std::fabs(angled.beam_y - 14.4f) < 0.5f);
+    // A hand far outside the panel's angular extent clamps just inside its edge,
+    // so the beam still leaves the panel toward the hand instead of running off
+    // the texture or collapsing onto the cursor.
+    const auto wide = dsvr::ProjectMenuPointer(true, true, true, false,
+        {0, 0, 3}, {3, 5, 2}, {-3, -5, -2}, anchor, 2, 2, 1280, 720);
+    check(wide.valid && wide.beam_valid && std::fabs(wide.beam_x - 1254.4f) < 0.5f &&
+          std::fabs(wide.beam_y - 14.4f) < 0.5f);
+
+    // The reported failure: the drawn beam looked pinned to the middle of the
+    // screen. A hand held near the head, slightly right and below the eye and
+    // much closer than the panel, used to project orthogonally to (736,180) -
+    // within a whisker of the panel centre - so the segment read as a line
+    // attached to the cursor and anchored at the middle. Seen from the head the
+    // same hand sits low and right, and the beam leaves the panel toward it.
+    const auto near_head = dsvr::ProjectMenuPointer(true, true, true, false,
+        {0, 0, 1.2f}, {0.15f, -0.25f, 0.6f}, {-0.15f, 0.25f, -0.6f},
+        anchor, 2, 2, 1280, 720);
+    check(near_head.valid && near(near_head.x, 640) && near(near_head.y, 360));
+    check(near_head.beam_valid && std::fabs(near_head.beam_x - 832.0f) < 0.5f &&
+          std::fabs(near_head.beam_y - 705.6f) < 0.5f);
+    check(near_head.beam_y > near_head.y + 100.0f &&
+          near_head.beam_x > near_head.x + 100.0f);
+
+    // A hand inside the panel's angular extent gets an unclamped tail, which is
+    // what makes the segment read as coming from the controller rather than
+    // from the panel's border.
+    const auto inside_tail = dsvr::ProjectMenuPointer(true, true, true, false,
+        {0, 0, 2}, {0.2f, -0.1f, 1.0f}, {-0.2f, 0.1f, -1.0f},
+        anchor, 2, 2, 1280, 720);
+    check(inside_tail.valid && near(inside_tail.x, 640) && near(inside_tail.y, 360));
+    check(inside_tail.beam_valid && std::fabs(inside_tail.beam_x - 896.0f) < 0.5f &&
+          std::fabs(inside_tail.beam_y - 504.0f) < 0.5f);
+
+    // A hand behind the panel plane has no honest tail: no beam, rather than a
+    // mirrored one.
+    float behind_u = 0, behind_v = 0;
+    check(!dsvr::ProjectMenuPointFromView({0, 0, 0}, {0, 0, 2}, anchor, 2, 2,
+                                          behind_u, behind_v));
+    // The panel normal faces the player, so a ray from behind is a back face:
+    // no cursor and no beam, rather than a mirrored one.
+    const auto behind = dsvr::ProjectMenuPointer(true, true, true, false,
+        {0, 0, 3}, {0, 0, -2}, {0, 0, 1}, anchor, 2, 2, 1280, 720);
+    check(!behind.valid && !behind.beam_valid);
+    float bad_u = 0, bad_v = 0;
+    check(!dsvr::ProjectMenuPoint({std::numeric_limits<float>::quiet_NaN(), 0, 2},
+                                  anchor, 2, 2, bad_u, bad_v));
+    check(!dsvr::ProjectMenuPoint({0, 0, 2}, anchor, 0, 2, bad_u, bad_v));
 
     const auto stale = dsvr::ProjectMenuPointer(true, true, false, true,
-        {0, 0, 2}, {0, 0, -1}, anchor, 2, 2, 1280, 720);
+        {0, 0, 3}, {0, 0, 2}, {0, 0, -1}, anchor, 2, 2, 1280, 720);
     const auto unanchored = dsvr::ProjectMenuPointer(true, false, true, true,
-        {0, 0, 2}, {0, 0, -1}, anchor, 2, 2, 1280, 720);
+        {0, 0, 3}, {0, 0, 2}, {0, 0, -1}, anchor, 2, 2, 1280, 720);
     const auto outside = dsvr::ProjectMenuPointer(true, true, true, true,
-        {2, 0, 2}, {0, 0, -1}, anchor, 2, 2, 1280, 720);
+        {0, 0, 3}, {2, 0, 2}, {0, 0, -1}, anchor, 2, 2, 1280, 720);
     check(stale.spatial_menu && !stale.valid && !stale.select);
     check(!unanchored.valid && !unanchored.select);
     check(!outside.valid && !outside.select);
     check(!dsvr::MenuPointerMouseDown(stale));
-    check(!dsvr::MenuGamepadSelect(stale, true));
+    check(!dsvr::MenuGamepadSelect(stale, false));
+    check(dsvr::MenuGamepadSelect(stale, true));
     const auto desktop = dsvr::ProjectMenuPointer(false, true, true, true,
-        {0, 0, 2}, {0, 0, -1}, anchor, 2, 2, 1280, 720);
+        {0, 0, 3}, {0, 0, 2}, {0, 0, -1}, anchor, 2, 2, 1280, 720);
     check(!desktop.valid && !dsvr::MenuPointerMouseDown(desktop));
     check(dsvr::MenuGamepadSelect(desktop, true));
+  }
+  // Pointer motion smoothing: tremor is dropped, a sweep is damped, a
+  // deliberate reposition lands on the same millisecond tick, and a gap or a
+  // lost ray re-primes instead of interpolating across the panel.
+  {
+    dsvr::MenuPointerSmoother smooth;
+    check(!smooth.Primed());
+    smooth.Approach(100.f, 100.f, 0);
+    check(smooth.Primed() && near(smooth.X(), 100.f) && near(smooth.Y(), 100.f));
+    // Sub-pixel tremor never moves the cursor, so a still hand cannot drag a
+    // slider or flip the pointer-mode hysteresis.
+    smooth.Approach(100.5f, 100.4f, 11);
+    check(near(smooth.X(), 100.f) && near(smooth.Y(), 100.f));
+    // A deliberate 10 px move at 90 Hz follows the exponential, not a teleport.
+    smooth.Approach(110.f, 100.f, 22);
+    const float alpha = 1.f - std::exp(-11.f / dsvr::kMenuPointerTauMs);
+    check(std::fabs(smooth.X() - (100.f + 10.f * alpha)) < 1e-3f);
+    check(smooth.X() > 100.f && smooth.X() < 110.f);
+    // Two frames can share one millisecond tick. The exponential cannot advance
+    // without elapsed time, but a flick past the snap distance must still land.
+    smooth.Approach(400.f, 100.f, 11);
+    check(near(smooth.X(), 400.f));
+    // A gap past the filter's budget re-primes rather than sliding across.
+    smooth.Approach(410.f, 100.f, 400);
+    check(near(smooth.X(), 410.f));
+    // A lost ray re-primes: the cursor never slides to wherever the last ray
+    // left it when tracking comes back somewhere else.
+    smooth.Reset();
+    check(!smooth.Primed());
+    smooth.Approach(20.f, 20.f, 410);
+    check(near(smooth.X(), 20.f) && near(smooth.Y(), 20.f));
+    // Non-finite input cannot move or poison the position.
+    smooth.Approach(std::numeric_limits<float>::quiet_NaN(), 20.f, 421);
+    check(near(smooth.X(), 20.f) && near(smooth.Y(), 20.f));
+    smooth.Approach(30.f, std::numeric_limits<float>::infinity(), 432);
+    check(near(smooth.X(), 20.f) && near(smooth.Y(), 20.f));
   }
   std::printf("menu geometry: %d failures\n", failures);
   return failures ? 1 : 0;

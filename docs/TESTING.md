@@ -19,6 +19,14 @@ Before each native transaction:
 
 No new native contract may be guessed to bypass a blocked gate. Protect runtime registration: prefer process-scoped selection where supported; snapshot/restore any deliberate global change and qualify runtime routes separately.
 
+Desktop observer timing: setup/loading counts toward the transaction deadline.
+The runner defaults to 15 minutes; the operator approved a bounded **30-minute**
+retry on 24 October after setup consumed the shorter sessions. Record and tell
+the operator the absolute cutoff, check remaining time before each new case,
+and collect before doing analysis. Do not start a check near cutoff, silently
+extend a running receipt, or count a timeout-interrupted setup as a result.
+Longer duration does not weaken Offline, save-copy, exact-PID or restore guards.
+
 ## Evidence and verdicts
 
 Evidence levels: **source** (implementation/fixtures), **static** (binary/data observations), **native** (observed in DSR), **headset** (operator-reviewed). Never promote one level to another.

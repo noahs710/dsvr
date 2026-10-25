@@ -19,6 +19,11 @@ struct CombatNativeStatus {
 // Pose-owner thread, expected player validated by the caller. Read-only and
 // signature gated; no speculative native function calls or equipment writes.
 bool CombatNativeReadEquipment(std::uintptr_t expected_player, CombatEquipment& out);
+// The local player actor, verified by the pinned PlayerIns vtable rather than
+// by a plausible offset chain alone. Read-only: two guarded reads plus one
+// vtable read. Callers that must not invent identity use this instead of
+// duplicating the world-pointer chain.
+bool CombatNativeLocalPlayer(std::uintptr_t& player);
 void CombatNativeInvalidateEquipment();
 CombatNativeStatus CombatNativeGetStatus();
 // Honest user-visible capability status. Native damage/guard/parry remain

@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdio>
 #include <cstring>
+#include <initializer_list>
 #include <utility>
 
 #include "../src/common/config.h"
@@ -73,6 +74,16 @@ void InitializeAlternate(auto& target) {
   Put(target, 0x1c0, generated_face_resource);
 }
 void Tick() { update_callback(reinterpret_cast<void*>(Get<std::uintptr_t>(player.data(), 0x850)), 0.0078125f); }
+// The same check for an arbitrary set of hidden part slots, so a torso/leg
+// request can be told apart from a head request record by record.
+bool SlotsMasked(const Records& expected, std::initializer_list<unsigned> slots) {
+  for (unsigned i = 0; i < copied.size(); ++i) {
+    bool hidden_type = false;
+    for (const unsigned slot : slots) if (i == slot * 16 + 9) hidden_type = true;
+    if (copied[i] != (hidden_type ? expected[i] & 0xf0 : expected[i])) return false;
+  }
+  return true;
+}
 bool MaskedCorrectly(const Records& expected, bool generated_face = true) {
   for (unsigned i = 0; i < copied.size(); ++i) {
     const bool hidden_type = (generated_face && i == 9) || i == 1 * 16 + 9 || i == 2 * 16 + 9 || i == 6 * 16 + 9;
@@ -198,6 +209,32 @@ int main(int argc, char** argv) {
   config.vr_enabled = false; Tick(); CHECK(copied == untouched); config.vr_enabled = true; Tick();
   config.headlook_enabled = false; Tick(); CHECK(copied == untouched); config.headlook_enabled = true; Tick();
   config.hide_head = false; Tick(); CHECK(copied == untouched); config.hide_head = true; Tick();
+  CHECK(MaskedCorrectly(untouched) && records == untouched);
+
+  // Torso and legs are their own request: part slots 3 (body) and 5 (legs) lose
+  // their type nibble, slot 4 (arms) and every other record keep theirs, and the
+  // live records are never written - so unticking restores the geometry on the
+  // next native update instead of needing a reload.
+  config.hide_head = false; config.hide_torso_and_legs = true; Tick();
+  CHECK(SlotsMasked(untouched, {3, 5}) && records == untouched);
+  // A mod-menu tick asks for the fresh parts command directly rather than
+  // waiting for the frame updater to notice the mask changed.
+  const auto refresh_writes = writes;
+  CHECK(dsvr::BodyVisibilityRequestRefresh() && writes == refresh_writes + 1);
+  config.hide_torso_and_legs = false; Tick();
+  CHECK(copied == untouched && records == untouched);
+  // Both requests at once: the head set and the torso/leg set combine, and the
+  // arms stay drawn. Unticking only the torso restores it while the head set
+  // keeps filtering.
+  config.hide_head = config.hide_torso_and_legs = true; Tick();
+  CHECK(SlotsMasked(untouched, {0, 1, 2, 3, 5, 6}) && records == untouched);
+  config.hide_torso_and_legs = false; Tick();
+  CHECK(MaskedCorrectly(untouched) && records == untouched);
+  // Re-ticking the torso while the head set stays hidden, then back to the
+  // head-only state the rest of the run assumes.
+  config.hide_torso_and_legs = true; Tick();
+  CHECK(SlotsMasked(untouched, {0, 1, 2, 3, 5, 6}) && records == untouched);
+  config.hide_torso_and_legs = false; Tick();
   CHECK(MaskedCorrectly(untouched) && records == untouched);
 
   // A nonlocal model cannot be dirtied by the visibility updater.

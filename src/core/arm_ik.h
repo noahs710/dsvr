@@ -6,15 +6,17 @@ namespace dsvr {
 
 struct TrackingFrame;
 
-// IK arm driver (game thread). Approved design 2026-10-13: the player
-// model's own arms are intended to follow controllers via two-bone IK.
-// Native positions are solved on the player's own post-animation CPU poses.
+// IK arm driver (game thread): FABRIK with rigid palette transport drives the
+// player's own arms from the fresh native post-animation source pose.
 //
 // Called after camera application to bind that exact tracking packet and
 // calibrated heading. The hook wraps PlayerIns vtable slot +0xA8 and runs
-// after its per-bone writer. Runtime pose writes additionally require the
-// writer output to alias the selected ChrModel palette; only solved matrices
-// differ from the just-written animation. Log-only remains the default.
+// after its per-bone writer, BEFORE its natural remap/proportion body copy.
+// Distinct source/body palettes are supported only through that verified native
+// copy; only owned solved rows differ from animation. Publication rechecks
+// tracking/calibration, equipment and rig ownership after native code returns.
+// Refusal requires a fresh solve, never a guessed copy/replay or root write.
+// Log-only remains the default.
 // Grip and leg orientation derive from the loaded c0000 FLVER pose. Headset
 // body-quality proof is explicitly unverified until the guided user session.
 // Physical damage is unfinished.
@@ -47,12 +49,7 @@ struct ArmIkHands {
 // points to world. Freshness/sequence/space/menu checks fail closed.
 bool ArmIkLatestHands(ArmIkHands& out);
 
-// Diagnostic world-space displacement of the solved head versus native
-// animation, from the same guarded commit. It must not feed the camera:
-// that feedback loop detached the viewpoint from the body in live testing.
-// Same freshness/sequence/space contract as ArmIkLatestHands.
-bool ArmIkHeadWorldDelta(Vec3& delta_world, std::uint64_t& sequence,
-                         std::uint64_t& epoch);
+
 
   // Live combat proving-ground snapshot for the Combat test panel. Solved
   // blade segments per hand (world space, from the committed native pose),

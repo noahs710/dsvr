@@ -48,6 +48,8 @@ int main() {
     CHECK(ClassifyDefence(true, 1000, 1500, true, p) == ContactEvent::ShieldBlock);
     CHECK(ClassifyDefence(false, 1000, 1100, true, p) == ContactEvent::None);
     CHECK(ClassifyDefence(true, 1000, 1100, false, p) == ContactEvent::None);
+    CHECK(ClassifyDefence(true, 1200, 1100, true, p) == ContactEvent::None);
+    CHECK(ClassifyDefence(true, -1, 1100, true, p) == ContactEvent::None);
   }
   // Support grip: attaches only while held near the handle.
   {

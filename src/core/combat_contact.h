@@ -49,8 +49,9 @@ inline bool ClassifyWeaponContact(const BladeKinematics& blade,
 inline ContactEvent ClassifyDefence(bool shield_raised, long long raised_ms,
                                     long long now_ms, bool shield_overlaps,
                                     const ContactParams& p = {}) {
-  if (!shield_raised || !shield_overlaps) return ContactEvent::None;
-  if (now_ms >= raised_ms && now_ms - raised_ms <= p.parry_window_ms)
+  if (!shield_raised || !shield_overlaps || raised_ms < 0 || now_ms < raised_ms ||
+      p.parry_window_ms < 0) return ContactEvent::None;
+  if (p.parry_window_ms > 0 && now_ms - raised_ms <= p.parry_window_ms)
     return ContactEvent::Parry;
   return ContactEvent::ShieldBlock;
 }

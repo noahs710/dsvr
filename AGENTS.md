@@ -76,12 +76,36 @@ The exact recovered boundary and next counter-owner probe are in
   `python tools/verify_native_pose_fixture.py build/native-pose-run7-snapshot.json`.
   A missing ignored capture is an evidence gap, not permission to regenerate a
   supposedly independent fixture from the solver's output.
+- Static native probes go through the `GhidraMCP` MCP tools (`get_functions`,
+  `get_xrefs_to`, `get_assembly_context`, `get_struct_layout`) against the
+  live Ghidra GUI holding `DSRFull`; the stdio bridge is launched from
+  `%LOCALAPPDATA%\Empryo\config.json` with
+  `--default-groups function,listing,program,xref,comment,symbol,utility,datatype,analysis`,
+  so those tools are advertised up front and callable with no group loading.
+  `search_tools`/`load_tool_group` exist for the rest, but Empryo does not
+  re-list tools after a load, so any group this repo needs belongs in that flag.
+  The headless `tools/ghidra/query.ps1` wrapper and the `mcp_read.py` shim were
+  deleted on 24 October 2026 - do not reintroduce them, and leave
+  `GHIDRA_MCP_ALLOW_SCRIPTS` unset.
 - Run `cmake --build build --config Debug --parallel 4`, then
   `ctest --test-dir build -C Debug --output-on-failure`; repeat for Release.
   `ctest -N` is the source of registered test names. Never copy an old test count.
-- Code graph tools may not be loaded. Discover them first; if unavailable, use
-  targeted grep/read. Do not substitute native binary tools for source queries.
-  A refresh can still retain old line ranges: confirm the returned snippet is
-  the named function before trusting it; stale snippets require direct reads.
+- Source questions go through the harness graph tools first (`find`, `grep`,
+  `navigate`, `genome_query`, `code_script`); they answer from an index, and one
+  `code_script` call replaces a grep-read-callers chain without pulling the
+  intermediate text into the request. Do not substitute native binary tools for
+  source queries. An index refresh can still retain old line ranges: confirm the
+  returned snippet is the named function before trusting it; stale snippets
+  require direct reads.
+- `project(action: check)` runs typecheck, lint and the tests covering the
+  edited files in one call. The cmake/ctest commands above still own protected
+  runs, and `ctest -N` still owns the registered test names.
+- Budget, and where the re-planning went: the window is 131072 and every
+  advertised MCP tool schema is billed on each request, so the GhidraMCP set is
+  trimmed to the groups this repo actually probes. Editing `AGENTS.md` or
+  `%LOCALAPPDATA%\Empryo\config.json` mid-session rebuilds the prompt prefix and
+  discards the host's prompt cache - batch those edits. Reasoning effort is
+  low/medium/xhigh; `max` was removed deliberately. `plan` is for 3+ file
+  changes, and a decision already recorded in MODLOG or memory is not re-planned.
 
 Leave the next reader a reason and an experiment, not just an instruction.

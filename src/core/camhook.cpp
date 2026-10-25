@@ -116,7 +116,7 @@ void __fastcall FollowCamUpdateDetour(void* self, float dt, void* arg3,
     const auto mapping = ResolveCalibrationMapping(CalibrationCurrent(),
         cfg.eye_height, cfg.play_style == "seated", cfg.world_scale,
         native_reach, model_revision, native_head, native_shoulders,
-        cfg.embodiment_fit != "arm", cfg.eye_height_override);
+        cfg.embodiment_fit != "arm", cfg.eye_height_override, cfg.avatar_scale);
     if (!mapping.valid) {
       XrRecordCameraSequence(0);
       InputInvalidateHeadDirectedLocomotion();
@@ -128,9 +128,10 @@ void __fastcall FollowCamUpdateDetour(void* self, float dt, void* arg3,
         reported.model_revision!=mapping.model_revision ||
         reported.fit!=mapping.fit) {
       DSVR_LOG("CalibrationFit: %.5f native units/m, eye %.3f native, trim %.3f, "
-               "native head %.3f native, shoulders %.3f native, calibration=%llu "
-               "model=%llu anchor=%s (independent mesh resize unverified)",
+               "avatar %.3f, native head %.3f native, shoulders %.3f native, "
+               "calibration=%llu model=%llu anchor=%s (independent mesh resize unverified)",
                (double)mapping.world_scale,(double)mapping.eye_height,(double)mapping.world_trim,
+               (double)mapping.avatar_scale,
                (double)mapping.native_head_height,(double)mapping.native_shoulder_width,
                (unsigned long long)mapping.calibration_revision,
                (unsigned long long)mapping.model_revision,

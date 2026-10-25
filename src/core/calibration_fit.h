@@ -25,6 +25,11 @@ struct CalibrationMapping {
   float world_scale = 1.f;
   float eye_height = 1.65f;  // native units, already converted exactly once
   float world_trim = 1.f;
+  // Operator body trim, applied to the same one ratio as world_trim. Kept as a
+  // separate field so the log and the IK guard can tell "the fit was trimmed"
+  // apart from "the operator resized the body", and so changing either one
+  // invalidates the applied pose mapping on its own.
+  float avatar_scale = 1.f;
   // Measured native geometry the fit was derived from, for honest reporting.
   float native_head_height = 0.f;     // native units, upright Head bone
   float native_shoulder_width = 0.f;  // native units, shoulder-socket spread
@@ -62,23 +67,36 @@ inline float CalibrationNativeHeadHeight(Vec3 head, Vec3 pelvis, Vec3 foot_a,
 // player: fall back to the arm fit rather than making the world enormous.
 inline constexpr float kHeadFitScaleMin = .3f, kHeadFitScaleMax = 3.f;
 
+// Operator-reported shortfall (2026-10-26): every standing calibration reads
+// short in-headset -- the wearer feels taller than the avatar they inhabit.
+// One explicit trim raises the applied view height for EVERY calibration, and
+// the head-fit denominator with it, so the camera stays glued to the native
+// Head bone while the whole avatar and world grow together relative to the
+// wearer's body. It is a trim, never a measurement: it is not written back
+// into a saved profile, so older profiles stay usable and a profile keeps
+// reporting the height that was actually captured.
+inline constexpr float kCalibrationHeightOffsetM = .2f;
+
 inline CalibrationMapping ResolveCalibrationMapping(
     const UserCalibration& profile, float fallback_eye_height_m, bool seated,
     float world_trim, float native_arm_reach = 0.f,
     std::uint64_t model_revision = 0, float native_head_height = 0.f,
     float native_shoulder_width = 0.f, bool prefer_head_fit = true,
-    bool manual_eye_height = false) {
+    bool manual_eye_height = false, float avatar_scale = 1.f) {
   CalibrationMapping out;
   if (!std::isfinite(fallback_eye_height_m) || fallback_eye_height_m < .5f ||
       fallback_eye_height_m > 2.5f || !std::isfinite(world_trim) ||
       world_trim < .5f || world_trim > 2.f ||
+      !std::isfinite(avatar_scale) || avatar_scale < .5f || avatar_scale > 2.f ||
       !std::isfinite(native_arm_reach) || native_arm_reach < 0.f ||
       !std::isfinite(native_head_height) || native_head_height < 0.f ||
       !std::isfinite(native_shoulder_width) || native_shoulder_width < 0.f ||
       (profile.valid && !CalibrationValidProfile(profile)))
     return out;
   const float view_height_m =
-      CalibrationViewHeight(profile, fallback_eye_height_m, seated, manual_eye_height);
+      CalibrationViewHeight(profile, fallback_eye_height_m, seated, manual_eye_height) +
+      kCalibrationHeightOffsetM;
+  if (!(view_height_m > .5f) || view_height_m > 3.f) return out;
   const bool arm_available = profile.valid && native_arm_reach > 0.f;
   // A seated floor capture is posture, not standing stature. Use measured
   // reach for scale in that case; never grow/shrink anatomy from sitting.
@@ -90,7 +108,8 @@ inline CalibrationMapping ResolveCalibrationMapping(
   if (head_available) {
     // Manual eye placement must not silently resize the whole world and
     // cancel its own height adjustment under a head-anchored fit.
-    const float candidate = native_head_height / profile.eye_height_m;
+    const float candidate =
+        native_head_height / (profile.eye_height_m + kCalibrationHeightOffsetM);
     if (prefer_head_fit && native_head_height > .4f && native_head_height < 6.f &&
         std::isfinite(candidate) && candidate >= kHeadFitScaleMin &&
         candidate <= kHeadFitScaleMax) {
@@ -111,11 +130,17 @@ inline CalibrationMapping ResolveCalibrationMapping(
   }
   out.native_head_height = native_head_height;
   out.native_shoulder_width = native_shoulder_width;
-  out.world_scale = automatic * world_trim;
+  // One ratio for the whole world/avatar: the automatic fit, the world trim and
+  // the operator's body trim. Head, hands, roomscale and the IK body all consume
+  // this single applied value, so nothing can drift off anything else. Neither
+  // multiplier scales a bone base or a collider, and neither independently
+  // resizes the skinned mesh -- that still needs a verified render owner.
+  out.world_scale = automatic * world_trim * avatar_scale;
   // One conversion for the chosen eye position, hands and roomscale. Manual
   // placement changes only view height; calibration continues to own scale.
   out.eye_height = view_height_m * out.world_scale;
   out.world_trim = world_trim;
+  out.avatar_scale = avatar_scale;
   out.calibration_revision = profile.revision;
   out.valid = std::isfinite(out.world_scale) && out.world_scale > 0.f &&
               std::isfinite(out.eye_height) && out.eye_height > 0.f;

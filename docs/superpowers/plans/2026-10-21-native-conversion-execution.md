@@ -1,6 +1,6 @@
 # DSVR native conversion: execution guide
 
-Date: 2026-10-21. Updated: 2026-10-23 (user-directed D1/D2 stereo feasibility first; focused work package below). Status: the only active execution plan, not implementation or acceptance evidence.
+Date: 2026-10-21. Updated: 2026-10-24 (user-directed physical attack/block/parry focus; prior stereo work package retained). Status: the only active execution plan, not implementation or acceptance evidence.
 
 Documentation authority: README.md owns scope and authority; this guide owns task order and completion tracking; ENGINEERING.md owns architecture; TESTING.md owns operating policy; VERIFICATION_RUNBOOK.md owns acceptance procedures and numerical thresholds. Direct user instructions take precedence. History, research notes and handoffs do not override those owners. No superseded plan/specification adds a parallel sequence or approval gate.
 
@@ -67,13 +67,20 @@ Each new native call or write needs: pinned executable identity and instruction 
 
 Primary static source: C:\Tools\DarkSoulsRemaster_De\analysis-full\DSRFull.gpr, program DarkSoulsRemastered.exe. The analysis-full-attack project is a repair workspace, not the primary evidence source. Preserve the database and shipped binary. Read the current native-melee contract before revisiting any address.
 
-Use the installed REA route first where it works. Existing documentation records its Windows native-provider security gate as unavailable; do not bypass it or retry the identical unavailable path indefinitely. The existing tools/ghidra/query.ps1 read-only route and separate GhidraMCP GUI bridge are documented fallbacks. Verify current availability and command parameters before use. Do not pass the .gpr launcher or .rep directory as a standalone binary to a tool that cannot read Ghidra projects. Keep derived decompilation/game assets outside distributable sources.
+Use the installed REA route first where it works. Existing documentation records its Windows native-provider security gate as unavailable; do not bypass it or retry the identical unavailable path indefinitely. The GhidraMCP MCP route (stdio bridge to the live Ghidra GUI holding DSRFull, configured in %LOCALAPPDATA%\Empryo\config.json) is the documented static route. The headless tools/ghidra/query.ps1 wrapper was removed on 24 October 2026 and must not be reintroduced while the GUI holds the project. Verify current availability and tool parameters before use. Do not pass the .gpr launcher or .rep directory as a standalone binary to a tool that cannot read Ghidra projects. Keep derived decompilation/game assets outside distributable sources.
 
 Recover split continuations from instructions and callsites, not truncated pseudocode. Prior rollback-mismatch outputs are not verified ABI evidence. Health setter 0x140322910 is an observation anchor, never an attack API. AI AddTopGoal/SetAttackRequest and generic event queues are not proven player melee dispatchers.
 
 After three materially identical failures, record the failure signature and change the evidence source, probe or hypothesis. Do not suppress assertions, widen guessed pointer scans, invent offsets, or report an unavailable binding as implemented.
 
 ## 5. Milestone order
+
+24 October current user steering: finish IK and physical combat. Resume the
+existing F2/C2 source-to-body publication boundary alongside B/C native combat
+recovery; unrelated camera/stereo feature work stays paused. This supersedes
+the earlier combat-only/IK-paused steering, not acceptance prerequisites or
+permission to guess a native ABI. The numbered general order below is retained
+for the remaining conversion; the current focused work is F2/C2 and B/C.
 
 Execute sequentially unless the user explicitly requests delegation. Read-only investigation can advance a later milestone without enabling its mutation path.
 
@@ -100,6 +107,14 @@ Exit: reproducible candidate, regression baseline and protected native evidence.
 
 ## B. Recover real native melee from an actual encounter
 
+Current user priority (24 October): physical attack, block and parry using the
+live Ghidra project and Soulsmodding DSR reference. Selected native behavior/
+AtkParam rows, table selectors and contact event-handle copies are recovered
+statically; the candidate/observer now preserves their distinction. See the
+24 October selected-context continuation in `docs/NATIVE_MELEE_CONTRACT.md`.
+This narrows B2/B3; it does not accept a submission or defense ABI. The existing
+stereo work package remains available after this focused pass.
+
 Entry: A. Owners: combat_native.*, existing trace tools, docs/NATIVE_MELEE_CONTRACT.md.
 
 - [ ] B1. Capture ordinary native hit, miss, block, parry and invulnerable/dodge cases with original controls as comparison experiments. Record simulation update, attacker/target identity, equipment, contact/event identity and observable HP/stamina/reaction changes.
@@ -107,6 +122,18 @@ Entry: A. Owners: combat_native.*, existing trace tools, docs/NATIVE_MELEE_CONTR
 - [ ] B3. Recover attack context creation, attack/PARAM selection, ownership, target generation, contact geometry, defense flags, scheduling, outcome and cleanup. Establish where the attack animation supplies context versus merely supplies pose; physical combat must replace pose/contact dependence without losing legitimate native state.
 - [ ] B4. Compare the five cases to identify block/parry/invulnerability decisions. Confirm native side effects and exactly-once bookkeeping, including stamina, poise, status, durability and aggro where applicable.
 - [ ] B5. Choose the smallest evidenced integration seam: adapt tracked contact into native melee; otherwise construct a context through verified native constructors; otherwise replace the local melee update's animation-dependent geometry. Document why the preferred seam can or cannot work.
+
+24 October B1 partial native result: protected desktop run PID 20680 captured
+separately labelled hit (146 complete samples; one stable EnemyIns HP 44 -> 31)
+and miss (196 complete samples; no observed HP change), both zero drops and no
+detail cap. Operator had a sword but **no shield**, and a passive tutorial
+Hollow. Third capture is `roll_no_attack`, not defense/invulnerability evidence,
+and reached its 256-contact detail ceiling. Original files/saves independently
+hash-verified restored after a guarded retry of a transient DLL lock. B1 stays
+unchecked for active incoming attack/block/parry/context/equipment identity;
+B/C remain open. Exact candidate, captures and next endpoint/context-owner
+probe are in MODLOG/NATIVE_MELEE_CONTRACT. VR-only IK qualification waits for
+hardware; no physical-damage binding is enabled by this comparison.
 
 Exit: complete contract with static and native correlation, not just a plausible address. If unavailable, keep B open and pursue D feasibility or other independent work. Do not expose an enabled physical-damage option.
 
@@ -171,6 +198,11 @@ command production. Rejecting one seam does not prove native stereo impossible.
   Track `0x140CC3F80` in that object flow; do not infer GPU completion from an
   atomic helper. Output: two separate counter-owner records and a task/worker
   timeline, including errors/cancellation. Missing indirect edges remain open.
+  The initialization receiver edge closed 25 Oct: the handler is dispatcher
+  vftable slot `+0x10`, entered only from the message pump at `0x1411BF150`
+  (vftable slot `+0x00`), and worker creation/error paths are byte-pinned. The
+  pump's thread owner and the derived dispatcher vftable are the remaining
+  indirect edges; see NATIVE_STEREO_CONTRACT.
 - [ ] **D1c - Close view, storage and side-effect ownership.** Trace the actual
   main-scene camera/plan through the natural callsites `0x1411BEA27`,
   `0x1411C5049` and `0x1411C2F6C` into consumed constants and draws. Preserve
@@ -221,15 +253,44 @@ command production. Rejecting one seam does not prove native stereo impossible.
   D1 there. Do not replay `0x1411BE710`, patch no-return flags, relax the
   safety gate or build a generic replay abstraction around an unknown ABI.
 
-**First next probe (read-only, no game):** inspect inline
-`HGDrawPlanEntity` construction and trace its `+8` renderer input. The old
-wrapper DATA slot is verified unwind metadata. Native RTTI and a stack-local
-executant lifetime are recovered; task dispatch, both counters and live
+**First next probe (read-only, no game) — closed 25 October 2026.** Following
+dispatcher vtable `1416098B0 +0x50 -> 1411BE560` did **not** reach `1411BEF10`:
+that handler is vftable slot `+0x10`, and its only caller is the dispatcher's
+message pump `0x1411BF150` (vftable slot `+0x00`), which waits on `0x140CC5600`,
+reads the type with `0x140CC5410` and `JMP RDX` over an eight-entry table at RVA
+`0x11BF2FC`; the route in is the body at `0x1411BF1CC` (`CALL [RAX+0x10]` at
+`0x1411BF1F3`). Worker creation and both error paths are byte-pinned. The pump
+also mutates Win32 cursor state and skips four bodies unless the object has a
+**derived** dispatcher vftable, so a replay hook re-enters window-shaped
+dispatch — the fallback below is now the expected route, not a consolation.
+
+**New next probe (read-only, no game):** the pump is entered only as
+`CALL [dispatcher]` (its two xrefs are the vftable slot and its unwind record at
+`0x141E36D48`), so its thread owner is not one xref away. Constructor
+`0x1411BF380` has exactly three xrefs — the renderer's `UNCONDITIONAL_CALL` at
+`0x1411B498B`, its unwind record at `0x141E36D60`, and a DATA slot at
+`0x141A18B64` holding RVA `0x11BF380` with a `0xFFFFFFFF` sentinel before it and
+RVA `0x11BF3A0` (inside the constructor, not a function entry) after it. Decide
+which section contains `0x141A18B64`: if it is `.CRT`, a second module-scope
+dispatcher exists outside the renderer and its pump owner must be found before
+any per-view claim; otherwise walk the renderer `+0x68` consumers outward to the
+`CALL [dispatcher]` site. The string block at `0x1416029E0` holds
+`HGSystemThread` (pinned, loaded at `0x1411BEF36`), `HG_Worker` and
+`HGCommandDispatcher::Exec` — the last has zero xrefs, so it is a naming hint,
+not an edge. The jump table at `ram:0x14011BF2FC` is not readable through
+`read_memory` in this program view, so the type-index-to-body mapping is still
+unpinned — do not guess it. Every writer, retained resources and live
 main-scene coverage remain unresolved.
 
-```powershell
-& ./tools/ghidra/query.ps1 -Address @('0x1411BFE80','0xD0') -Script DumpInstructions.java
+```text
+mcp__GhidraMCP__get_xrefs_to(address="0x1411BF380")
+mcp__GhidraMCP__get_assembly_context(xref_sources="0x1411BEF36", context_instructions=12)
 ```
+
+(The headless `tools/ghidra/query.ps1 -Address @('0x1411BFE80','0xD0') -Script
+DumpInstructions.java` route this probe used before was removed on 24 October
+2026; the MCP call above returned the same bounded window, including
+`1411bfed3: LEA RAX,[0x14160ea80]` and `1411bfeda: MOV qword ptr [RBX],RAX`.)
 
 **Implementation boundaries, after the evidence gate:** review the actual
 camera consumer in `src/core/camhook.cpp` / `camera.cpp`, host lifecycle in
@@ -277,7 +338,7 @@ Exit: collision-resolved physical/stick movement with no doubled motion, uninten
 
 ## F. Embodiment, calibration and real crouching
 
-Entry: native pose mapping evidence from A; E required for final integration. Owners: arm_ik.*, arm_pose_math.h, body_pose_math.h, arm_ik_math.h, head_rider.h, calibration, weapon grips and visibility.
+Entry: native pose mapping evidence from A; E required for final integration. Owners: arm_ik.*, arm_pose_math.h, body_pose_math.h, arm_ik_math.h, calibration, weapon grips and visibility.
 
 Solver strategy (user decision 2026-10-22): FABRIK is the primary reach-chain solver, replacing analytic-only two-bone IK. Implement FABRIK (Andreason & Baath) over the native model-space palette: forward/backward passes on joint origins along each bone chain, then per-bone rigid delta rotations applied to the pre-write native basis with subtree origins carried rigidly. Never rebuild a bone's basis by look-at: rigid deltas preserve scale, exact link lengths, authored twist-pair relationships and hinge conventions by construction. Bounded iterations (a pole-driven two-three bone chain converges within 2-3 full passes); deterministic per frame because the chain is always initialized from the fresh native palette. The bend plane comes from the existing head-space ArmPoleSmoother, which FABRIK's backswing consumes unchanged; optional FABRIK-J angular clamps stay about the authored joint axes (elbow hinge, clavicle share). FABRIK is position-only: end-effector orientation remains the separate exact pass (OrientModelHandPose and the grip contract). The hdFa style hand-axial naturalness failures live in that orientation pass at extreme wrist fold, not in the reach solve; FABRIK does not absorb them and they stay an F1 subproblem. Acceptance invariants are unchanged: arm_ik_naturalness keeps twist pairs <=6/5 deg, hand-forearm axial <=15 deg, hinge >=0.866, exact link lengths and <=12 deg per-frame basis delta. If FABRIK breaks one, the solver is defective; thresholds do not move. Keep SolveTwoBoneIk as a characterization reference/unit test, not a silent second production path.
 
@@ -319,6 +380,15 @@ the live game, and the captured map/proportion constants belong to that one
 resource, not to all equipment variants. F2 remains unchecked; the runbook
 "Verified native copy publication" row is the live probe that would close it.
 
+24 October post-copy refusal correction: the outer copy verifier now rechecks
+tracking/calibration/mode, source rig and equipment after native code resumes,
+not just matrix correspondence. The two-hook regression first reproduced a
+stale receipt, then passed 22 post-copy mutations plus fresh-solve recovery.
+This closes an offline F2/C2 refusal defect only; live F2 and complete C2 remain
+unchecked. B2/C1 has a newly pinned native endpoint-transform lead through
+PlayerIns virtual `+0x448 -> 14035BBE0 -> 140212670` (assembly slots 7/8), not
+a blade-dimension or damage ABI; see NATIVE_MELEE_CONTRACT.
+
 Exit: coherent rendered body/equipment, persistent calibration and demonstrated geometric crouch/duck behavior. Native visual pose data alone cannot establish collision/hurt-volume changes.
 
 ## G. Complete physical sword/shield encounter and comfort
@@ -331,6 +401,14 @@ Entry: C, D, E and reachable-pose alignment from F. Owners: native combat/defens
 - [ ] G4. Provide adjustable per-hand hit/block/parry/hurt haptics from confirmed outcomes, with bounded mixing and cancellation on lifecycle changes.
 - [ ] G5. Implement/verify dynamic vignette in actual eye composition: artificial movement/turning envelope, combined head-turn boost, feathering, attack/release and Off. Preserve physical-only movement by default and prioritize head obstruction. Preserve physical HMD pitch/roll; suppress native camera bob/shake/artificial tilt.
 - [ ] G6. Complete the fixed encounter using physical slash/thrust, defense, both locomotion references, physical/stick movement, turning and recovery. Capture synchronized inputs, poses, native outcomes and eye outputs; obtain operator feel/comfort verdict.
+
+24 October G5 source checkpoint: the existing comfort controls now drive a
+feathered optical-axis mask in actual mono eye composition, with artificial
+movement/turn envelopes, combined head-turn boost and immediate Off/theater/
+tracking reset. Independent timing/input checks and WARP pixel checks cover
+both eyes, asymmetric frustums and D3D11.1 constant-buffer range restoration.
+Native/headset comfort and integration into the future native stereo route
+remain unverified; G5 stays unchecked. See MODLOG for current build receipts.
 
 Exit: complete coherent encounter, not isolated hit demos. Carry all F requirements forward even if initial encounter qualification precedes full lower-body/crouch completion.
 
@@ -409,14 +487,14 @@ Maintain this table here as gates change. Link evidence, candidate identity and 
 
 | Gate | Status at plan creation | Required evidence |
 |---|---|---|
-| A baseline | source-wrap checkpoint freshly rebuilt: Debug/Release 88/88 and doctor PASS; fixture provenance PASS; native scene UNVERIFIED | source-wrap receipts and exact package identity in MODLOG; protected comparable scene still needed |
-| B melee contract | unresolved | complete ABI/ownership and genuine native outcome correlation |
-| C physical sword | not accepted | ten hits/misses, rest/wall/lifecycle and native costs/results |
-| D stereo | D1b reference classification/executant-to-entity edge recovered statically; D1 counter/resource ownership unresolved; D2 UNVERIFIED; production absent | stereo evidence note and D1b static receipt; both counter records, natural main-scene trace and conditional two-view decision still required; D3-D7 and headset fusion remain open |
+| A baseline | BLOCKED: Debug 98/98, Release 98/98, verifier/doctor PASS; native runner failed Steam handoff/ownership. Held original roots returned; fresh post-exit AppData inventory matches, Documents differs and newer state was preserved. Diagnostic package deployed only after game closure | repair and qualify process ownership/lifecycle before any new native launch; retain before/test-output/recovery evidence; do not claim full save restoration |
+| B melee contract | BLOCKED: prior hit/miss observations retained; complete contact ABI/ownership/defense/outcome contract remains unqualified. Current GhidraMCP unavailable; REA rejects Windows native authority even with pinned Ghidra/JDK located | reconnect supported read-only pinned DSRFull access; finish type-1/type-64 contact consumers and independent native hit/block/parry correlation; no guessed calls |
+| C physical sword | BLOCKED on B and verified weapon/target geometry; physical_damage_bound remains false. No implementation or native acceptance added in this investigation | native submission owner, actor/context lifetime and thread, actual geometry/obstruction and native costs/results; ten deliberate hits/misses after binding qualification |
+| D stereo | D1b entity/renderer/dispatcher/two-worker edges and known counter retirement recovered statically; the Begin handler's pump edge and worker error paths pinned 25 Oct (`1411BF150` slot `+0x00` -> slot `+0x10`); complete counter/resource ownership unresolved; D2 UNVERIFIED; production absent | stereo evidence note and pinned static receipts; pump thread owner, derived dispatcher vftable, cancellation/indirect counter paths, natural main-scene trace and conditional two-view decision still required; D3-D7 and headset fusion remain open |
 | E locomotion | orientation selection finished 23 Oct: always one live reference (Head default, or selected left/right/non-dominant hand with head fallback on hand loss), settable in DSVR-Setup and the mod menu, offline 88/88 both configs; follow unqualified | native motor attribution, path/collision/latency matrix, plus the rewritten reference-stability headset row |
 | F body/crouch | solver/root guards offline PASS; native distinct-palette transfer BLOCKED; fit/crouch open | qualified source->body transfer, rendered alignment, independent mesh-scale ownership, clearance and hurt geometry |
-| G encounter | not accepted | physical offense/defense, haptics, movement and comfort |
-| H interactions/UI | partial existing menu/input | progression actions and controller-only usability |
+| G encounter | not accepted; G5 comfort mask implemented in mono with offline rendering checks | physical offense/defense, haptics, movement, native stereo composition and headset comfort |
+| H interactions/UI | SOURCE FIXED, native UNVERIFIED: captured controls now rearm independently; raw A confirms without a rendered ray snapshot; triggers stay ray-only. Actual input/WARP regressions failed before fixes and pass afterward. Full Debug 98/98, Release 98/98, verifier/doctor PASS; DLL a92b2a74...8df3c1 deployed. Earlier native FAIL remains recorded | tests/test_input.cpp, tests/test_mod_menu.cpp, tests/test_xinput_iat.cpp; repeat native controller-only matrix through a qualified process/save transaction; no H checkbox closed |
 | I breadth/ranged | unqualified | equipment/action family matrix in native encounters |
 | J campaign | unqualified | traversal/boss/special-action and longer-session matrix |
 | K release | not qualified | exact final package, 90 Hz, recovery/install and all required gates |

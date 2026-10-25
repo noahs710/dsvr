@@ -9,6 +9,7 @@
 #include <vector>
 #include "../src/common/memory.h"
 #include "../src/common/logging.h"
+#include "../src/core/vr_trace.h"
 #include "../src/core/arm_ik.h"
 #include "../src/core/arm_pose_math.h"
 #include "../src/core/camera.h"
@@ -39,8 +40,12 @@ std::array<ArmPoseMatrix,80> copied_body{};
 Config cfg;
 TrackingFrame latest{};
 bool signature=true,latest_ok=true,camera_ok=true,menu=false;
+bool trace_active=false;
+unsigned bench_text_logs=0,bench_trace_samples=0;
+dsvr::VrTraceEvent last_bench_trace{};
 std::uintptr_t player_pose_method=0;
 bool head_basis_ok=false; Vec3 stub_head_fwd{.04822187f,0,.99883664f};
+float stub_head_roll=0;
 std::uint64_t camera_sequence=0;
 UserCalibration calibration;
 CalibrationMapping camera_mapping_override;
@@ -50,6 +55,8 @@ unsigned mutate_after_pose_read=0;
 unsigned output_root_mode=0;
 bool native_proportion_test=false;
 unsigned mutate_before_copy=0,premature_publications=0;
+unsigned mutate_after_copy=0;
+int equipment_left_id=200000,equipment_stance=0;
 unsigned originals=0,writes=0,forbidden=0,creates=0,disables=0;
 std::array<unsigned,80> writes_by_bone{};
 bool write_this_original=false;
@@ -106,6 +113,33 @@ void __fastcall Original(void* self) {
   if(output_root_mode==3) output_root.m[0]=NAN;
   if(output_root_mode==4) output_root.m[1]=-output_root.m[1]; // +/-zero equal
   std::memcpy(pose_output.data()+0x20,&output_root,sizeof(output_root));
+  // The native caller resumes between source commit and publication. Exercise
+  // this interval, not the already guarded source snapshot/solve/write path.
+  switch(mutate_after_copy) {
+    case 1: ++calibration.revision;break;
+    case 2: ++camera_sequence;break;
+    case 3: latest.focused=false;break;
+    case 4: latest.orientation_valid=false;break;
+    case 5: latest.position_valid=false;break;
+    case 6: cfg.arm_ik_log_only=true;break;
+    case 7: cfg.arm_ik_enabled=false;break;
+    case 8: cfg.observer_only=true;break;
+    case 9: Put(model,0x78,std::uintptr_t{1});break;
+    case 10: Put(model,0x18,std::uintptr_t{0});break;
+    case 11: Put(flver,0x18,std::uintptr_t{0});break;
+    case 12: Put(entries,25*0x30+0x28,static_cast<short>(-1));break;
+    case 13: ++equipment_left_id;break;
+    case 14: ++equipment_stance;break;
+    case 15: latest_ok=false;break;
+    case 16: cfg.world_scale+=.25f;break;
+    case 17: cfg.vr_enabled=false;break;
+    case 18: cfg.headlook_enabled=false;break;
+    case 19: latest.captured_ms=GetTickCount64()-101;break;
+    case 20: ++latest.space_epoch;break;
+    case 21: menu=true;break;
+    case 22: capture_input=true;break;
+  }
+  mutate_after_copy=0;
 }
 void Fresh() { latest.captured_ms=GetTickCount64();camera_sequence=latest.sequence; }
 bool Copy(std::uintptr_t address,void* out,std::size_t size) {
@@ -145,7 +179,15 @@ MH_STATUS WINAPI MH_EnableHook(LPVOID) {
 MH_STATUS WINAPI MH_DisableHook(LPVOID) { ++disables;return MH_OK; }
 MH_STATUS WINAPI MH_RemoveHook(LPVOID) { return MH_OK; }
 namespace dsvr {
-void LogWrite(LogLevel,const char*,int,const char*,...) {}
+void LogWrite(LogLevel,const char*,int,const char* format,...) {
+  if(std::strstr(format,"CombatBench:")) ++bench_text_logs;
+}
+bool VrTraceActive() { return trace_active; }
+void VrTraceRecord(VrTraceEvent event) {
+  if(std::strcmp(event.event,"combat_bench_provisional")==0) {
+    ++bench_trace_samples;last_bench_trace=event;
+  }
+}
 std::uintptr_t ModuleBase(const wchar_t*) { return base; }
 bool BytesMatch(std::uintptr_t address,const void*,std::size_t size) {
   return signature && ((address==base+0x320980 && size==15) ||
@@ -192,7 +234,8 @@ bool CalibrationCapturesInput() { return capture_input; }
 bool CombatNativeReadEquipment(std::uintptr_t actor,CombatEquipment& out) {
   ++equipment_reads;
   out={};if(!equipment_available)return false;
-  out.player=actor;out.weapon_id[0]=200000;out.weapon_id[1]=100000;return true;
+  out.player=actor;out.weapon_id[0]=equipment_left_id;out.weapon_id[1]=100000;
+  out.native_stance=equipment_stance;return true;
 }
 void CombatNativeInvalidateEquipment() {}
 bool CameraTrackingFrame(Vec3& head,Vec3& right,Vec3& up,Vec3& forward,float ref[4],Vec3* anchor,
@@ -210,7 +253,11 @@ bool CameraTrackingFrame(Vec3& head,Vec3& right,Vec3& up,Vec3& forward,float ref
 bool CameraHeadBasis(Vec3& right,Vec3& up,Vec3& fwd) {
   if (!head_basis_ok) return false;
   fwd=VNorm(stub_head_fwd);right=VNorm(VCross(Vec3{0,1,0},fwd));
-  up=VCross(fwd,right);return true;
+  up=VCross(fwd,right);
+  const Vec3 flat_right=right,flat_up=up;
+  right=VAdd(VScale(flat_right,std::cos(stub_head_roll)),VScale(flat_up,std::sin(stub_head_roll)));
+  up=VAdd(VScale(flat_up,std::cos(stub_head_roll)),VScale(flat_right,-std::sin(stub_head_roll)));
+  return true;
 }
 bool XrMenuPresentationActive() { return menu; }
 bool XrLatestTrackingFrame(TrackingFrame& out) { if(!latest_ok)return false;out=latest;return true; }
@@ -282,6 +329,7 @@ int CheckCombatBench() {
   const auto saved=latest;
   const auto saved_cfg=cfg;
   cfg.combat_test_bench=true;cfg.motion_attacks=true;
+  trace_active=true;
   ArmIkResetCalibration();
   long long prediction=1000000000;
   const auto step=[&] {
@@ -292,6 +340,8 @@ int CheckCombatBench() {
   CombatBenchSnapshot bench;
   CHECK(ArmIkCombatBench(bench));
   CHECK(bench.tip_speed[0]==0 && bench.tip_speed[1]==0);
+  CHECK(bench_trace_samples>0 && last_bench_trace.seq==latest.sequence &&
+        last_bench_trace.epoch==latest.space_epoch);
   // Grip-local -Z follows the camera heading exactly once, even with
   // this fixture's rotated native root. It is not a matrix row or +Z.
   const Vec3 direction=VNorm(VAdd(bench.tip[1],VScale(bench.grip[1],-1)));
@@ -307,14 +357,18 @@ int CheckCombatBench() {
   latest.arm[1].pos[0]+=.06f;step();CHECK(ArmIkCombatBench(bench));
   CHECK(bench.tip_speed[1]>2 && bench.tip_speed[0]<.001f);
   // Repeated callbacks for one camera packet must not clear motion or gates.
-  const float speed=bench.tip_speed[1];callback(player.data());
+  const float speed=bench.tip_speed[1];const auto traces=bench_trace_samples;
+  callback(player.data());
   CHECK(ArmIkCombatBench(bench) && bench.tip_speed[1]==speed);
+  CHECK(bench_trace_samples==traces);
   // Loss/recenter/menu/disable all start a new history at rest.
   latest.arm[1].valid=false;step();latest.arm[1].valid=true;
   latest.arm[1].pos[0]+=.06f;step();CHECK(ArmIkCombatBench(bench));
   CHECK(bench.tip_speed[1]==0);
   ++latest.space_epoch;latest.arm[1].pos[0]+=.06f;step();
   CHECK(ArmIkCombatBench(bench) && bench.tip_speed[1]==0);
+  CHECK(bench_text_logs==0); // repeated geometry classifications never hit disk
+  trace_active=false;
   menu=true;CHECK(!ArmIkCombatBench(bench));ArmIkTick(latest);menu=false;
   latest.arm[1].pos[0]+=.06f;step();
   CHECK(ArmIkCombatBench(bench) && bench.tip_speed[1]==0);
@@ -363,7 +417,10 @@ int main() {
   native[26]=Pose(.45f,.95f,0);native[36]=Pose(.45f,.95f,-.1f);
   native[41]=native[56]=Pose(-.15f,1.3f,0);native[42]=Pose(-.35f,1.15f,0);
   native[43]=Pose(-.45f,.95f,0);native[53]=Pose(-.45f,.95f,-.1f);
-  native[18]=Pose(0,1.5f,0);native[19]=Pose(0,1.65f,0);
+  native[18]=Pose(0,1.5f,0);
+  // Independent native Head convention (native_idle_pose.inc): +0 up,
+  // +1 left, +2 facing; an identity skull tested the wrong native axes.
+  native[19]={{0,1,0,0,1,0,0,1.65f,0,0,-1,0}};
   // Joint placement follows the captured rig: its clavicle joint sits 0.118 m
   // inboard of the shoulder (measured shoulder -> clavicle = (.114,-.004,-.022)
   // left, mirrored right) and LUpArmTwist / L_ForeTwist share the UpperArm /
@@ -606,12 +663,16 @@ int main() {
     // put; the neck basis carrying the head must visibly rotate instead.
     CHECK(std::fabs(poses[18].m[8])>.02f || std::fabs(poses[18].m[0]-1)>.02f);
     CHECK(std::fabs(poses[19].m[8])>.02f || std::fabs(poses[19].m[0]-1)>.02f);
+    // Camera height and native skull pivot are not the same joint. Even with
+    // no lean, attaching the view must never stretch/collapse Neck->Head.
+    CHECK(std::fabs(VLen(arm_pose_detail::Sub(ArmPoseOrigin(poses[19]),ArmPoseOrigin(poses[18])))-
+                    VLen(arm_pose_detail::Sub(ArmPoseOrigin(native[19]),ArmPoseOrigin(native[18]))))<1e-5f);
     // The head bone snaps to the stub camera facing, and the pelvis bone
     // carries its bounded share of the turn.
     {
       ArmPoseMatrix root_zero=root;root_zero.m[3]=root_zero.m[7]=root_zero.m[11]=0;
       const Vec3 head_col{poses[19].m[2],poses[19].m[6],poses[19].m[10]};
-      const Vec3 facing=VNorm(VScale(ArmPoseTransformPoint(root_zero,head_col),-1.0f));
+      const Vec3 facing=VNorm(ArmPoseTransformPoint(root_zero,head_col));
       CHECK(VDot(facing,stub_head_fwd)>0.999f);
       CHECK(std::fabs(poses[2].m[8])>.02f || std::fabs(poses[2].m[0]-1)>.02f);
       CHECK(std::memcmp(&poses[13],&native[13],sizeof(ArmPoseMatrix))==0);
@@ -745,6 +806,24 @@ int main() {
     }
     latest.head_pos[0]-=.08f;camera_lean={};
     calibration=saved_calibration;ArmIkResetCalibration();
+    // Actual source-hook boundary: tracked pitch AND roll drive a rigid neck,
+    // not just the yaw path exercised by the original synthetic fixture.
+    stub_head_fwd=VAdd(VScale(Vec3{.04822187f,0,.99883664f},std::cos(.3f)),
+                       Vec3{0,std::sin(.3f),0});
+    stub_head_roll=.2f;
+    Vec3 want_right{},want_up{},want_forward{};
+    CHECK(CameraHeadBasis(want_right,want_up,want_forward));
+    ++latest.sequence;Fresh();ArmIkTick(latest);callback(player.data());
+    ArmPoseMatrix root_basis=root;root_basis.m[3]=root_basis.m[7]=root_basis.m[11]=0;
+    CHECK(VDot(VNorm(ArmPoseTransformPoint(root_basis,arm_pose_detail::Column(poses[19],2))),want_forward)>.999f);
+    CHECK(VDot(VNorm(ArmPoseTransformPoint(root_basis,arm_pose_detail::Column(poses[19],0))),want_up)>.999f);
+    CHECK(std::fabs(VLen(arm_pose_detail::Sub(ArmPoseOrigin(poses[19]),ArmPoseOrigin(poses[18])))-.15f)<1e-5f);
+    const auto tilted=poses;
+    callback(player.data());
+    for(int bone=0;bone<80;++bone)for(int j=0;j<12;++j)
+      CHECK(std::fabs(poses[bone].m[j]-tilted[bone].m[j])<1e-5f);
+    CHECK(std::memcmp(model.data()+0x30,&root,sizeof(root))==0);
+    stub_head_roll=0;
     native=saved_native;
     Put(entries,23*0x30+0x28,static_cast<short>(-1));
     Put(entries,40*0x30+0x28,static_cast<short>(-1));
@@ -810,6 +889,35 @@ int main() {
     body_resource[0xe8]=0;native_proportion_test=false;
     ++latest.sequence;Fresh();ArmIkTick(latest);callback(player.data());
     CHECK(ArmIkLatestHands(published) && premature_publications==0);
+    // A valid matrix copy is not sufficient if its owner or tracking contract
+    // changed while native code ran. Recovery must require a NEW source solve,
+    // not resurrect the invalid receipt by simply restoring the external state.
+    const auto saved_cfg=cfg;
+    const auto saved_tracking=latest;
+    const auto saved_calibration=calibration;
+    const auto saved_entries=entries;
+    const bool saved_equipment=equipment_available;
+    equipment_available=true;
+    for(unsigned mutation=1;mutation<=22;++mutation) {
+      ++latest.sequence;Fresh();ArmIkTick(latest);
+      const auto bound_tracking=latest;
+      const auto before_mutation=writes;
+      mutate_after_copy=mutation;callback(player.data());
+      CHECK(writes==before_mutation+1); // mutation happened AFTER source commit
+      cfg=saved_cfg;latest=bound_tracking;calibration=saved_calibration;
+      camera_sequence=latest.sequence;latest_ok=true;menu=false;capture_input=false;
+      equipment_left_id=200000;equipment_stance=0;entries=saved_entries;
+      Put(model,0x78,std::uintptr_t{0});Put(model,0x18,Ptr(flver));
+      Put(flver,0x18,Ptr(entries));
+      if(ArmIkLatestHands(published)) {
+        std::printf("post-copy mutation %u published a stale receipt\n",mutation);
+        return 1;
+      }
+      Fresh();ArmIkTick(latest);callback(player.data());
+      CHECK(ArmIkLatestHands(published));
+    }
+    equipment_available=saved_equipment;latest=saved_tracking;
+    Fresh();ArmIkTick(latest);callback(player.data());
     const auto before_unscoped=writes;source_callback(player.data());
     CHECK(writes==before_unscoped && !ArmIkLatestHands(published));
     Put(pose_output,0x60,Ptr(poses));

@@ -100,6 +100,7 @@ struct BladeKinematics {
   Vec3 grip{0, 0, 0};
   Vec3 tip{0, 0, 0};
   Vec3 prev_tip{0, 0, 0};
+  Vec3 prev_grip{0, 0, 0};
   Vec3 grip_velocity{0, 0, 0};
   Vec3 tip_velocity{0, 0, 0};
   float tip_speed = 0.0f;
@@ -145,6 +146,7 @@ struct BladeKinematics {
       tip_velocity = VAdd(VScale(tip_velocity, 0.5f), VScale(raw_t, 0.5f));
     }
     prev_tip = valid ? tip : new_tip;
+    prev_grip = valid ? grip : new_grip;
     grip = new_grip;
     tip = new_tip;
     valid = true;
@@ -239,6 +241,64 @@ inline bool BladeSweptOverlapsSphere(Vec3 grip, Vec3 tip, Vec3 prev_tip,
     return false;
   return SegmentPointDistance(prev_tip, tip, centre) <=
          sphere_radius + p.blade_radius_m;
+}
+
+// Rotational sweep (C3 continuous geometry): the tip travels an ARC about the
+// grip, so the straight prev_tip->tip chord under-covers a fast wrist
+// rotation. A small target can sit inside the volume the blade actually
+// occupied and still be outside the previous capsule, the current capsule and
+// the chord. Subdivide the blade's rotation between the two frames: rotate the
+// previous blade direction about the axis joining the two directions, keep
+// each sample's own length, and test the capsule plus the tip-to-tip segment at
+// every step. Work is bounded (kSweepSteps) so a fast swing cannot expand the
+// render callback, and a near-parallel or near-opposite direction pair gets no
+// invented rotation plane -- those fall back to the chord test alone.
+inline constexpr int kSweepSteps = 4;
+
+inline bool BladeSweptOverlapsSphereArc(Vec3 prev_grip, Vec3 prev_tip,
+                                        Vec3 grip, Vec3 tip, Vec3 centre,
+                                        float sphere_radius,
+                                        const CombatParams& p = {}) {
+  if (BladeSweptOverlapsSphere(grip, tip, prev_tip, centre, sphere_radius, p))
+    return true;
+  if (!FiniteVec(prev_grip) || !FiniteVec(prev_tip) || !FiniteVec(grip) ||
+      !FiniteVec(tip) || !FiniteVec(centre) || !(sphere_radius >= 0.0f) ||
+      !std::isfinite(p.blade_radius_m) || p.blade_radius_m < 0.0f)
+    return false;
+  const Vec3 d0{prev_tip.x - prev_grip.x, prev_tip.y - prev_grip.y,
+                prev_tip.z - prev_grip.z};
+  const Vec3 d1{tip.x - grip.x, tip.y - grip.y, tip.z - grip.z};
+  const float l0 = VLen(d0), l1 = VLen(d1);
+  if (l0 < 1e-4f || l1 < 1e-4f) return false;
+  const Vec3 u0{d0.x / l0, d0.y / l0, d0.z / l0};
+  const Vec3 u1{d1.x / l1, d1.y / l1, d1.z / l1};
+  float dot = VDot(u0, u1);
+  if (dot > 1.0f) dot = 1.0f;
+  if (dot < -1.0f) dot = -1.0f;
+  if (dot > 0.9999f || dot < -0.9999f) return false;
+  const Vec3 axis = VNorm(VCross(u0, u1));
+  if (VLen(axis) < 0.5f) return false;
+  const float angle = std::acos(dot);
+  const float reach = sphere_radius + p.blade_radius_m;
+  Vec3 sample_tip = prev_tip;
+  for (int step = 1; step <= kSweepSteps; ++step) {
+    const float t = float(step) / float(kSweepSteps + 1);
+    const Vec3 sample_grip{prev_grip.x + (grip.x - prev_grip.x) * t,
+                           prev_grip.y + (grip.y - prev_grip.y) * t,
+                           prev_grip.z + (grip.z - prev_grip.z) * t};
+    const Vec3 dir = VRotate(u0, axis, angle * t);
+    const float length = l0 + (l1 - l0) * t;
+    const Vec3 next_tip{sample_grip.x + dir.x * length,
+                        sample_grip.y + dir.y * length,
+                        sample_grip.z + dir.z * length};
+    if (!FiniteVec(next_tip)) return false;
+    if (BladeOverlapsSphere(sample_grip, next_tip, centre, sphere_radius, p))
+      return true;
+    if (SegmentPointDistance(sample_tip, next_tip, centre) <= reach)
+      return true;
+    sample_tip = next_tip;
+  }
+  return false;
 }
 
 // Per-target re-hit gate: one enemy can be damaged at most once per
@@ -341,6 +401,10 @@ inline bool BladeFromCommittedPose(const ArmPoseMatrix& root,
 struct BladeHit {
   int target_id = -1;
   float damage_scale = 0.0f;
+  // The measured tip speed that produced the scale. The damage candidate has
+  // to carry the measurement, not just the multiplier derived from it, or a
+   // later review cannot tell a fast graze from a slow push.
+  float tip_speed_mps = 0.0f;
   HapticPulse haptic{};
   GestureKind kind = GestureKind::None;
 };
@@ -365,12 +429,14 @@ inline bool EvaluateBladeContact(const BladeKinematics& blade,
   if (scale <= 0.0f) return false;
   for (const auto& target : targets) {
     if (target.id < 0) continue;
-    if (!BladeSweptOverlapsSphere(blade.grip, blade.tip, blade.prev_tip,
-                                  target.centre, target.radius, p))
+    if (!BladeSweptOverlapsSphereArc(blade.prev_grip, blade.prev_tip,
+                                     blade.grip, blade.tip, target.centre,
+                                     target.radius, p))
       continue;
     if (!gate.TryAcquire(target.id, now_ms, rehit_window_ms)) continue;
     out.target_id = target.id;
     out.damage_scale = scale;
+    out.tip_speed_mps = blade.tip_speed;
     out.kind = kind;
     out.haptic = HitHaptic(blade.tip_speed, kind, contact_speed_min,
                            haptics_enabled, p);

@@ -203,6 +203,28 @@ identity ordering; writing the source after copying is not a propagation fix.
 
 ## Current revalidation requirements
 
+### Post-copy publication invalidation, 24 October 2026
+
+The source guard did not cover the native interval between its write and the
+outer hook's publication. Reproduced at the real two-hook adapter seam: changing
+calibration revision after the natural copy, then restoring it before reading,
+still exposed `ArmIkLatestHands` (`post-copy mutation 1 published a stale receipt`).
+This was a source defect, not evidence that the hook has executed live.
+
+`VerifyNaturalCopy` now rechecks tracking validity/freshness, applied-camera
+sequence/epoch, calibration revision/world trim, enabled/log-only/observer modes,
+menu/calibration ownership, source selection/space/count, rig resource/topology,
+and equipment availability/IDs/stance before accepting the body copy. Native
+code still owns the copy and all final-body/root bytes: a post-copy refusal
+invalidates hand/head/bench publication, not an unsafe late palette rollback.
+
+The adapter regression covers 22 mutations during that native interval, restores
+the external state before querying publication, requires refusal, then requires
+a new natural source solve to recover. Both fresh configurations pass all 93
+registered tests; five relevant tests repeated 50 times in Debug also pass.
+Authored naturalness limits and native write boundaries are unchanged. F2's
+live propagation/armor/attachment/headset qualification remains open.
+
 ### Focused source/body proportion audit, 22 October wrap-up
 
 Audited **32 after-copy palettes x 80 rows** from the retained idle/walk

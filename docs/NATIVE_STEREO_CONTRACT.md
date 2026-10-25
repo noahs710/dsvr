@@ -103,7 +103,7 @@ Local raw receipts remain outside distributable sources in
 `C:\Tools\DarkSoulsRemaster_De\combat-evidence\stereo-*-20261022.*`.
 The exact receipt paths/SHA-256 values and independent static assertions are in
 `build/verification/d1-executor-20261022/static-checks.json`; entry provenance
-and the saved mixed diff are beside it. Relevant commands, all query exits 0:
+and the saved mixed diff are beside it. Relevant commands, all query exits 0 (the headless `tools/ghidra/query.ps1` wrapper was removed on 24 October 2026; these lines are retained as receipts of how each observation was produced, not as available routes):
 
 ```powershell
 & ./tools/ghidra/query.ps1 -Address @('0x141E370D8','0x141E370D0','0x142BBA7FC','0x142BBA803') -Script ListReferences.java
@@ -120,15 +120,132 @@ build/CTest or native/headset result is claimed for this static/doc work unit.
 
 ## The shortest useful next probe
 
+24 October continuation supersedes repeating the inline-construction probe.
+Read-only stdio MCP queries against the live `DSRFull` GUI and independent
+Capstone decoding of the pinned EXE recovered these omitted edges. Raw queries,
+PE unwind bounds and decode are retained in
+`build/verification/d1-owner-20261024/`; no Ghidra repair/save or game execution.
+
+| Edge | Static result and limit |
+|---|---|
+| Inline factory `1411BFE80` | Unwind `[1411BFE80,1411BFF41)`. Allocates `0x40` bytes with alignment `0x10` from `*RDX`; omitted `1411BFEB4` copies RAX to RBX. Stores incoming RDX in entity `+8`, incoming R8D in `+0x10`, installs `HGDrawPlanEntity`, returns the allocation. Xrefs include DATA `141605E48`; its dispatch/descriptor role still needs classification. |
+| Renderer to dispatcher | Complete constructor unwind `[1411B46C0,1411B4AA7)` includes allocation `0xC0`, constructor `1411BF380` and store of its result to renderer `+0x68` at `1411B4995`. The dispatcher receives that renderer in `+8`; the later virtual `+0x50` initialization call is at `1411B49C5`. |
+| Two worker slots | Initialization `[1411BEF10,1411BF147)` loops twice from dispatcher `+0x50`. It allocates one `0x48`-byte `HGCommandWorker` per successful queue, calls `1411C2CE0` at `1411BF0E6`, stores workers at dispatcher `+0x40/+0x48` (`1411BF0F0`) and their queues at `+0x50/+0x58`. These are the two slots polled by the consumer. The slot-to-initializer table edge is pinned below (25 October); still no live identity claim. |
+| Counter producer | `1411C2CE0` initializes worker `+0x20` to zero. `1411C2A20` constructs an `HGExecDrawCommandsThreadMessage` carrying entity/context at `+0x40/+0x48`, increments worker `+0x20` through `140CC3FE0` at `1411C2ABA`, then enqueues through `140CC5E70`. Synchronous mode dispatches virtual `+0x10` instead. |
+| Hidden retirement | Full unwind `[1411C2AF0,1411C2B9B)` frees the draw context through its allocator, then calls `140CC4010` on worker `+0x20` at `1411C2B7E` when `worker+0x38` is enabled. Worker loop `[1411C2BB0,1411C2CB8)` has the corresponding call at `1411C2C88` before message retirement `140CC5920`. Both paths were hidden by no-return pseudocode. The helper's pinned bytes are `OR EAX,-1; LOCK XADD [RCX],EAX; RET`: atomic decrement returning the prior count. Complete cancellation/indirect paths remain to qualify. |
+
+Dispatcher vftable is `1416098B0`. Its `+0x50` slot is **`1411BE560`**, which
+either dispatches virtual `+0x10` synchronously or sends `HGBeginThreadMessage`
+through `140CC5E90`. Do not call that slot a direct edge to `1411BEF10`.
+
+### The receiver edge is closed, 25 October 2026
+
+Read-only `get_xrefs_to`/`read_memory` on the live `DSRFull` GUI plus independent
+Capstone decoding of the pinned bytes. No database repair, no game execution.
+
+`1411BEF10` is dispatcher vftable **slot `+0x10`**. Its only caller is the
+dispatcher's own message pump, vftable **slot `+0x00` = `1411BF150`**, body
+`[1411BF150, ~1411BF2F8)`. The pump waits with `140CC5600(queue, 1)`, reads the
+type with `140CC5410`, rejects types `>7`, then `MOV EDX,[R14+RCX*4+0x11BF2FC];
+ADD RDX,R14; JMP RDX` over an eight-entry image-relative table. Byte-pinned
+bodies (the table itself is not readable through the MCP memory rail — see the
+limit at the end):
+
+| Body | What it does |
+|---|---|
+| `1411BF1AE` | gate `dispatcher+0xbb == 0`; `CALL [RAX+0x18]` (teardown); `XOR BPL,BPL`; retire and return |
+| `1411BF1CC` | gate `+0xbb`; `XOR ECX,ECX; CALL [RIP+0xE5895B]` (a user32 cursor import); then `MOV R9,[msg+0x50]`, `MOV R8,[msg+0x48]`, `MOV RDX,[msg+0x40]`, **`CALL [RAX+0x10]`** — the only route into `1411BEF10` |
+| `1411BF1FB` | gate `+0xbb`; conditional cursor show on `+0xb8`/`+0xb9` (`CALL [RIP+0xE58915]`), set `+0xb9=1`, `CALL [RAX+0x20]` with `[msg+0x40]` |
+| `1411BF23C` | conditional cursor hide (`CALL [RIP+0xE588EF]`), clear `+0xb9`, same slot `+0x20` |
+| `1411BF262` | gate `+0xbb`; `CALL [RAX+0x38]` |
+| `1411BF276`/`289`/`29C`/`2A6` | gate `+0xbb`, then `CMP [dispatcher],R15` against `1416098B0` and skip when the object **is** the base dispatcher — those cases require a derived vftable |
+
+Every body converges on `1411BF2AE` (retire through `140CC5920`, loop unless the
+flag was cleared); only the first body ends the pump. `1411BF150` has exactly
+two DATA xrefs — the vftable slot itself and its unwind record at `141E36D48` —
+so it is entered only as `CALL [dispatcher]`, never by a direct call.
+
+Consequences that change D1c, not just D1b:
+
+- The worker-creating handler is a side effect of a pump that also mutates Win32
+  cursor state and dispatches window-shaped derived handlers. Replaying the
+  consumer would re-enter that pump. This is the concrete reason D1c keeps the
+  "trace backward to the nearest earlier per-view producer" fallback instead of
+  a replay hook.
+- The handler takes the dispatcher's `+0x20/+0x28` refcounted objects **from the
+  message payload** (`MOV [RBP+0x20],RAX` / `MOV [RBP+0x28],RAX` at
+  `1411BF00D`/`1411BF017`), so their lifetime belongs to whoever posts that
+  message. D2a cannot claim retention without naming the poster.
+
+Worker creation is now byte-pinned including its error paths. In
+`[1411BEF10,1411BF147)` the loop at `1411BF050` runs `R15=2` times with
+`RSI = dispatcher+0x50` stepping `+8`: allocate a `0xC8`-byte queue
+(`140CC3E10`, align 8, allocator `*R14`), initialize it with
+`140CC5B80(queue, 0, 0x4000, 0xC, 0, R13)` where R13 is a name pointer in the
+string block at `1416029E0`, enable it with
+`140CC5EE0(queue, 4)`, allocate a `0x48`-byte worker, initialize it with
+`1411C2CE0(worker, dispatcher+8, dispatcher+0x10, queue)`, store it at
+`+0x40/+0x48`, then `140CC5E60`/`140CC5EB0` and store the queue at `+0x50/+0x58`.
+A failed queue allocation jumps to `1411BF128` and **continues to the next
+worker**, leaving that slot pair null; a failed worker allocation frees the queue
+through virtual `+8` and the owner's virtual `+0x68`. Neither failure returns an
+error, so a partially initialized dispatcher is observable, not fatal.
+
+Ghidra still lists `1411BEF10` as ending at `1411BEF8F` because `140CC3E10` is
+flagged no-return; the pinned bytes show the real fallthrough at `1411BEF90` and
+a full epilogue with `RET` at `1411BF146`. Do not repair the primary database to
+"fix" this — decode the byte window.
+
+Probe limit to record: `read_memory` cannot reach the jump table at
+`ram:14011BF2FC` (nor `14011BF2F0`) in this program view, so the exact
+type-index-to-body mapping is **not** pinned; the bodies above are listed in
+listing order, not type order. Recovering it needs a defined-block read or the
+GUI's own switch annotation — do not guess the mapping into a claim.
+
+Two follow-up observations from the same read-only pass, both partial:
+
+- The string block at `1416029E0` holds `HGSystemThread`, `HG_Worker` and
+  `HGCommandDispatcher::Exec`. The handler loads the first through
+  `LEA RCX,[0x1416029E0]` at `1411BEF36` before `CALL 140E44D20`, so the thread
+  name is pinned. `HGCommandDispatcher::Exec` has **zero** xrefs in the current
+  program, so it is a naming hint for the pump, not a pinned edge.
+- Constructor `1411BF380` has exactly three xrefs: the renderer's
+  `UNCONDITIONAL_CALL` at `1411B498B`, its unwind record at `141E36D60`, and one
+  DATA slot at `141A18B64`. That slot holds RVA `0x11BF380` with `0xFFFFFFFF`
+  immediately before it and RVA `0x11BF3A0` (which is **inside** the
+  constructor, not a function entry) after it. A CRT static-initialization
+  descriptor for a second, module-scope dispatcher is the leading reading; a
+  thunk/registration table is the alternative. Not decided — the discriminating
+  probe is which section contains `141A18B64`.
+
+Next probe: the pump's only entry is vftable slot `+0x00`, so its thread owner is
+not one xref away. Enumerate consumers of renderer `+0x68` (constructor
+`1411BF380` xrefs) and the `HGSystemThread` name reference at `1411BEF36` to
+find the `CALL [dispatcher]` site, then classify the derived dispatcher vftable
+that the last four bodies require. Until that owner and the full per-worker
+`+0x20` writer set are named, D1 stays unresolved and D2 stays UNVERIFIED.
+Known increments/retirement sites do not prove every possible counter writer.
+The older inline probe below remains a reproducible observation, not the next
+unmet edge.
+
 Decode the inline `HGDrawPlanEntity` vptr installation at `0x1411BFED3/DA`
 and trace the renderer value stored in entity `+8`; the out-of-line constructor
-is `0x1411C5320`. Start with the bounded primary listing below; if it is absent,
-cross-check pinned bytes instead of repairing the database. `0x141E370D8` is
-already classified unwind metadata and is no longer a table-owner lead.
+is `0x1411C5320`. Pull the bounded listing through the Ghidra MCP rail against
+the live GUI holding `DSRFull`; if a byte window is absent, cross-check pinned
+bytes instead of repairing the database. `0x141E370D8` is already classified
+unwind metadata and is no longer a table-owner lead.
 
-```powershell
-& ./tools/ghidra/query.ps1 -Address @('0x1411BFE80','0xD0') -Script DumpInstructions.java
+```text
+mcp__GhidraMCP__get_assembly_context(xref_sources="0x1411BFED3,0x1411BFEDA", context_instructions=12)
 ```
+
+Run on 24 October 2026 this returns the inline installation directly:
+`1411bfeaf: CALL 0x140cc3e10` (the allocator helper), then
+`1411bfed3: LEA RAX,[0x14160ea80]` and `1411bfeda: MOV qword ptr [RBX],RAX`,
+followed by `1411bfef7: CALL qword ptr [RAX + 0x18]`. `0x14160ea80` is the
+`HGDrawPlanEntity` vftable already recorded above, so the inline store is the
+vptr installation, not an unrelated table read. This is a static listing
+observation only: it names no counter owner and proves no live dispatch.
 
 Follow that owner to the two polled objects and identify who initializes,
 increments and decrements their counters and how parser tasks reference the

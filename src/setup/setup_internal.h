@@ -24,6 +24,16 @@ bool VerifyExe(const std::wstring& exe, const LogFn& log);
 std::vector<std::wstring> DoctorChecks(const std::wstring& exe,
                                        const LogFn& log);
 
+// What the game folder currently holds. DoctorChecks and the GUI both report
+// this one struct, so they can never disagree about the install state.
+struct InstallState {
+  bool has_loader = false;  // dinput8.dll present
+  bool has_core = false;    // DSVR.dll present
+  bool installed() const { return has_loader && has_core; }
+  bool partial() const { return has_loader != has_core; }
+};
+InstallState InstallStateOf(const std::wstring& exe);
+
 bool FirewallSupported(const std::wstring& exe, const LogFn& log, bool add);
 bool FirewallBlocked();  // true when both DSVR block rules exist
 

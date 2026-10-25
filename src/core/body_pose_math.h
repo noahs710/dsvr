@@ -18,6 +18,13 @@ namespace dsvr {
 // counterposes feet from measured root motion. The torso solver never translates
 // the pelvis/root, so stick-walking cannot drag the chest ahead of the user.
 inline constexpr float kTorsoTwistLimitRad = 0.8f;
+// Micromovement tolerance for the gaze lock. Head yaw this close to the body
+// heading stays head-only; past it the chest follows the gaze 1:1 (see
+// TorsoTargetYaw) until the twist bound above. This band is a jitter floor for
+// postural sway and small glances, not a comfort window: the previous 0.12 rad
+// band left the chest up to 7 deg off the user's gaze no matter how long they
+// held the look, which read as the body refusing to face where they looked.
+inline constexpr float kTorsoLookDeadbandRad = 0.035f;
 // Hard bound on one frame's torso correction, equal to the twist bound:
 // the torso may not wind further from the native facing than it may from
 // the heading. A larger gap is locomotion facing, not a head turn, and
@@ -300,8 +307,8 @@ inline bool SolveTorsoYaw(std::span<ArmPoseMatrix> poses,
 // The lean target is the tracked head displacement from the calibrated
 // upright stance: walking moves the anchor and the head together, so the
 // difference stays near zero and the torso never "outruns" the user.
-// Leaning bends the spine toward the head, and the head-rider in arm_ik
-// keeps the neck joined to the viewpoint (no visible gap).
+// Leaning bends the spine toward the head; the subsequent rigid neck solve
+// preserves the authored Neck->Head offset instead of translating Head alone.
 struct TorsoBones {
   int pelvis=-1,spine=-1,chest=-1,neck=-1,head=-1;
   // FLVER may place anatomical Pelvis beside Upper_Root->Spine.
@@ -440,8 +447,10 @@ inline std::array<float, 3> DistributeJointAngles(float total,
   return out;
 }
 
-// Desired torso yaw offset from the heading: the head-driven yaw, with a
-// small deadband so looking slightly left/right never spins the body.
+// Desired torso yaw offset from the heading: the gaze lock. The chest follows
+// head yaw 1:1 outside the micromovement band, so the body ends up facing where
+// the user looks; the anatomical twist bound caps it and the heading system
+// (right stick, recenter, roomscale) covers the rest of the turn.
 // Head-only by design: live reports show the torso outrunning the user
 // when the hands drag the chest.
 inline float TorsoTargetYaw(Vec3 head_fwd,Vec3 heading_right,
@@ -451,10 +460,9 @@ inline float TorsoTargetYaw(Vec3 head_fwd,Vec3 heading_right,
   if (VLen(hr)<.99f || VLen(hf)<.99f || VLen(head_f)<.99f ||
       std::fabs(VDot(hr,hf))>1e-3f) return 0;
   const float head=RelativeYaw(head_f,hr,hf);
-  // Deadband: small glances stay head-only, no torso motion at all.
-  // The band recenters the response (no jump at the edge) and the result
-  // is clamped to the anatomical twist bound.
-  constexpr float kTorsoLookDeadbandRad = 0.12f;
+  // The band recenters the response (no jump at its edge), so the slope past
+  // it is a hair over 1:1 and the body ends up facing the gaze rather than
+  // partway to it. The result stays clamped to the anatomical twist bound.
   const float magnitude = std::fabs(head);
   if (magnitude <= kTorsoLookDeadbandRad) return 0.0f;
   const float sign = head > 0.0f ? 1.0f : -1.0f;
@@ -518,10 +526,10 @@ inline bool ModelYawAngle(const ArmPoseMatrix& root, Vec3 facing_w,
 }
 }  // namespace torso_detail
 
-// Full torso solver pass: pelvis share, distributed spine/chest/neck yaw,
-// lean pitch, and a neck-capped head snap aligning the head bone's facing
-// and up to the camera. `desired_yaw` is the (already damped) target
-// offset from the heading; `pitch_share` comes from TorsoPitchShare.
+// Full torso solver pass: pelvis share, distributed spine/chest yaw and
+// lean pitch, then a bounded rigid Neck-subtree rotation aligning the native
+// skull's facing/up with tracked yaw/pitch/roll. `desired_yaw` is the damped
+// target offset from heading; `pitch_share` comes from TorsoPitchShare.
 // All stages solve in bounded scratch storage. Refusal leaves the complete
 // input palette unchanged and result.valid false.
 inline bool SolveTorsoPose(std::span<ArmPoseMatrix> poses,
@@ -559,7 +567,10 @@ inline bool SolveTorsoPose(std::span<ArmPoseMatrix> poses,
   const float weights[3]={.45f,.35f,.20f},caps[3]={.45f,.35f,.50f};
   const auto joints=DistributeJointAngles(yaw-pelvis,weights,caps);
   const int joint_bones[3]={bones.spine,bones.chest,bones.neck};
-  for (int i=0;i<3;++i)
+  // Spine and chest carry their torso shares. Neck is solved once below
+  // against the tracked skull frame; applying its yaw share first would spend
+  // the neck's correction budget twice when pitch/roll are also present.
+  for (int i=0;i<2;++i)
     if (std::fabs(joints[i])>=1e-5f && !RotatePoseSubtree(work,parents,joint_bones[i],up_m,
         ArmPoseOrigin(work[joint_bones[i]]),joints[i])) return false;
   const float pitch=std::clamp(pitch_share,-kLeanPitchCapRad,kLeanPitchCapRad);
@@ -576,18 +587,36 @@ inline bool SolveTorsoPose(std::span<ArmPoseMatrix> poses,
           -pitch*(i?.4f:.6f)*parity)) return false;
     }
   }
-  Vec3 camera_m{};
-  if (!ArmPoseInversePoint(root,cf,camera_m)) return false;
-  const Vec3 head_f=VNorm(VScale(arm_pose_detail::Column(work[bones.head],2),-1));
-  const Vec3 a=arm_pose_detail::Sub(head_f,VScale(up_m,VDot(head_f,up_m)));
-  const Vec3 b=arm_pose_detail::Sub(camera_m,VScale(up_m,VDot(camera_m,up_m)));
-  float snap=0;
-  if (VLen(a)>=1e-4f && VLen(b)>=1e-4f) {
-    const float residual=std::atan2(VDot(VCross(VNorm(a),VNorm(b)),up_m),VDot(VNorm(a),VNorm(b)));
-    snap=std::clamp(joints[2]+residual,-kHeadSnapCapRad,kHeadSnapCapRad)-joints[2];
-    if (std::fabs(snap)>=1e-4f && !RotatePoseSubtree(work,parents,bones.neck,up_m,
-        ArmPoseOrigin(work[bones.neck]),snap)) return false;
-  }
+  // Captured c0000 Head frame: column 0 is up, column 2 is facing, and
+  // column 1 points left. The old -column-2 convention belonged to the
+  // synthetic identity bones, not the native skull, and forced a neutral
+  // wearer toward a half-turn at the neck cap. Use the complete tracked
+  // frame, including pitch/roll, without guessing an eye/pivot translation.
+  Vec3 camera_m{},camera_up_m{};
+  if (!ArmPoseInversePoint(root,cf,camera_m) ||
+      !ArmPoseInversePoint(root,cu,camera_up_m)) return false;
+  camera_m=VNorm(camera_m);
+  camera_up_m=VNorm(arm_pose_detail::Sub(camera_up_m,
+      VScale(camera_m,VDot(camera_up_m,camera_m))));
+  if (VLen(camera_m)<.99f || VLen(camera_up_m)<.99f) return false;
+  Vec3 from[3];
+  for (int axis=0;axis<3;++axis)
+    from[axis]=VNorm(arm_pose_detail::Column(work[bones.head],axis));
+  const float head_parity=VDot(VCross(from[0],from[1]),from[2]);
+  if (std::fabs(head_parity)<.999f) return false;
+  const Vec3 to[3]={camera_up_m,
+      VScale(VCross(camera_m,camera_up_m),head_parity<0?-1.f:1.f),camera_m};
+  const auto rotation=arm_pose_detail::BasisRotation(from,to);
+  Vec3 axis{rotation.q[0],rotation.q[1],rotation.q[2]};
+  // q and -q describe the same rotation; choose its shortest, deterministic
+  // representative before capping the complete neck correction, not each axis.
+  if (rotation.q[3]<0) axis=VScale(axis,-1);
+  const float sine=VLen(axis);
+  const float angle=2.f*std::atan2(sine,std::fabs(rotation.q[3]));
+  if (!std::isfinite(angle)) return false;
+  const float snap=std::min(angle,kHeadSnapCapRad);
+  if (snap>=1e-4f && !RotatePoseSubtree(work,parents,bones.neck,VNorm(axis),
+      ArmPoseOrigin(work[bones.neck]),snap)) return false;
   std::copy(work.begin(),work.end(),poses.begin());
   result.valid=true;result.applied_delta=delta;
   result.pelvis_applied=pelvis;result.snap_applied=std::fabs(snap);return true;

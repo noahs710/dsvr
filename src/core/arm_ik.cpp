@@ -21,10 +21,10 @@
 #include "tracking_frame.h"
 #include "xr.h"
 #include "cpu_frame_timer.h"
-#include "head_rider.h"
 #include "combat_contact.h"
 #include "hand_math.h"
 #include "pose_transfer.h"
+#include "vr_trace.h"
 
 namespace dsvr {
 namespace {
@@ -47,10 +47,7 @@ std::atomic<bool> g_reset_torso{false};
 std::mutex g_install_mutex;
 std::mutex g_hands_mutex;
 ArmIkHands g_hands;
-struct HeadDelta {
-  Vec3 world{};
-  std::uint64_t sequence=0,epoch=0,captured_ms=0;
-} g_head_delta;
+
 // Combat proving-ground state (owner thread writes under g_hands_mutex at
 // commit; panel reads). Blade segments come from the committed native
 // pose; classification is geometry only, never native damage.
@@ -146,7 +143,7 @@ ArmBendState g_bend_state[2];
 std::uint64_t g_pole_seq=~0ull,g_pole_epoch=~0ull,g_pole_revision=~0ull,g_pole_ms[2]{};
 void InvalidateHands(bool reset_bench=true) {
   g_copy_verified.store(false,std::memory_order_release);
-  { std::lock_guard<std::mutex> lock(g_hands_mutex);g_hands={};g_head_delta={};
+  { std::lock_guard<std::mutex> lock(g_hands_mutex);g_hands={};
     if (reset_bench) g_bench={}; }
 }
 struct Rig {
@@ -169,6 +166,16 @@ float g_native_arm_reach=0;
 // two upper-arm IK roots (the real shoulder sockets, which no controller capture
 // can see). Model-space values; the root scale converts them to world units.
 float g_native_head_height=0, g_native_shoulder_width=0;
+// Animation ownership (config arm_ik_block_animation). The palette the IK-owned
+// rows are solved from, frozen once per rig revision from the first grounded
+// upright native palette. The native writer still runs and its output still
+// drives every non-owned row, but the owned rows restart from this frozen
+// reference every frame, so no clip, blend, attack or idle animation can move
+// an IK bodypart. It is a fresh native palette, never the previous corrected
+// pose, so FABRIK still starts from native geometry and a quiet pose stays
+// quiet across duplicate callbacks.
+std::array<ArmPoseMatrix,kBones> g_source_reference{};
+bool g_source_reference_valid=false;
 std::uintptr_t g_geometry_player=0;
 std::uintptr_t LocalPlayer() {
   std::uintptr_t world=0,player=0;
@@ -304,6 +311,7 @@ bool ReadRig(std::uintptr_t model,std::uintptr_t data) {
   own_subtree(rig.head);
   rig.revision=++g_rig_revision;
   g_native_arm_reach=0;g_native_head_height=0;g_native_shoulder_width=0;
+  g_source_reference_valid=false;  // a new rig needs its own animation-free source
   g_geometry_player=0;
   g_rig=rig; g_two_hand.Reset();InvalidateHands();
   // Rebinding may reuse the model address while resources/topology change.
@@ -320,7 +328,9 @@ struct NativeCopyState {
 };
 struct PendingNativeCopy {
   bool ready=false;
+  bool equipment_bound=false;
   std::uintptr_t player=0,model=0,source_data=0;
+  CombatEquipment equipment;
   NativeCopyState transfer;
   ArmPoseMatrix root{};
   std::array<ArmPoseMatrix,kBones> source{};
@@ -427,7 +437,7 @@ void RetargetSourcePose(void* self) {
   output_data=transfer.data;
   if (gate) { if (g_pose_gate.exchange(gate)!=gate) ReportGate(); g_torso_smooth.Reset(); return; }
   ArmPoseMatrix root{},assembly_root{};
-  std::array<ArmPoseMatrix,kBones> before{},corrected{},shoulder_scratch{};
+  std::array<ArmPoseMatrix,kBones> before{},corrected{},shoulder_scratch{},animated{};
   if (!GuardedReadBytes(model+0x30,&root,sizeof(root)) ||
       !GuardedReadBytes(output+0x20,&assembly_root,sizeof(assembly_root)) ||
       !GuardedReadBytes(data,before.data(),sizeof(before))) {
@@ -504,6 +514,44 @@ void RetargetSourcePose(void* self) {
   if (g_targets.mapping.fitted && g_targets.mapping.model_revision!=g_rig.revision) {
     g_torso_smooth.Reset();return;
   }
+  // Animation ownership: `animated` stays the true palette image in memory, so
+  // the re-verification and rollback below still see what the native writer
+  // actually left behind. `before` is what the solve reads: with the block on,
+  // every IK-owned row is reset to the frozen reference first, so the solve's
+  // starting skeleton, the native grip axis it reads off the hand/weapon rows
+  // and the torso base are all animation-independent. Legs, fingers, equipment
+  // and every other row keep this frame's animated values and the natural copy
+  // still verifies against them.
+  animated=before;
+  // Freeze the animation-free source once per rig revision: the first palette
+  // whose IK-owned rows are all well-formed, read before any mod correction.
+  // The rig binds at load, before any attack or locomotion clip runs, so this
+  // is the bind/idle skeleton. The grounded upright stature gate above is
+  // reported rather than required: a source captured without it is still a
+  // fresh native palette, never a previously corrected pose, so FABRIK keeps
+  // its native starting point and a quiet pose stays quiet.
+  if (cfg.arm_ik_block_animation && !g_source_reference_valid) {
+    bool complete=true;
+    for (int bone=0;bone<kBones;++bone)
+      if (g_rig.owned[bone] && !arm_pose_detail::ValidMatrix(before[bone])) {
+        complete=false;break;
+      }
+    if (complete) {
+      g_source_reference=before;g_source_reference_valid=true;
+      DSVR_LOG("ArmIK: animation-free source frozen for rig revision %llu (upright stature gate %s)",
+               static_cast<unsigned long long>(g_rig.revision),
+               g_native_head_height>0?"passed":"not met");
+    }
+  }
+  if (cfg.arm_ik_block_animation && g_source_reference_valid) {
+    // Only a well-formed native row may be replaced. A zeroed, non-orthonormal
+    // or otherwise refused row stays visible to the guards below, so blocking
+    // animation can never paper over a corrupt native palette with the frozen
+    // reference (arm_pose_native proves that refusal).
+    for (int bone=0;bone<kBones;++bone)
+      if (g_rig.owned[bone] && arm_pose_detail::ValidMatrix(animated[bone]))
+        before[bone]=g_source_reference[bone];
+  }
   corrected=before;
   // Torso follows the head before either arm solves, so both shoulders
   // (the IK roots) share the wrist targets' frame. A missing spine chain
@@ -568,40 +616,11 @@ void RetargetSourcePose(void* self) {
       }
       // Never commit arms over a torso palette whose full solve refused.
       if (!torso_turned) { g_torso_smooth.Reset(); return; }
-      // Attach the visible neck to the viewpoint: translate the solved
-      // Head bone so its world origin lands at the tracked eye point,
-      // bounded 0.35m. The camera itself is never moved by this.
-      // Skipped while a calibrated lean is active: the lean already
-      // moved the neck toward the head, and an additional rigid shift
-      // of the Head origin would stretch the neck segment (the lean
-      // hold-stability contract in arm_pose_native:454).
-      if (g_rig.neck>=0 && g_rig.head>=0 && torso_lean_m<=1e-5f) {
-        const Vec3 eye_world=VAdd(g_targets.head,Vec3{root_before.m[3],
-            root_before.m[7],root_before.m[11]});
-        const Vec3 head_world=ArmPoseTransformPoint(root_before,
-            ArmPoseOrigin(corrected[g_rig.head]));
-        float root_rot[9];
-        for (int col=0;col<3;++col) {
-          root_rot[col*3+0]=root_before.m[col];
-          root_rot[col*3+1]=root_before.m[4+col];
-          root_rot[col*3+2]=root_before.m[8+col];
-        }
-        const Vec3 shift=HeadRiderOffsetModel(eye_world,head_world,root_rot);
-        if (VLen(shift)>1e-5f) {
-          // Model-space origins live at m[3,7,11]. Move Head and its
-          // descendants rigidly; Neck and above stay where torso put them.
-          for (int bone=0;bone<kBones;++bone) {
-              bool desc=false;
-              for (int cur=bone;cur>=0;cur=g_rig.parents[cur])
-                if (cur==g_rig.head) { desc=true; break; }
-            if (desc) {
-              corrected[bone].m[3]+=shift.x;
-              corrected[bone].m[7]+=shift.y;
-              corrected[bone].m[11]+=shift.z;
-              }
-            }
-          }
-      }
+      // Neck/head alignment is a rigid correction about the native Neck pivot
+      // inside SolveTorsoPose. Never translate Head alone toward the camera:
+      // the tracked eye is not a measured skull pivot, and doing so stretches
+      // or collapses Neck->Head (including the no-lean case). Camera pose stays
+      // HMD-authoritative and receives no skeleton/animation feedback.
     } else g_torso_smooth.Reset();
   } else g_torso_smooth.Reset();
   if (root_motion.valid && (VLen(root_motion.displacement)>1e-5f ||
@@ -789,7 +808,7 @@ void RetargetSourcePose(void* self) {
       std::memcmp(&current_assembly_root,&assembly_root,sizeof(assembly_root))!=0 ||
       !GuardedReadBytes(g_rig.entries,current_rig.data(),current_rig.size()) || current_rig!=g_rig.records ||
       !GuardedReadBytes(data,current.data(),sizeof(current)) ||
-      std::memcmp(current.data(),before.data(),sizeof(current))!=0) {
+      std::memcmp(current.data(),animated.data(),sizeof(current))!=0) {
     g_torso_smooth.Reset(); return;
   }
   // This is the post-writer owner buffer. Commit only changed matrices; every
@@ -799,15 +818,15 @@ void RetargetSourcePose(void* self) {
   std::array<bool,kBones> written{};
   for (int bone=0;bone<kBones;++bone) {
     if (!g_rig.owned[bone] ||
-        std::memcmp(&before[bone],&corrected[bone],sizeof(ArmPoseMatrix))==0) continue;
+        std::memcmp(&animated[bone],&corrected[bone],sizeof(ArmPoseMatrix))==0) continue;
     if (!GuardedWriteBytes(data+static_cast<std::uintptr_t>(bone)*sizeof(ArmPoseMatrix),
                            &corrected[bone],sizeof(ArmPoseMatrix))) {
       if (!GuardedWriteBytes(data+static_cast<std::uintptr_t>(bone)*sizeof(ArmPoseMatrix),
-                             &before[bone],sizeof(ArmPoseMatrix)))
+                             &animated[bone],sizeof(ArmPoseMatrix)))
         DSVR_ERROR("ArmIK: failed to restore palette row %d after guarded write refusal",bone);
       for (int undo=0;undo<bone;++undo) if (written[undo] &&
           !GuardedWriteBytes(data+static_cast<std::uintptr_t>(undo)*sizeof(ArmPoseMatrix),
-                             &before[undo],sizeof(ArmPoseMatrix)))
+                             &animated[undo],sizeof(ArmPoseMatrix)))
         DSVR_ERROR("ArmIK: failed to roll back palette row %d after guarded write refusal",undo);
       committed=false;break;
     }
@@ -815,9 +834,10 @@ void RetargetSourcePose(void* self) {
   }
   if (committed) {
     g_pending_copy.ready=true;g_pending_copy.player=player;
+    g_pending_copy.equipment_bound=have_equipment;g_pending_copy.equipment=equipment;
     g_pending_copy.model=model;g_pending_copy.source_data=data;
     g_pending_copy.root=root_before;g_pending_copy.transfer=transfer;
-    g_pending_copy.source=before;
+    g_pending_copy.source=animated;
     for(int bone=0;bone<kBones;++bone)
       if(written[bone])g_pending_copy.source[bone]=corrected[bone];
     {
@@ -828,6 +848,7 @@ void RetargetSourcePose(void* self) {
       // native damage is never written. Off while the bench is off.
       if (cfg.combat_test_bench && cfg.motion_attacks && !cfg.observer_only) {
         if (g_bench.sequence!=g_targets.sequence) {
+          unsigned bench_flags=0; // current classifications, never confirmed outcomes
           // Motion energy comes from the bound physical packet, never native
           // root motion, stick turning, torso smoothing or IK corrections.
           if (g_bench.epoch!=g_targets.epoch || g_bench.player!=player ||
@@ -890,6 +911,9 @@ void RetargetSourcePose(void* self) {
             BladeKinematics blade=motion;
             blade.grip=grip_w;blade.tip=tip_w;
             blade.prev_tip=g_bench.blade_valid[side] ? g_bench.tip[side] : tip_w;
+            // The arc sweep needs the previous frame's native grip too, and
+            // g_bench.grip still holds it until the store two lines below.
+            blade.prev_grip=g_bench.blade_valid[side] ? g_bench.grip[side] : grip_w;
             blade.valid=motion.valid && FiniteVec(grip_w) && FiniteVec(tip_w);
             g_bench.grip[side] = grip_w;
             g_bench.tip[side] = tip_w;
@@ -907,9 +931,7 @@ void RetargetSourcePose(void* self) {
                 g_bench.last_event = 1;
                 g_bench.last_target = contact.hit.target_id;
                 g_bench.last_scale = contact.hit.damage_scale;
-                DSVR_LOG("CombatBench: HIT target=%d scale=%.2f tip=%.2f m/s",
-                         contact.hit.target_id, (double)contact.hit.damage_scale,
-                         (double)blade.tip_speed);
+                bench_flags|=1;
               }
             }
           }
@@ -937,8 +959,7 @@ void RetargetSourcePose(void* self) {
                   defence == ContactEvent::Parry ? 3 : 2;
               g_bench.last_target = -2;
               g_bench.last_scale = 0.0f;
-              DSVR_LOG("CombatBench: %s (guard held, blade reached shield)",
-                       defence == ContactEvent::Parry ? "PARRY" : "BLOCK");
+              bench_flags|=defence==ContactEvent::Parry ? 4u : 2u;
             }
           }
           // Report separation only; this diagnostic does not enforce collisions.
@@ -951,10 +972,7 @@ void RetargetSourcePose(void* self) {
             g_bench.hands_too_close =
                 cfg.weapon_separation_min_m > 0.0f &&
                 g_bench.hand_separation_m < cfg.weapon_separation_min_m;
-            if (g_bench.hands_too_close)
-              DSVR_LOG("CombatBench: HANDS TOO CLOSE sep=%.3f m (min %.3f)",
-                       (double)g_bench.hand_separation_m,
-                       (double)cfg.weapon_separation_min_m);
+            if (g_bench.hands_too_close) bench_flags|=8;
           } else {
             g_bench.hands_too_close = false;
           }
@@ -962,41 +980,89 @@ void RetargetSourcePose(void* self) {
           g_bench.sequence = g_targets.sequence;
           g_bench.epoch = g_targets.epoch;
           g_bench.captured_ms = g_targets.captured_ms;
+          // The native copy has not returned yet: this is provisional bench
+          // geometry, not committed weapon/contact or damage evidence. Avoid
+          // synchronous text logging while holding the pose-publication mutex.
+          if(VrTraceActive()) {
+            VrTraceEvent event{};
+            event.event="combat_bench_provisional";
+            event.seq=g_targets.sequence;event.epoch=g_targets.epoch;
+            event.object=player;event.flags=bench_flags;
+            event.values[0]=g_bench.tip_speed[0];event.values[1]=g_bench.tip_speed[1];
+            event.values[2]=cfg.contact_speed_min;
+            event.values[3]=static_cast<float>(cfg.rehit_window_ms);
+            event.values[4]=g_bench.hand_separation_m;
+            event.values[5]=g_bench.last_scale;
+            event.values[6]=static_cast<float>(g_bench.last_target);
+            for(unsigned hand=0;hand<2;++hand) {
+              event.values[7+hand*3]=g_bench.tip[hand].x;
+              event.values[8+hand*3]=g_bench.tip[hand].y;
+              event.values[9+hand*3]=g_bench.tip[hand].z;
+            }
+            event.values[13]=g_targets.world_scale;
+            event.values[14]=cfg.weapon_separation_min_m;
+            event.values[15]=static_cast<float>(g_bench.last_event);
+            VrTraceRecord(event);
+          }
         }
       } else { g_bench={}; }
     }
     // Publication is provisional until the outer hook verifies native copy.
-    // Every public hand/head/bench getter checks g_copy_verified.
-    // Publish solved-vs-native head displacement for diagnostics only.
-    // It must never feed the camera (that feedback loop detached the
-    // viewpoint from the body in live testing).
-    if (g_rig.head>=0) {
-      const Vec3 solved_w=ArmPoseTransformPoint(root_before,ArmPoseOrigin(corrected[g_rig.head]));
-      const Vec3 native_w=ArmPoseTransformPoint(root_before,ArmPoseOrigin(before[g_rig.head]));
-      HeadDelta delta{};
-      delta.world=arm_pose_detail::Sub(solved_w,native_w);
-      delta.sequence=g_targets.sequence;delta.epoch=g_targets.epoch;
-      delta.captured_ms=g_targets.captured_ms;
-      if (FiniteVec(delta.world) && VLen(delta.world)<1.0f) {
-        std::lock_guard<std::mutex> lock(g_hands_mutex);g_head_delta=delta;
-      }
-    }
+    // Every public hand/bench getter checks g_copy_verified. No solved-vs-
+    // native head displacement is published: the only consumer that ever
+    // existed was the camera, and feeding skeletal motion back into the
+    // viewpoint detached it from the body in live testing.
   }
 }
 
 bool VerifyNaturalCopy() {
-  GuardedReadScope reads;
   const auto& pending=g_pending_copy;
+  const auto cfg=DiagnosticsCurrentConfig();
+  const auto now=GetTickCount64();
+  TrackingFrame fresh{};
+  // The source guard ended before native code resumed. A matching palette is
+  // necessary, not sufficient: never reopen publication after a calibration,
+  // tracking, mode or equipment transition in that intervening native call.
+  // Do not roll source/body bytes back here; their lifetime now belongs to the
+  // natural caller. Refuse publication and require a fresh source transaction.
+  if (!pending.ready || !g_enabled.load() || g_reset_torso.load() || g_reset_grip.load() ||
+      !cfg.vr_enabled || !cfg.arm_ik_enabled || !cfg.headlook_enabled ||
+      cfg.arm_ik_log_only || cfg.observer_only ||
+      cfg.world_scale!=g_targets.mapping.world_trim ||
+      cfg.avatar_scale!=g_targets.mapping.avatar_scale ||
+      XrMenuPresentationActive() || CalibrationCapturesInput() ||
+      CalibrationCurrent().revision!=g_targets.calibration.revision ||
+      !XrLatestTrackingFrame(fresh) || !fresh.focused || !fresh.orientation_valid ||
+      !fresh.position_valid || fresh.sequence<g_targets.sequence ||
+      fresh.space_epoch!=g_targets.epoch || XrAppliedCameraSequence()!=g_targets.sequence ||
+      now<g_targets.captured_ms || now-g_targets.captured_ms>100 ||
+      now<fresh.captured_ms || now-fresh.captured_ms>100) return false;
+  GuardedReadScope reads;
+  CombatEquipment equipment{};
+  const bool equipment_bound=CombatNativeReadEquipment(pending.player,equipment);
+  if (equipment_bound!=pending.equipment_bound ||
+      (equipment_bound && (equipment.player!=pending.equipment.player ||
+       equipment.weapon_id[0]!=pending.equipment.weapon_id[0] ||
+       equipment.weapon_id[1]!=pending.equipment.weapon_id[1] ||
+       equipment.native_stance!=pending.equipment.native_stance))) return false;
   NativeCopyState current;
-  std::uintptr_t model=0,data=0,selected=0;
-  unsigned space=0;
+  std::uintptr_t model=0,data=0,selected=0,override_pose=0,flver=0,entries=0;
+  unsigned space=0,source_space=0,count=0;
+  std::array<unsigned char,kBones*0x30> records{};
   ArmPoseMatrix model_root{},body_root{};
   std::array<ArmPoseMatrix,kBones> source{},body{};
-  if (!pending.ready || LocalPlayer()!=pending.player ||
+  if (LocalPlayer()!=pending.player || !Type(pending.player,0x13251f0) ||
       !ReadNativeCopyState(pending.player,current) || current!=pending.transfer ||
       !GuardedRead(pending.player+0x60,model) || model!=pending.model ||
+      !Type(model,0x12eaf30) || !Type(model+0x60,0x12eacb8) ||
       !GuardedRead(model+0x70,data) || data!=pending.source_data ||
       !GuardedRead(model+0x128,selected) || selected!=model+0x60 ||
+      !GuardedRead(model+0x78,override_pose) || override_pose ||
+      !GuardedRead(model+0x68,source_space) || source_space!=1 ||
+      !GuardedRead(model+0x6c,count) || count!=kBones ||
+      !GuardedRead(model+0x18,flver) || flver!=g_rig.flver ||
+      !GuardedRead(flver+0x18,entries) || entries!=g_rig.entries ||
+      !GuardedReadBytes(entries,records.data(),records.size()) || records!=g_rig.records ||
       !GuardedRead(current.output+0x58,space) || space!=1 ||
       !GuardedReadBytes(model+0x30,&model_root,sizeof model_root) ||
       std::memcmp(&model_root,&pending.root,sizeof model_root)!=0 ||
@@ -1104,22 +1170,7 @@ bool ArmIkNativeStature(float& head_above_origin, float& shoulder_width,
   shoulder_width=g_native_shoulder_width>0?g_native_shoulder_width*scale:0.f;
   return true;
 }
-bool ArmIkHeadWorldDelta(Vec3& delta_world, std::uint64_t& sequence,
-                         std::uint64_t& epoch) {
-  delta_world={};sequence=0;epoch=0;
-  if (!g_copy_verified.load(std::memory_order_acquire) ||
-      XrMenuPresentationActive() || CalibrationCapturesInput()) return false;
-  TrackingFrame frame{};
-  if (!XrLatestTrackingFrame(frame)) return false;
-  std::lock_guard<std::mutex> lock(g_hands_mutex);
-  const auto now=GetTickCount64();
-  if (!g_copy_verified.load(std::memory_order_acquire) ||
-      !g_head_delta.sequence || g_head_delta.sequence>frame.sequence ||
-      g_head_delta.epoch!=frame.space_epoch ||
-      now<g_head_delta.captured_ms || now-g_head_delta.captured_ms>100) return false;
-  delta_world=g_head_delta.world;sequence=g_head_delta.sequence;
-  epoch=g_head_delta.epoch;return true;
-}
+
 bool ArmIkLatestHands(ArmIkHands& out) {
   out={};
   if (!g_copy_verified.load(std::memory_order_acquire) ||

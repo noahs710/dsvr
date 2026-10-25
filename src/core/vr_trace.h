@@ -5,6 +5,22 @@
 namespace dsvr {
 
 // Diagnostic observations only. Command production is NOT view consumption.
+// Native combat detail (LAB builds) is a five-record atomic batch:
+// native_combat_contact + native_combat_identity + native_combat_motion +
+// native_combat_diagnostics + native_combat_context. Older builds omit motion
+// and context. combat_context_schema=1 requires a context for every contact.
+// Context values 0..11 are six signed dwords as little-endian 16-bit limbs:
+// attack type, behavior ID, selected AtkParam ID, raw table selector, geometry
+// selector, weapon ID. Values 12..13 are raw payload +C8/+C9 flag bytes; they
+// are NOT the serialized AtkParam +7E byte. Flags bit 0 gates the tuple read,
+// bit 1 the flag bytes, bit 2 the event handle (+140, limbs in values 14..15).
+// This establishes observation, never an outcome or validated pool lifetime.
+// Diagnostics flags hold source-before/target-before/source-after/target-after
+// read-result nibbles; duration is read/assembly cost, excluding native/queue/I/O.
+// Motion flags are direction-read, velocity-read, direction-finite,
+// direction-unit-length and velocity-finite; values carry the raw caller-built
+// record floats, which one caller's decompile predicts and no build proves.
+// combat_bench_provisional is pre-copy synthetic geometry, never hit evidence.
 struct VrTraceEvent {
   const char* event = "unknown";
   long long qpc = 0;
@@ -62,5 +78,8 @@ void VrTraceFinish(bool interrupted);
 // Byte-gated observation hooks, never retire limiter waits or change matrices.
 // Includes CPU HGCameraEntity command acceptance; that is NOT a final GPU view.
 bool VrTraceInstall(bool enabled);
+// Startup-only, LAB-gated contact + native Step observation. No renderer/camera
+// hooks or unrelated events; incompatible install domains require a restart.
+bool VrTraceInstallCombat();
 
 }  // namespace dsvr

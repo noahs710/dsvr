@@ -30,11 +30,22 @@ Route physical follow through verified native movement/collision. Reconcile only
 
 Use separate verified solid/support/head queries. Obstruction protects against hidden-space visibility and through-wall reach even with comfort effects Off. Crouch must align native collision, native hurt geometry and visual pose, with clearance before expansion. Do not globally scale gameplay collision to repair visual calibration.
 
+The current mono eye compositor applies `comfort_vignette`/`vignette_strength`
+without changing projection. Input publishes artificial stick magnitude before
+physical-follow mixing and the emitted turn delta. A predicted-time envelope
+uses 60/250 ms attack/release, a 120 deg/s turn reference and up to 0.25 extra
+demand during concurrent physical head rotation. The feathered mask uses each
+eye's angular tangents and optical axis. Physical-only motion stays clear;
+Off, theater, invalid tracking and failed submissions reset the envelope.
+Preserve the native pixel constant buffer and its D3D11.1 range after drawing.
+This implements comfort in the mono route; it establishes no native stereo or
+obstruction binding, and tuning still requires the runbook's headset case.
+
 ## Body and equipment
 
-Use measured native bone names/layout and a proven final pose-copy/skinning/attachment stage. Define owned bones and deterministic write order; preserve native collision/root and necessary animation state. Publish the committed weapon pose to combat; do not grow native gameplay logic inside a render/IK callback.
+Use measured native bone names/layout and a proven final pose-copy/skinning/attachment stage. Define owned bones and deterministic write order; preserve native collision/root and necessary animation state. Under animation ownership the IK is the sole writer of its owned rows: they restart each frame from a native source palette frozen once per rig revision, never from the previous corrected pose, while the native writer, animation state, legs and every non-owned row stay native and a malformed native row is still refused. Publish the committed weapon pose to combat; do not grow native gameplay logic inside a render/IK callback.
 
-Calibration separates stature, reach, floor, posture and world scale. Capture once per launch after gameplay loads; retain measurements and physical origin through death/load/suspension. Explicit recalibration atomically replaces only a successful capture; cancel/failure retains usable prior data. Recenter changes view reference, not measured anatomy.
+Calibration separates stature, reach, floor, posture and world scale. An explicit operator height trim is applied to the coherent mapping (view height and fit anchor together, so the camera stays on the native head bone) and is never written back into a saved profile. Capture once per launch after gameplay loads; retain measurements and physical origin through death/load/suspension. Explicit recalibration atomically replaces only a successful capture; cancel/failure retains usable prior data. Recenter changes view reference, not measured anatomy.
 
 `calibration_fit.h` resolves one `CalibrationMapping`: native units per physical
 metre = rig-bound native arm reach / estimated physical reach, multiplied by
@@ -61,6 +72,20 @@ Physical contact geometry follows the committed native weapon; swing energy foll
 
 Native damage, defense, stamina, poise, status and reactions remain authoritative. Direct health setters and unrelated AI event requests are not melee APIs. Correlate confirmed outcomes independently before issuing bounded per-hand haptics. Preserve native projectile/ammo/cast rules for ranged weapons.
 
+Once the IK body owns the arms and native animation is blocked, every canned
+combat output is suppressed, so the physical arms have to produce the input
+themselves or the player cannot fight at all. Two opt-in bridges do that at the
+pad seam (`src/core/swing_attack_math.h`, `src/core/shield_guard_math.h`): a
+qualified weapon-hand swing becomes one press of the native light/strong attack,
+and the shield hand holds the native shield button while it is raised and still
+and taps the same button when it is flicked back to rest. Both emit ordinary
+button lines and nothing else — no native damage, guard window, stamina or parry
+judgement is invented or bypassed — and both fail closed on non-finite speed, a
+non-monotonic clock, lost tracking, recentering, sanctuary, menu capture or
+calibration capture. The guard is a head-relative height band plus a stillness
+window, never a canonical guard pose, and hand speeds are head-relative so
+walking manufactures neither action.
+
 Interaction targeting uses tracked reach/aim, distance, line of sight and verified eligibility; per-action adapters invoke native actions. Explicit confirm controls are valid for scripted interactions and UI; gesture-triggered canned melee is not. Native UI may be hidden only when required replacement prompts/menus remain accessible. Do not claim simulation pause unless verified.
 
 ## Lifecycle and tool limits
@@ -68,3 +93,11 @@ Interaction targeting uses tracked reach/aim, distance, line of sight and verifi
 One owner controls the XR frame lifecycle. Inactive frame work cannot block game loading/Present; preserve exclusive handoff and deferred safe teardown. Acquired images retain ownership through timeout/error until correctly waited/released. Restore only owned native/D3D/file state.
 
 Use existing trace/profiling tools for bounded evidence. tools/native_stereo.py validates synthetic schema consistency; its success does not establish native stereo. WARP/fake-XR tests and pose math do not establish headset feel or native gameplay. Measure complete scene/eye-pair work and optimize observed costs rather than guessing.
+
+Combat diagnostics use the existing bounded trace queue, not synchronous text
+logging from pose/contact hooks. Admit each contact/identity/read-diagnostics
+batch atomically or count all three records as dropped. The diagnostic writer
+owns formatting, files and rate-limited `TraceHealth`/`CombatHealth` INFO lines.
+Raw actor-side roles, HP/stamina deltas and return bits are observations, not
+damage attribution. Provisional bench classifications remain explicitly weaker
+than copy-verified weapon poses or native contact/defense outcomes.

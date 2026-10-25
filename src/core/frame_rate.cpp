@@ -4,12 +4,14 @@
 
 #include <MinHook.h>
 
+#include <chrono>
 #include <cstdint>
 
 #include "../common/logging.h"
 #include "../common/memory.h"
 #include "diagnostics.h"
 #include "display_rate.h"
+#include "frame_pacing.h"
 #include "xr.h"
 #include "cpu_frame_timer.h"
 
@@ -27,18 +29,60 @@ constexpr std::uintptr_t kRateSetterRva = 0xCE2CF0;
 constexpr unsigned char kRateSetterPrologue[] = {0x33, 0xC0, 0x89, 0x51,
                                                   0x60, 0x48, 0x89, 0x81};
 
-using PresentOwnerFn = std::uint64_t(__fastcall*)(void*, void*, int, void*);
+// The native presentation owner's full arity is not pinned: the traced callsite
+// passes at least a fifth (stack) argument. Forward every argument the detour
+// receives so the hook cannot silently drop one the native callee still reads.
+using PresentOwnerFn =
+    std::uint64_t(__fastcall*)(void*, void*, int, void*, std::uintptr_t);
 using RateSetterFn = void(__fastcall*)(void*, int, unsigned char);
 PresentOwnerFn g_orig = nullptr;
 void* g_owner = nullptr;
-int g_applied_fps = 0;
+
+// Pacing evidence (frame_pacing.h): the wall interval between successive native
+// frame boundaries. This detour is the only writer and runs on the game's
+// render thread, so no lock is needed. It measures the game's submission
+// cadence; the XR-reported refresh (display_rate.h) is the display's cadence.
+// K1 needs p50/p95/p99 and drop counts, which a mean/max pair cannot give.
+FramePacingTracker g_pacing;
+std::chrono::steady_clock::time_point g_last_boundary{};
+std::chrono::steady_clock::time_point g_pacing_logged{};
+constexpr auto kPacingLogInterval = std::chrono::seconds(5);
+
+void RecordPacingBoundary() {
+  const auto now = std::chrono::steady_clock::now();
+  const bool first = g_last_boundary.time_since_epoch().count() == 0;
+  if (!first) {
+    g_pacing.Record(
+        std::chrono::duration<double, std::milli>(now - g_last_boundary).count());
+    if (now - g_pacing_logged >= kPacingLogInterval) {
+      g_pacing_logged = now;
+      const PacingWindow window = g_pacing.TakeInterval();
+      EffectiveRate rate{};
+      const int target = XrEffectiveRate(rate) ? rate.effective_fps : 0;
+      DSVR_LOG("Pacing: frames=%llu mean=%.3fms (%.2fHz) p50=%.3f p95=%.3f p99=%.3f "
+               "min=%.3f max=%.3f long=%llu short=%llu rejected=%llu even=%.3f "
+               "target=%d%s",
+               (unsigned long long)window.frames, window.mean_ms, window.MeanHz(),
+               window.p50_ms, window.p95_ms, window.p99_ms, window.min_ms,
+               window.max_ms, (unsigned long long)window.long_frames,
+               (unsigned long long)window.short_frames,
+               (unsigned long long)window.rejected, window.Evenness(), target,
+               target && !PacingMatchesTarget(window, target)
+                   ? " NOT-MATCHING-RUNTIME-CADENCE" : "");
+    }
+  }
+  g_last_boundary = now;
+  if (first) g_pacing_logged = now;
+}
 
 std::uint64_t __fastcall PresentOwnerDetour(void* owner, void* arg2, int arg3,
-                                   void* arg4) {
+                                            void* arg4, std::uintptr_t arg5) {
   CpuStageScope boundary_time(CpuStage::NativeFrameBoundary);
+  RecordPacingBoundary();
   if (owner && owner != g_owner) {
+    g_pacing.Reset();
+    g_last_boundary = {};
     g_owner = owner;
-    g_applied_fps = 0;
     DSVR_LOG("FrameRate: presentation owner captured %p", owner);
   }
   if (owner && XrSessionRunning()) {
@@ -47,11 +91,10 @@ std::uint64_t __fastcall PresentOwnerDetour(void* owner, void* arg2, int arg3,
       int current = 0;
       unsigned char flag = 0;
       if (GuardedRead((std::uintptr_t)owner + 0x60, current) &&
-          ShouldApplyNativeRate(current, rate.effective_fps, g_applied_fps) &&
+          ShouldApplyNativeRate(current, rate.effective_fps) &&
           GuardedRead((std::uintptr_t)owner + 0x68, flag)) {
         auto setter = (RateSetterFn)(ModuleBase(nullptr) + kRateSetterRva);
         setter(owner, rate.effective_fps, flag);
-        g_applied_fps = rate.effective_fps;
         DSVR_LOG("FrameRate: applied effective=%d (native rate was %d, "
                  "source=%s runtime=%.3fHz requested=%d) via native setter",
                  rate.effective_fps, current,
@@ -60,7 +103,7 @@ std::uint64_t __fastcall PresentOwnerDetour(void* owner, void* arg2, int arg3,
       }
     }
   }
-  return g_orig(owner, arg2, arg3, arg4);
+  return g_orig(owner, arg2, arg3, arg4, arg5);
 }
 
 }  // namespace
@@ -106,9 +149,15 @@ bool FrameRateHookInstall(bool vr_enabled) {
 void FrameRateHookUninstall() {
   if (g_orig) {
     std::uintptr_t base = ModuleBase(nullptr);
-    MH_DisableHook((void*)(base + kPresentOwnerRva));
+    const auto target = (void*)(base + kPresentOwnerRva);
+    MH_DisableHook(target);
+    MH_RemoveHook(target);
     g_orig = nullptr;
   }
+  g_owner = nullptr;
+  g_pacing.Reset();
+  g_last_boundary = {};
+  g_pacing_logged = {};
 }
 
 }  // namespace dsvr

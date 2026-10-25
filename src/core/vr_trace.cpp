@@ -7,12 +7,14 @@
 #include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <mutex>
 #include <string>
 
 #include "../common/logging.h"
 #include "../common/memory.h"
 #include "../common/version.h"
+#include "combat_native.h"
 
 namespace dsvr {
 namespace {
@@ -21,6 +23,8 @@ std::array<VrTraceEvent, 4096> g_events{};
 std::mutex g_mutex;
 std::size_t g_count = 0;
 std::atomic<unsigned long> g_dropped{0};
+std::atomic<unsigned long> g_contended{0};
+unsigned long g_queue_peak = 0;  // guarded by g_mutex
 std::atomic<unsigned long long> g_until_ms{0};
 std::atomic<std::uint64_t> g_render_frames{0};
 std::atomic<std::uint64_t> g_native_state_samples{0};
@@ -34,6 +38,20 @@ std::atomic<TraceCaptureState> g_state{TraceCaptureState::Idle};
 std::uint64_t g_written = 0;  // writer thread only
 bool g_io_error = false;
 bool g_interrupted = false;
+long long g_qpc_hz = 0;
+unsigned long long g_health_until = 0;
+std::uint64_t g_health_written = 0;
+struct CombatTraceHealth {
+  unsigned contacts = 0, unstable = 0, limited = 0;
+  long long native_ticks = 0, observer_ticks = 0;
+  long long native_max = 0, observer_max = 0;
+};
+CombatTraceHealth g_combat_health;  // writer thread only
+std::atomic<int> g_hook_domain{-1}; // -1 unselected, 0 full, 1 combat; immutable
+
+// A multi-record observation is admitted atomically or dropped in full.
+// Producers never wait, format text, allocate, or perform file I/O.
+void RecordBatch(const VrTraceEvent* events, std::size_t count);
 
 using WaitFn = void(__fastcall*)(void*, unsigned);
 using RenderFn = void(__fastcall*)(void*, int);
@@ -62,7 +80,20 @@ using StepFn = void(__fastcall*)(void*, float, void*);
 StepFn g_stay_step = nullptr, g_game_step = nullptr, g_load_step = nullptr;
 using ContactFn = std::uint64_t(__fastcall*)(void*);
 ContactFn g_contact = nullptr;
+// Detail accounting is split three ways so a ceiling can never again hide the
+// operator's own swing: every callback is counted, callbacks that positively do
+// not involve the local player are excluded cheaply, and only the rest spend
+// the 256-batch detail budget. All reset per capture in VrTraceBegin.
+// Detail batches per capture. The counter keeps counting past the ceiling (a
+// fetch_add is the only way to make the ceiling hard under re-entry), so the
+// footer reports the clamped number of batches actually written.
+constexpr unsigned kContactDetailBatches = 256;
 std::atomic<unsigned> g_contact_samples{0};
+std::atomic<unsigned long long> g_contact_total{0};
+std::atomic<unsigned> g_contact_non_player{0};
+std::atomic<unsigned> g_contact_refused{0};
+std::atomic<std::uintptr_t> g_contact_player{0};
+std::atomic<unsigned long long> g_contact_player_until{0};
 #endif
 thread_local std::uint64_t g_render_scope = 0;
 
@@ -144,50 +175,155 @@ struct ContactActor {
   int hp=0, stamina=0;
 };
 
-bool ReadContactActor(std::uintptr_t address, ContactActor& out) {
+// Serialized nibble values: keep these stable; tools/vr_trace.py decodes them.
+enum class ContactRead : unsigned {
+  Valid, Address, Vtable, Type, Handle, Stats, Range, Record, Changed, NotAdmitted
+};
+ContactRead ReadContactActor(std::uintptr_t address, ContactActor& out) {
   // Type 1 is corroborated by native 3c4020/3c4140 dispatch and the
   // pinned PlayerIns vtable +0x10 getter. Never invoke that getter.
   constexpr unsigned char type_one[]{0xb8,1,0,0,0,0xc3};
+  GuardedReadScope reads;
   ContactActor actor{}; actor.address=address;
   std::uintptr_t getter=0;
   const auto base=ModuleBase(nullptr);
-  if (!base || address<0x10000 || address>UINTPTR_MAX-0x3fc ||
-      !GuardedRead(address,actor.vtable) || actor.vtable<base ||
-      actor.vtable-base>0x319b000-0x18 ||
-      !GuardedRead(actor.vtable+0x10,getter) || getter!=base+0x339f30 ||
-      !BytesMatch(getter,type_one,sizeof(type_one)) ||
-      !GuardedRead(address+8,actor.handle) ||
-      !GuardedRead(address+0x3e8,actor.hp) ||
-      !GuardedRead(address+0x3f8,actor.stamina) ||
-      actor.hp<0 || actor.hp>10000000 || actor.stamina<0 || actor.stamina>10000000)
-    return false;
+  if (!base || address<0x10000 || address>UINTPTR_MAX-0x3fc)
+    return ContactRead::Address;
+  if (!GuardedRead(address,actor.vtable) || actor.vtable<base ||
+      actor.vtable-base>0x319b000-0x18) return ContactRead::Vtable;
+  if (!GuardedRead(actor.vtable+0x10,getter) || getter!=base+0x339f30 ||
+      !BytesMatch(getter,type_one,sizeof(type_one))) return ContactRead::Type;
+  if (!GuardedRead(address+8,actor.handle)) return ContactRead::Handle;
+  if (!GuardedRead(address+0x3e8,actor.hp) ||
+      !GuardedRead(address+0x3f8,actor.stamina)) return ContactRead::Stats;
+  if (actor.hp<0 || actor.hp>10000000 || actor.stamina<0 || actor.stamina>10000000)
+    return ContactRead::Range;
   out=actor;
-  return true;
+  return ContactRead::Valid;
 }
 
 std::uint64_t __fastcall ContactDetour(void* record) {
   if (!VrTraceActive()) return g_contact(record);
   const auto capture=VrTraceCaptureId();
+  const auto total=g_contact_total.fetch_add(1)+1;
+  const auto observe_start=VrTraceClock();
+  const auto object=reinterpret_cast<std::uintptr_t>(record);
+  std::uintptr_t actors[2]{};
+  const bool pair_ok=object>=0x10000 && object<=UINTPTR_MAX-0x140 &&
+      GuardedReadBytes(object+0x130,actors,sizeof(actors));
+  // The record's own motion fields, read while the record is still the freshly
+  // remembered guarded scope, so they cost no extra permission query. The record
+  // is the caller's stack object: FUN_1403c7520 initializes it at RSP+0x20 and
+  // passes it to this function, and its own decompile places the actor pair at
+  // +0x130/+0x138 (already proven at runtime by this hook), a normalized
+  // direction whose w is forced to zero at +0xF0, and a (current-previous)*60
+  // velocity at +0x150. Two consequences for how these are read. The direction
+  // is zeroed or infinite when the native source delta was degenerate, so a
+  // non-unit length is a question, not a refutation; each read still sets its own
+  // bit and the unit-length test is reported rather than assumed. The velocity is
+  // native world units per second under the game's own fixed 60 Hz assumption, so
+  // the analyzer converts it with the applied world scale before comparing it
+  // with our metres-per-second tip speed. These are pre-dispatch values: the
+  // swing state that produced this contact. Motion is additive evidence; older
+  // captures lack it entirely.
+  float direction[4]{},velocity[4]{};
+  unsigned motion_flags=0;
+  if (object>=0x10000 && object<=UINTPTR_MAX-0x160) {
+    if (GuardedReadBytes(object+0xF0,direction,sizeof(direction))) {
+      motion_flags|=1u;
+      bool finite=true;
+      for (float value:direction) finite=finite&&std::isfinite(value);
+      if (finite) {
+        motion_flags|=4u;
+        const float length=std::sqrt(direction[0]*direction[0]+
+            direction[1]*direction[1]+direction[2]*direction[2]);
+        if (length>0.95f&&length<1.05f) motion_flags|=8u;
+      }
+    }
+    if (GuardedReadBytes(object+0x150,velocity,sizeof(velocity))) {
+      motion_flags|=2u;
+      bool finite=true;
+      for (float value:velocity) finite=finite&&std::isfinite(value);
+      if (finite) motion_flags|=16u;
+    }
+  }
+  // Spend the detail budget on contacts the local player can be part of. A
+  // blind per-capture count used to burn all 256 batches on NPC traffic, so
+  // the operator's own swing arrived with no detail. Identity is refreshed at
+  // 10 Hz and the pointer used is recorded, so staleness during a scene change
+  // is visible rather than silent. Unknown identity admits everything:
+  // exclusion needs positive knowledge, not absence of evidence.
+  const auto now_ms=GetTickCount64();
+  if (now_ms>=g_contact_player_until.load(std::memory_order_relaxed)) {
+    std::uintptr_t fresh=0;
+    if (!CombatNativeLocalPlayer(fresh)) fresh=0;
+    g_contact_player.store(fresh,std::memory_order_relaxed);
+    g_contact_player_until.store(now_ms+100,std::memory_order_relaxed);
+  }
+  const std::uintptr_t player=g_contact_player.load(std::memory_order_relaxed);
+  const bool involves_player=player==0 ||
+      (pair_ok && (actors[0]==player || actors[1]==player));
+  if (!involves_player) {
+    const auto excluded=g_contact_non_player.fetch_add(1);
+    if (excluded<8) {  // bounded proof the filter ran, never silent loss
+      VrTraceEvent x{};x.event="native_combat_excluded";
+      x.capture_id=capture;x.seq=total;x.object=object;
+      PointerLimbs(actors[0],x.values);PointerLimbs(actors[1],x.values+4);
+      PointerLimbs(player,x.values+8);
+      x.values[12]=static_cast<float>(total&0xffffu);
+      x.values[13]=static_cast<float>((total>>16)&0xffffu);
+      x.duration_qpc=VrTraceClock()-observe_start;
+      VrTraceRecord(x);
+    }
+    return g_contact(record);
+  }
   const auto sample=g_contact_samples.fetch_add(1);
-  if (sample>=256) {
-    if (sample==256) {
+  if (sample>=kContactDetailBatches) {
+    const auto refused=g_contact_refused.fetch_add(1);
+    if (refused<8) {  // the ceiling is reported, not merely reached once
       VrTraceEvent limit{};limit.event="native_combat_limit";
-      limit.capture_id=capture;limit.seq=sample+1;
+      limit.capture_id=capture;limit.seq=total;limit.object=object;
+      limit.values[0]=static_cast<float>(total&0xffffu);
+      limit.values[1]=static_cast<float>((total>>16)&0xffffu);
+      limit.values[2]=static_cast<float>(sample);
+      limit.values[3]=static_cast<float>(refused);
+      limit.values[4]=static_cast<float>(
+          g_contact_non_player.load(std::memory_order_relaxed));
       VrTraceRecord(limit);
     }
     return g_contact(record);
   }
   VrTraceEvent e{};
   e.capture_id=capture;e.seq=sample+1;e.event="native_combat_contact";
-  e.object=reinterpret_cast<std::uintptr_t>(record);
-  std::uintptr_t actors[2]{};
+  e.object=object;
+  // 1405290C0 builds the attack payload, 1403C5620 copies it to event+44,
+  // and 1403C7520 copies event+44 back to this record's base. These are
+  // context-relative offsets, NOT serialized PARAM-row offsets. Keep signed
+  // IDs as 16-bit limbs and read before native dispatch can alter the record.
+  std::uint32_t context_fields[6]{};
+  std::uint32_t event_handle=0;
+  unsigned char context_flags[2]{};
+  unsigned context_reads=0;
+  if (object>=0x10000 && object<=UINTPTR_MAX-0xca) {
+    if (GuardedReadBytes(object+0x34,context_fields,sizeof(context_fields)))
+      context_reads|=1u;
+    if (GuardedReadBytes(object+0xc8,context_flags,sizeof(context_flags)))
+      context_reads|=2u;
+  }
+  // 1403C7520 copies the event's generated handle into record+140. The
+  // record pointer itself is a reused stack address. A handle is an observed
+  // identity token; pool ownership/generation still needs native validation.
+  if (object>=0x10000 && object<=UINTPTR_MAX-0x144 &&
+      GuardedRead(object+0x140,event_handle)) context_reads|=4u;
   ContactActor before[2]{};
   bool admitted[2]{};
-  if (e.object>=0x10000 && e.object<=UINTPTR_MAX-0x140 &&
-      GuardedReadBytes(e.object+0x130,actors,sizeof(actors))) {
+  ContactRead read_before[2]{ContactRead::Record,ContactRead::Record};
+  ContactRead read_after[2]{ContactRead::Record,ContactRead::Record};
+  if (pair_ok) {
     for (unsigned side=0;side<2;++side) {
       PointerLimbs(actors[side],e.values+side*4);
-      admitted[side]=ReadContactActor(actors[side],before[side]);
+      read_before[side]=ReadContactActor(actors[side],before[side]);
+      admitted[side]=read_before[side]==ContactRead::Valid;
       if (admitted[side]) {
         e.flags|=1u<<side;
         e.values[8+side*4]=static_cast<float>(before[side].hp);
@@ -197,7 +333,8 @@ std::uint64_t __fastcall ContactDetour(void* record) {
   }
   const auto start=VrTraceClock();
   const auto result=g_contact(record); // natural dispatch exactly once
-  e.duration_qpc=VrTraceClock()-start;
+  const auto native_end=VrTraceClock();
+  e.duration_qpc=native_end-start;
   // Preserve raw return bits separately from read-validity flags. Neither
   // return nor an HP delta alone certifies a physical hit or defence event.
   e.native_rate=static_cast<unsigned>(result);
@@ -206,16 +343,78 @@ std::uint64_t __fastcall ContactDetour(void* record) {
       GuardedReadBytes(e.object+0x130,current,sizeof(current))) {
     for (unsigned side=0;side<2;++side) {
       ContactActor after{};
-      if (admitted[side] && current[side]==actors[side] &&
-          ReadContactActor(current[side],after) &&
-          after.vtable==before[side].vtable && after.handle==before[side].handle) {
-        e.flags|=1u<<(side+2);
-        e.values[9+side*4]=static_cast<float>(after.hp);
-        e.values[11+side*4]=static_cast<float>(after.stamina);
+      if (!admitted[side]) { read_after[side]=ContactRead::NotAdmitted; continue; }
+      if (current[side]!=actors[side]) { read_after[side]=ContactRead::Changed; continue; }
+      read_after[side]=ReadContactActor(current[side],after);
+      if (read_after[side]!=ContactRead::Valid) continue;
+      if (after.vtable!=before[side].vtable || after.handle!=before[side].handle) {
+        read_after[side]=ContactRead::Changed;
+        continue;
       }
+      e.flags|=1u<<(side+2);
+      e.values[9+side*4]=static_cast<float>(after.hp);
+      e.values[11+side*4]=static_cast<float>(after.stamina);
     }
   }
-  VrTraceRecord(e);
+  // Preserve the identities already checked above so a later analyst can
+  // distinguish actor reuse across callbacks. Float payloads carry 16-bit
+  // limbs, never lossy 32/64-bit pointer, handle or return-value conversions.
+  // Pair with native_combat_contact by (thread, seq, object); flags have the
+  // same before/after validity bits. Neither record proves damage attribution.
+  VrTraceEvent identity=e;
+  identity.event="native_combat_identity";
+  for (float& value:identity.values) value=0;
+  for (unsigned side=0;side<2;++side) {
+    if (!admitted[side]) continue;
+    PointerLimbs(before[side].vtable,identity.values+side*4);
+    identity.values[8+side*2]=static_cast<float>(before[side].handle&0xffff);
+    identity.values[9+side*2]=static_cast<float>(before[side].handle>>16);
+  }
+  PointerLimbs(static_cast<std::uintptr_t>(result),identity.values+12);
+  // The payload was captured above, before the native call; the record is
+  // emitted after the identity record so the batch stays ordered by role.
+  VrTraceEvent motion=e;
+  motion.event="native_combat_motion";
+  motion.flags=motion_flags;
+  for (float& value:motion.values) value=0;
+  if (motion_flags&4u) {
+    for (unsigned i=0;i<4;++i) motion.values[i]=direction[i];
+    motion.values[8]=std::sqrt(direction[0]*direction[0]+
+        direction[1]*direction[1]+direction[2]*direction[2]);
+  }
+  if (motion_flags&16u) {
+    for (unsigned i=0;i<4;++i) motion.values[4+i]=velocity[i];
+    motion.values[9]=std::sqrt(velocity[0]*velocity[0]+
+        velocity[1]*velocity[1]+velocity[2]*velocity[2]);
+  }
+  VrTraceEvent diagnostics=e;
+  diagnostics.event="native_combat_diagnostics";
+  diagnostics.flags=0;
+  for (float& value:diagnostics.values) value=0;
+  for(unsigned side=0;side<2;++side) {
+    diagnostics.flags|=static_cast<unsigned>(read_before[side])<<(side*4);
+    diagnostics.flags|=static_cast<unsigned>(read_after[side])<<(8+side*4);
+  }
+  // Read/assembly CPU cost only: excludes native execution and queue admission.
+  // It is not a total-hook or game/VR performance measurement.
+  VrTraceEvent context=e;
+  context.event="native_combat_context";
+  context.flags=context_reads;
+  for (float& value:context.values) value=0;
+  if (context_reads&1u) for (unsigned i=0;i<6;++i) {
+    context.values[i*2]=static_cast<float>(context_fields[i]&0xffffu);
+    context.values[i*2+1]=static_cast<float>(context_fields[i]>>16);
+  }
+  if (context_reads&2u) {
+    context.values[12]=context_flags[0];context.values[13]=context_flags[1];
+  }
+  if (context_reads&4u) {
+    context.values[14]=static_cast<float>(event_handle&0xffffu);
+    context.values[15]=static_cast<float>(event_handle>>16);
+  }
+  diagnostics.duration_qpc=(start-observe_start)+(VrTraceClock()-native_end);
+  const VrTraceEvent batch[]{e,identity,motion,diagnostics,context};
+  RecordBatch(batch,std::size(batch));
   return result;
 }
 #endif
@@ -379,16 +578,11 @@ bool Hook(std::uintptr_t rva, const unsigned char* bytes, std::size_t size,
   return true;
 }
 
-}  // namespace
-
-long long VrTraceClock() {
-  LARGE_INTEGER now{};
-  QueryPerformanceCounter(&now);
-  return now.QuadPart;
-}
-
-void VrTraceRecord(VrTraceEvent event) {
-  const auto capture = event.capture_id ? event.capture_id : g_capture_id.load();
+void RecordBatch(const VrTraceEvent* events, std::size_t count) {
+  if(g_hook_domain.load(std::memory_order_relaxed)==1 &&
+     std::strncmp(events[0].event,"native_combat_",14)!=0 &&
+     std::strcmp(events[0].event,"native_step_dispatch")!=0) return;
+  const auto capture = events[0].capture_id ? events[0].capture_id : g_capture_id.load();
   if (!VrTraceActive()) return;
   // Closing can defer its acknowledgement until admitted producers finish.
   // This never waits on a hook thread, including on queue contention.
@@ -400,16 +594,39 @@ void VrTraceRecord(VrTraceEvent event) {
   if (!until || GetTickCount64() >= until ||
       g_state.load() != TraceCaptureState::Recording ||
       g_capture_id.load() != capture) return;
-  event.qpc = VrTraceClock();
-  event.thread = GetCurrentThreadId();
+  const auto qpc = VrTraceClock();
+  const auto thread = GetCurrentThreadId();
   std::unique_lock<std::mutex> lock(g_mutex, std::try_to_lock);
-  if (!lock.owns_lock() || g_count == g_events.size()) {
-    g_dropped.fetch_add(1, std::memory_order_relaxed);
+  if (!lock.owns_lock()) {
+    g_dropped.fetch_add(static_cast<unsigned long>(count), std::memory_order_relaxed);
+    g_contended.fetch_add(static_cast<unsigned long>(count), std::memory_order_relaxed);
     return;
   }
   if (g_state.load() != TraceCaptureState::Recording ||
       g_capture_id.load() != capture) return;
-  g_events[g_count++] = event;
+  if (count > g_events.size()-g_count) {
+    g_dropped.fetch_add(static_cast<unsigned long>(count), std::memory_order_relaxed);
+    return;
+  }
+  for(std::size_t i=0;i<count;++i) {
+    auto event=events[i];
+    event.qpc=qpc;
+    event.thread=thread;
+    g_events[g_count++]=event;
+  }
+  if(g_count>g_queue_peak) g_queue_peak=static_cast<unsigned long>(g_count);
+}
+
+}  // namespace
+
+long long VrTraceClock() {
+  LARGE_INTEGER now{};
+  QueryPerformanceCounter(&now);
+  return now.QuadPart;
+}
+
+void VrTraceRecord(VrTraceEvent event) {
+  RecordBatch(&event,1);
 }
 
 bool VrTraceActive() {
@@ -484,17 +701,31 @@ bool VrTraceBegin(const wchar_t* explicit_path, unsigned duration_ms) {
     std::lock_guard<std::mutex> lock(g_mutex);
     g_count = 0;
     g_dropped.store(0);
+    g_contended.store(0);
+    g_queue_peak=0;
   }
   g_written = 0;
   g_io_error = false;
   g_interrupted = false;
+  g_combat_health={};
+  g_health_written=0;
+  g_health_until=GetTickCount64()+5000;
   LARGE_INTEGER frequency{};
   QueryPerformanceFrequency(&frequency);
+  g_qpc_hz=frequency.QuadPart;
+#ifdef DSVR_ENABLE_LAB
+  const unsigned combat_schema=1,combat_hook=g_contact!=nullptr;
+#else
+  const unsigned combat_schema=0,combat_hook=0;
+#endif
   const int header = std::fprintf(g_file,
       "{\"event\":\"header\",\"qpc\":%lld,\"schema\":2,"
-      "\"pid\":%lu,\"qpc_hz\":%lld,\"duration_ms\":%u,\"mod_version\":\"%s\"}\n",
+      "\"pid\":%lu,\"qpc_hz\":%lld,\"duration_ms\":%u,\"mod_version\":\"%s\","
+      "\"combat_detail_schema\":%u,\"combat_context_schema\":%u,"
+      "\"combat_hook\":%u,\"capture_domain\":\"%s\"}\n",
       VrTraceClock(), GetCurrentProcessId(), frequency.QuadPart, duration_ms,
-      kModVersion);
+      kModVersion,combat_schema,combat_schema,combat_hook,
+      g_hook_domain.load()==1 ? "combat" : "full");
   if (header < 0 || std::fflush(g_file) != 0) {
     std::fclose(g_file);
     g_file = nullptr;
@@ -504,6 +735,11 @@ bool VrTraceBegin(const wchar_t* explicit_path, unsigned duration_ms) {
   g_capture_id.fetch_add(1);
 #ifdef DSVR_ENABLE_LAB
   g_contact_samples.store(0);
+  g_contact_total.store(0);
+  g_contact_non_player.store(0);
+  g_contact_refused.store(0);
+  g_contact_player.store(0);
+  g_contact_player_until.store(0);
 #endif
   g_until_ms.store(GetTickCount64() + duration_ms);
   g_state.store(TraceCaptureState::Recording);
@@ -516,6 +752,7 @@ void VrTracePump() {
   // Copy under lock, then perform all formatting/file writes off game hooks.
   static std::array<VrTraceEvent, 4096> batch;
   std::size_t count = 0;
+  unsigned long queue_peak=0;
   const bool finished = g_state.load() == TraceCaptureState::Closing ||
                         GetTickCount64() >= g_until_ms.load();
   if (finished) {
@@ -528,9 +765,19 @@ void VrTracePump() {
     count = g_count;
     for (std::size_t i = 0; i < count; ++i) batch[i] = g_events[i];
     g_count = 0;
+    queue_peak=g_queue_peak;
   }
   for (std::size_t i = 0; i < count; ++i) {
     const auto& e = batch[i];
+    if(std::strcmp(e.event,"native_combat_contact")==0) {
+      ++g_combat_health.contacts;
+      if(e.flags!=15) ++g_combat_health.unstable;
+      g_combat_health.native_ticks+=e.duration_qpc;
+      if(e.duration_qpc>g_combat_health.native_max) g_combat_health.native_max=e.duration_qpc;
+    } else if(std::strcmp(e.event,"native_combat_diagnostics")==0) {
+      g_combat_health.observer_ticks+=e.duration_qpc;
+      if(e.duration_qpc>g_combat_health.observer_max) g_combat_health.observer_max=e.duration_qpc;
+    } else if(std::strcmp(e.event,"native_combat_limit")==0) ++g_combat_health.limited;
     std::fprintf(g_file, "{\"event\":\"%s\",\"qpc\":%lld,\"thread\":%lu,"
                  "\"seq\":%llu,\"epoch\":%llu,\"frame\":%llu,"
                  "\"object\":\"%llx\",\"predicted_ns\":%lld,"
@@ -551,6 +798,38 @@ void VrTracePump() {
     ++g_written;
   }
   if (std::ferror(g_file) || std::fflush(g_file) != 0) g_io_error = true;
+  // The combat counters only exist in an opt-in LAB build; a non-LAB capture
+  // still reports the fields so the footer schema never changes shape.
+#ifdef DSVR_ENABLE_LAB
+  const unsigned long long combat_total = g_contact_total.load();
+  const unsigned combat_non_player = g_contact_non_player.load();
+  const unsigned combat_refused = g_contact_refused.load();
+  const unsigned written_detail = g_contact_samples.load();
+  const unsigned combat_detail =
+      written_detail < kContactDetailBatches ? written_detail
+                                             : kContactDetailBatches;
+#else
+  const unsigned long long combat_total = 0;
+  const unsigned combat_non_player = 0, combat_refused = 0, combat_detail = 0;
+#endif
+  const auto now=GetTickCount64();
+  if(finished || (now>=g_health_until && g_written!=g_health_written)) {
+    DSVR_LOG("TraceHealth: capture=%llu events=%llu queue_peak=%lu/4096 dropped=%lu "
+             "contended=%lu combat_total=%llu combat_non_player=%u combat_refused=%u "
+             "combat_samples=%u invalid_or_changed=%u detail_limit=%u "
+             "native_max_us=%.3f observer_read_max_us=%.3f io_error=%d; "
+             "natural observations only, combat binding UNVERIFIED",
+             static_cast<unsigned long long>(g_capture_id.load()),
+             static_cast<unsigned long long>(g_written),queue_peak,g_dropped.load(),
+             g_contended.load(),
+             combat_total,combat_non_player,combat_refused,
+             g_combat_health.contacts,g_combat_health.unstable,
+             g_combat_health.limited,
+             g_qpc_hz>0 ? 1e6*double(g_combat_health.native_max)/g_qpc_hz : 0,
+             g_qpc_hz>0 ? 1e6*double(g_combat_health.observer_max)/g_qpc_hz : 0,g_io_error);
+    g_health_until=now+5000;
+    g_health_written=g_written;
+  }
   if (g_io_error && !finished) {
     VrTraceRequestStop();
     return;  // next pump drains producers before acknowledging failure
@@ -558,9 +837,13 @@ void VrTracePump() {
   if (finished) {
     const int footer = std::fprintf(g_file,
         "{\"event\":\"footer\",\"qpc\":%lld,\"dropped\":%lu,\"events\":%llu,"
-        "\"interrupted\":%s,\"io_error\":%s}\n", VrTraceClock(), g_dropped.load(),
+        "\"interrupted\":%s,\"io_error\":%s,\"queue_peak\":%lu,\"contended\":%lu,"
+        "\"combat_total\":%llu,\"combat_non_player\":%u,\"combat_refused\":%u,"
+        "\"combat_detail\":%u}\n", VrTraceClock(), g_dropped.load(),
         static_cast<unsigned long long>(g_written),
-        g_interrupted ? "true" : "false", g_io_error ? "true" : "false");
+        g_interrupted ? "true" : "false", g_io_error ? "true" : "false",
+        queue_peak,g_contended.load(),
+        combat_total,combat_non_player,combat_refused,combat_detail);
     if (footer < 0 || std::fflush(g_file) != 0) g_io_error = true;
     if (std::fclose(g_file) != 0) g_io_error = true;
     g_file = nullptr;
@@ -581,8 +864,14 @@ void VrTraceFinish(bool interrupted) {
   VrTracePump();
 }
 
-bool VrTraceInstall(bool enabled) {
+static bool InstallTrace(bool enabled,bool combat_only) {
   if (!enabled) return false;
+  int expected=-1;
+  const int domain=combat_only ? 1 : 0;
+  if(!g_hook_domain.compare_exchange_strong(expected,domain) && expected!=domain) {
+    DSVR_WARN("VrTrace: capture domain change refused; restart required");
+    return false;
+  }
   const MH_STATUS status = MH_Initialize();
   if (status != MH_OK && status != MH_ERROR_ALREADY_INITIALIZED) return false;
   // Verified against pinned disk image on 2026-10-14; corpus provenance in
@@ -599,20 +888,20 @@ bool VrTraceInstall(bool enabled) {
        0xb3,0x01,0x83,0xf8,0x07,0x0f,0x87,0x9d,0x00,0x00,0x00};
   const unsigned char upload[]{0x45,0x85,0xc9,0x0f,0x84,0x8e,0x00,0x00,0x00,
       0x48,0x89,0x5c,0x24,0x10,0x48,0x89,0x6c,0x24,0x18};
-  const bool w = Hook(0xce3450, wait, sizeof(wait), reinterpret_cast<void*>(&WaitDetour),
+  const bool w = !combat_only && Hook(0xce3450, wait, sizeof(wait), reinterpret_cast<void*>(&WaitDetour),
                       reinterpret_cast<void**>(&g_wait));
-  const bool r = Hook(0x11be710, render, sizeof(render), reinterpret_cast<void*>(&RenderDetour),
+  const bool r = !combat_only && Hook(0x11be710, render, sizeof(render), reinterpret_cast<void*>(&RenderDetour),
                       reinterpret_cast<void**>(&g_render));
-  const bool c = Hook(0x245690, camera, sizeof(camera), reinterpret_cast<void*>(&CameraDetour),
+  const bool c = !combat_only && Hook(0x245690, camera, sizeof(camera), reinterpret_cast<void*>(&CameraDetour),
                         reinterpret_cast<void**>(&g_camera));
-  const bool p = Hook(0x2472d0, projection, sizeof(projection),
+  const bool p = !combat_only && Hook(0x2472d0, projection, sizeof(projection),
       reinterpret_cast<void*>(&ProjectionDetour), reinterpret_cast<void**>(&g_projection));
   std::uintptr_t consume_slot = 0;
-  const bool consumer = GuardedRead(ModuleBase(nullptr) + 0x1609070 + 0x28, consume_slot) &&
+  const bool consumer = !combat_only && GuardedRead(ModuleBase(nullptr) + 0x1609070 + 0x28, consume_slot) &&
       consume_slot == ModuleBase(nullptr) + 0x7b870 &&
       Hook(0x7b870, consume, sizeof(consume), reinterpret_cast<void*>(&CameraConsumeDetour),
             reinterpret_cast<void**>(&g_camera_consume));
-  const bool u = Hook(0xcd0a10, upload, sizeof(upload),
+  const bool u = !combat_only && Hook(0xcd0a10, upload, sizeof(upload),
       reinterpret_cast<void*>(&ConstantUploadDetour),
       reinterpret_cast<void**>(&g_constant_upload));
   bool input_blockers = false;
@@ -632,12 +921,12 @@ bool VrTraceInstall(bool enabled) {
       0x48,0x89,0x74,0x24,0x18,0x57,0x48,0x83,0xec,0x20,0x33,0xdb};
   const unsigned char blockers_return[]{0x48,0x8b,0xc7,0x48,0x8b,0x6c,0x24,0x38,
       0x48,0x8b,0x74,0x24,0x40,0x48,0x83,0xc4,0x20,0x5f,0xc3};
-  if (BytesMatch(ModuleBase(nullptr) + 0x71afd0, blockers_return,
+  if (!combat_only && BytesMatch(ModuleBase(nullptr) + 0x71afd0, blockers_return,
                  sizeof(blockers_return))) {
     input_blockers = Hook(0x71ac10, blockers, sizeof(blockers),
         reinterpret_cast<void*>(&InputBlockersDetour),
         reinterpret_cast<void**>(&g_input_blockers));
-  } else DSVR_WARN("VrTrace: input-blocker return ABI signature mismatch; observer disabled");
+  } else if(!combat_only) DSVR_WARN("VrTrace: input-blocker return ABI signature mismatch; observer disabled");
   // RTTI corroborates each class; slot +0x10 dispatches its state table at +0x20.
   // ABI bytes preserve XMM1 and R8, not the decompiler's guessed signature.
   const unsigned char step[]{0x48,0x89,0x5c,0x24,0x08,0x48,0x89,0x74,0x24,0x10,
@@ -672,7 +961,17 @@ bool VrTraceInstall(bool enabled) {
            "raw states never grant scene identity or readiness)", native_steps);
   DSVR_LOG("VrTrace: lab native combat observer=%d (natural calls, at most 256/capture; "
            "raw before/after HP/stamina, no injected damage or feedback)", native_contacts);
-  return w && r && c && p && consumer && u;
+  return combat_only ? native_contacts && native_steps==7 : w && r && c && p && consumer && u;
+}
+
+bool VrTraceInstall(bool enabled) { return InstallTrace(enabled,false); }
+bool VrTraceInstallCombat() {
+#ifdef DSVR_ENABLE_LAB
+  return InstallTrace(true,true);
+#else
+  DSVR_WARN("VrTrace: combat-only observation requires an opt-in LAB build");
+  return false;
+#endif
 }
 
 }  // namespace dsvr

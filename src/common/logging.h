@@ -5,8 +5,9 @@
 
 namespace dsvr {
 
-// Thread-safe file logger. Every line is flushed so crash logs are complete.
-// Call Init once (loader or core, whichever runs first wins); Shutdown flushes.
+// Synchronous thread-safe text logger: ordinary lines append without a disk
+// barrier; errors and shutdown flush. Keep high-rate hook data in VrTrace's
+// bounded queue, not here. Loader/core each own their static-library instance.
 enum class LogLevel { Info, Warn, Error };
 
 bool LogInit(const wchar_t* log_path);

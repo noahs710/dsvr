@@ -447,10 +447,10 @@ bool CameraApplyFirstPerson(void* follow_cam_self, float qx, float qy,
       head_pos = bounded;
     }
   }
-  // The head bone always ends at the real camera-facing position just
-  // below the eyes (head_rider.h) instead of watching the torso solver
-  // carry the neck away. Outrunning roots are clipped inside that
-  // helper, and the rider delta never feeds back into camera position.
+  // The native Neck->Head chain follows this tracked frame by rigid rotation
+  // at its actual neck pivot. Skull origin and tracked eye are not the same
+  // point: never stretch a bone to bridge them or feed the solved skeleton
+  // back into this view (which would add animation bob or double head motion).
 
   CpuStageScope writes_time(CpuStage::CameraWrites);
   auto self = (std::uintptr_t)follow_cam_self;
@@ -570,11 +570,25 @@ bool CameraHeadBasis(Vec3& right, Vec3& up, Vec3& fwd) {
   return true;
 }
 
+// The locomotion basis is the planar heading of the camera we just wrote. When
+// it cannot be produced the left stick falls back to raw, so name the reason
+// once instead of letting the player discover it as an unresponsive control.
+int g_locomotion_refusal_logs = 0;
+void LogLocomotionRefusal(const char* why) {
+  if (g_locomotion_refusal_logs >= 3) return;
+  ++g_locomotion_refusal_logs;
+  DSVR_WARN("Camera: head-directed locomotion basis refused (%s); the left stick "
+            "stays raw until the written camera heading is readable", why);
+}
+
 void CameraPublishHeadDirectedLocomotion(std::uint64_t space_epoch) {
   GuardedReadScope memory_reads;
   Vec3 native_forward{};
   if (!space_epoch || !g_captured || !g_wrote ||
       !ReadPlayerRenderFacing(native_forward)) {
+    LogLocomotionRefusal(!space_epoch ? "no tracking epoch"
+                       : !g_captured || !g_wrote ? "camera never written"
+                                                 : "native render facing unreadable");
     InputInvalidateHeadDirectedLocomotion();
     return;
   }
@@ -604,6 +618,7 @@ void CameraPublishHeadDirectedLocomotion(std::uint64_t space_epoch) {
     g_have_planar_heading = true;
   }
   if (!g_have_planar_heading) {
+    LogLocomotionRefusal("written camera heading not planar");
     InputInvalidateHeadDirectedLocomotion();
     return;
   }

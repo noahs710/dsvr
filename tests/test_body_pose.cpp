@@ -12,6 +12,8 @@
 namespace {
 using namespace dsvr;
 
+#include "native_idle_pose.inc"
+
 int g_checks = 0;
 int g_failures = 0;
 #define CHECK(cond)                                                     \
@@ -34,13 +36,18 @@ Vec3 Sub(Vec3 a, Vec3 b) { return VAdd(a, VScale(b, -1)); }
 ArmPoseMatrix Pose(Vec3 position) {
   return {{1, 0, 0, position.x, 0, 1, 0, position.y, 0, 0, 1, position.z}};
 }
+// Idealized form of the independently captured c0000 Head basis: +0 up,
+// +1 left, +2 facing. Other bones retain their own authored conventions.
+ArmPoseMatrix HeadPose(Vec3 position) {
+  return {{0, 1, 0, position.x, 1, 0, 0, position.y, 0, 0, -1, position.z}};
+}
 
 // 0 root, 1 spine, 2 chest, 3 neck, 4 head, 5..7 left arm, 8..10 right
 // arm, 11 pelvis (outside the spine subtree).
 struct Rig {
   std::array<ArmPoseMatrix, 12> poses{
       Pose({0, 0, 0}),    Pose({0, 1.0f, 0}),   Pose({0, 1.2f, 0}),
-      Pose({0, 1.45f, 0}), Pose({0, 1.6f, 0}),  Pose({-0.2f, 1.35f, 0}),
+      Pose({0, 1.45f, 0}), HeadPose({0, 1.6f, 0}),  Pose({-0.2f, 1.35f, 0}),
       Pose({-0.5f, 1.35f, 0}), Pose({-0.75f, 1.35f, 0}),
       Pose({0.2f, 1.35f, 0}),  Pose({0.5f, 1.35f, 0}),
       Pose({0.75f, 1.35f, 0}), Pose({0, 0.9f, 0})};
@@ -58,6 +65,55 @@ ArmPoseMatrix RootReflected(Vec3 t = {10, 0, 10}) {
 }
 Vec3 WorldPoint(const ArmPoseMatrix& root, Vec3 model) {
   return ArmPoseTransformPoint(root, model);
+}
+
+void CheckNativeNeckFrame() {
+  std::array<ArmPoseMatrix,80> poses{};
+  for (unsigned bone=0;bone<poses.size();++bone)
+    for (unsigned j=0;j<12;++j) poses[bone].m[j]=kNativePoseSample0[bone*12+j];
+  const auto before=poses;
+  const TorsoBones bones{2,16,17,18,19,15};
+  const ArmPoseMatrix root=RootYawPi({0,0,0});
+  // Independent native capture: Head column 0 points up, column 2 faces
+  // along the model's -Z. Identity test bones had hidden the reversed axis.
+  CHECK(VDot(VNorm(arm_pose_detail::Column(poses[19],0)),Vec3{0,1,0})>.99f);
+  CHECK(VDot(VNorm(arm_pose_detail::Column(poses[19],2)),Vec3{0,0,-1})>.99f);
+  TorsoPoseResult out;
+  CHECK(SolveTorsoPose(poses,kNativeParents,bones,root,{1,0,0},{0,0,1},0,0,
+                      {1,0,0},{0,1,0},{0,0,1},out));
+  // A neutral wearer must not force a near-half-turn correction to its cap.
+  CHECK(out.snap_applied<.05f);
+  CHECK(VDot(VNorm(ArmPoseTransformPoint(root,arm_pose_detail::Column(poses[19],2))),
+             Vec3{0,0,1})>.999f);
+  CHECK(Near(VLen(Sub(ArmPoseOrigin(poses[19]),ArmPoseOrigin(poses[18]))),
+             VLen(Sub(ArmPoseOrigin(before[19]),ArmPoseOrigin(before[18])))));
+  // Captured origins/bases remain independent of the solver's expected answer.
+  // Small combined yaw/pitch/roll fits the existing total neck correction cap.
+  for (float scale:{.5f,1.f,2.f})
+    for (float yaw:{-.2f,0.f,.2f}) for (float pitch:{-.25f,0.f,.25f})
+      for (float roll:{-.2f,0.f,.2f}) {
+        poses=before;
+        auto scaled=root;
+        for (int row=0;row<3;++row) for (int col=0;col<3;++col) scaled.m[row*4+col]*=scale;
+        const Vec3 cf{std::sin(yaw)*std::cos(pitch),std::sin(pitch),std::cos(yaw)*std::cos(pitch)};
+        const Vec3 flat_right{std::cos(yaw),0,-std::sin(yaw)};
+        const Vec3 flat_up=VCross(cf,flat_right);
+        const Vec3 cr=VAdd(VScale(flat_right,std::cos(roll)),VScale(flat_up,std::sin(roll)));
+        const Vec3 cu=VAdd(VScale(flat_up,std::cos(roll)),VScale(flat_right,-std::sin(roll)));
+        CHECK(SolveTorsoPose(poses,kNativeParents,bones,scaled,{1,0,0},{0,0,1},0,0,cr,cu,cf,out));
+        CHECK(out.valid && out.snap_applied<=kHeadSnapCapRad+1e-5f);
+        CHECK(VDot(VNorm(ArmPoseTransformPoint(scaled,arm_pose_detail::Column(poses[19],2))),cf)>.99999f);
+        CHECK(VDot(VNorm(ArmPoseTransformPoint(scaled,arm_pose_detail::Column(poses[19],0))),cu)>.99999f);
+        CHECK(VNear(ArmPoseOrigin(poses[18]),ArmPoseOrigin(before[18]),1e-6f));
+        CHECK(Near(VLen(Sub(ArmPoseOrigin(poses[19]),ArmPoseOrigin(poses[18]))),
+                   VLen(Sub(ArmPoseOrigin(before[19]),ArmPoseOrigin(before[18]))),1e-6f));
+        for (int bone:{18,19}) for (int axis=0;axis<3;++axis)
+          CHECK(Near(VLen(arm_pose_detail::Column(poses[bone],axis)),
+                     VLen(arm_pose_detail::Column(before[bone],axis)),1e-5f));
+        for (unsigned bone=0;bone<poses.size();++bone)
+          if (!arm_pose_detail::InSubtree(static_cast<int>(bone),18,kNativeParents))
+            CHECK(std::memcmp(&poses[bone],&before[bone],sizeof(ArmPoseMatrix))==0);
+      }
 }
 
 void CheckTorsoContracts() {
@@ -83,9 +139,11 @@ void CheckTorsoContracts() {
     Rig rig;TorsoPoseResult out;
     CHECK(SolveTorsoPose(rig.poses,rig.parents,bones,RootYawPi(),
         heading_r,heading_f,0,0,right,{0,0,-1},up,out));
-    const float actual=RelativeYaw(facing(rig,3,RootYawPi()),right,forward);
-    CHECK(Near(actual,kTorsoCorrectionLimitRad,1e-3f));
-    CHECK(Near(actual,out.applied_delta,1e-3f));
+    // Neck is a separate tracked joint, not a proxy for torso yaw. The chest
+    // carries 45% + 35% of the capped .8-radian correction; gaze is vertical.
+    const float actual=RelativeYaw(facing(rig,2,RootYawPi()),right,forward);
+    CHECK(Near(actual,.64f,1e-3f));
+    CHECK(Near(out.applied_delta,kTorsoCorrectionLimitRad,1e-3f));
   }
   {
     Rig rig;const auto before=rig.poses;TorsoPoseResult out;
@@ -385,18 +443,26 @@ int main() {
     CHECK(zero[0] == 0 && zero[1] == 0 && zero[2] == 0);
   }
 
-  // Torso target: head yaw with a small deadband.
-  // Small glances stay head-only; larger turns move the chest 1:1.
-    {
+  // Torso target: the gaze lock. Head yaw inside the micromovement band
+  // stays head-only; past it the chest follows the gaze, never softer than
+    // 1:1, until the anatomical twist bound caps the offset.
+      {
       auto turned = [&](float yaw) {
         return VAdd(VScale(kFwd, std::cos(yaw)), VScale(kRight, std::sin(yaw)));
     };
-    CHECK(Near(TorsoTargetYaw(turned(0.05f), kRight, kFwd), 0.0f, 1e-3f));
-    CHECK(Near(TorsoTargetYaw(turned(-0.05f), kRight, kFwd), 0.0f, 1e-3f));
-    // Deadband recenters the response: 0.6 rad in maps to
-    // (0.6-0.12)/(0.8-0.12)*0.8 = 0.5647 rad out.
-    CHECK(Near(TorsoTargetYaw(turned(0.6f), kRight, kFwd), 0.5647f, 1e-3f));
-    CHECK(Near(TorsoTargetYaw(turned(3.0f), kRight, kFwd), 0.8f, 1e-3f));
+    CHECK(Near(TorsoTargetYaw(turned(0.03f), kRight, kFwd), 0.0f, 1e-3f));
+    CHECK(Near(TorsoTargetYaw(turned(-0.03f), kRight, kFwd), 0.0f, 1e-3f));
+    // The band recenters the response, so just past it the lock is 1:1:
+    // (0.05-db)/(limit-db)*limit = 0.0157 rad out for a 2.9 deg glance.
+    const float edge = (0.05f - kTorsoLookDeadbandRad) /
+        (kTorsoTwistLimitRad - kTorsoLookDeadbandRad) * kTorsoTwistLimitRad;
+    CHECK(Near(TorsoTargetYaw(turned(0.05f), kRight, kFwd), edge, 1e-3f));
+    CHECK(Near(TorsoTargetYaw(turned(-0.05f), kRight, kFwd), -edge, 1e-3f));
+    CHECK(Near(TorsoTargetYaw(turned(0.6f), kRight, kFwd), 0.5909f, 1e-3f));
+    CHECK(TorsoTargetYaw(turned(0.6f), kRight, kFwd) >=
+          0.6f - kTorsoLookDeadbandRad);
+    CHECK(Near(TorsoTargetYaw(turned(3.0f), kRight, kFwd), kTorsoTwistLimitRad,
+               1e-3f));
   }
 
     // The head alone steers the torso.
@@ -405,7 +471,7 @@ int main() {
           return VAdd(VScale(kFwd, std::cos(yaw)), VScale(kRight, std::sin(yaw)));
       };
     const Vec3 head = turned(0.3f);
-        CHECK(Near(TorsoTargetYaw(head, kRight, kFwd), 0.2118f, 1e-3f));
+        CHECK(Near(TorsoTargetYaw(head, kRight, kFwd), 0.2771f, 1e-3f));
     }
 
   // Lean pitch share: deadband, proportion, cap.
@@ -422,7 +488,7 @@ int main() {
     struct Rig2 {
       std::array<ArmPoseMatrix, 13> poses{
           Pose({0, 0, 0}), Pose({0, 0.85f, 0}), Pose({0, 1.0f, 0}),
-          Pose({0, 1.2f, 0}), Pose({0, 1.45f, 0}), Pose({0, 1.6f, 0}),
+          Pose({0, 1.2f, 0}), Pose({0, 1.45f, 0}), HeadPose({0, 1.6f, 0}),
           Pose({-0.2f, 1.35f, 0}), Pose({-0.5f, 1.35f, 0}),
           Pose({-0.75f, 1.35f, 0}), Pose({0.2f, 1.35f, 0}),
           Pose({0.5f, 1.35f, 0}), Pose({0.75f, 1.35f, 0}),
@@ -436,7 +502,7 @@ int main() {
     };
     auto facing_of = [&](const Rig2& r, int bone) {
       const Vec3 c2 = arm_pose_detail::Column(r.poses[bone], 2);
-      return VNorm(Sub({}, WorldPoint(root, c2)));
+      return VNorm(WorldPoint(root, c2));
     };
     // Head turned +0.5 with matching camera: shoulders arrive, pelvis
     // lags at half, head bone faces the camera.
@@ -467,9 +533,8 @@ int main() {
       CHECK(Near(out.snap_applied, kHeadSnapCapRad, 1e-3f));
       CHECK(Near(RelativeYaw(facing_of(rig, 5), kRight, kFwd), kHeadSnapCapRad, 1e-2f));
     }
-    // A pitch-only camera difference must not engage the snap: the
-    // authored head-pivot offset is unknown, and chasing it saturated
-    // the snap at its cap in live testing. Yaw-only alignment instead.
+    // Pitch now uses the verified native Neck pivot and actual skull axes;
+    // it must follow the wearer without inventing a head/eye translation.
     {
       Rig2 rig;
       const float p = 0.5f;
@@ -478,7 +543,10 @@ int main() {
       TorsoPoseResult out;
       CHECK(SolveTorsoPose(rig.poses, rig.parents, bones, RootYawPi(),
                            kRight, kFwd, 0.0f, 0.0f, kRight, cam_u, cam_f, out));
-      CHECK(out.snap_applied == 0.0f);
+      CHECK(Near(out.snap_applied,.5f,1e-4f));
+      CHECK(VDot(facing_of(rig,5),cam_f)>.999f);
+      CHECK(VDot(VNorm(WorldPoint(root,arm_pose_detail::Column(rig.poses[5],0))),cam_u)>.999f);
+      CHECK(Near(VLen(Sub(world(rig,5),world(rig,4))),.15f));
       CHECK(Near(RelativeYaw(facing_of(rig, 5), kRight, kFwd), 0.0f, 1e-3f));
     }
     // Downward pitch bends the chest forward (toward facing).
@@ -528,6 +596,7 @@ int main() {
     CHECK(Near(v.Approach({0, 0, 0}, 1106).x, 0.308f, 0.01f));
   }
 
+  CheckNativeNeckFrame();
   CheckTorsoContracts();
   std::printf("test_body_pose: %d checks, %d failures\n", g_checks, g_failures);
   return g_failures ? 1 : 0;

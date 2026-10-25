@@ -81,7 +81,7 @@ void Apply(Config& c, std::string_view section_raw, std::string_view key_raw,
     if (k == "vr_enabled" && ParseBool(value, b)) c.vr_enabled = b;
     if (k == "reshade_host" && ParseBool(value, b)) c.reshade_host = b;
     if (k == "frame_limit_fps" && ParseInt(value, i) &&
-        (i == 60 || i == 72 || i == 90 || i == 120 || i == 144 || i == 240))
+        (i == 60 || i == 72 || i == 80 || i == 90 || i == 120 || i == 144 || i == 240))
       c.frame_limit_fps = i;
     if (k == "render_scale_percent" && ParseInt(value, i))
       c.render_scale_percent = Clamp(i, 50, 200);
@@ -118,6 +118,7 @@ void Apply(Config& c, std::string_view section_raw, std::string_view key_raw,
   } else if (s == "controls") {
     bool b;
     int i;
+    float f;
     if (k == "movement_orientation") {
       const auto v = ToLower(Trim(value));
       if (v == "head") c.movement_orientation = MovementOrientation::Head;
@@ -150,10 +151,48 @@ void Apply(Config& c, std::string_view section_raw, std::string_view key_raw,
       if (v == "standing" || v == "seated" || v == "roomscale")
         c.play_style = v;
     }
+    if (k == "arm_swing_sprint" && ParseBool(value, b)) c.arm_swing_sprint = b;
+    if (k == "arm_swing_stride_min" && ParseFloat(value, f))
+      c.arm_swing_stride_min = Clamp(f, 0.4f, 4.0f);
+    if (k == "arm_swing_stride_max" && ParseFloat(value, f))
+      c.arm_swing_stride_max = Clamp(f, 1.0f, 12.0f);
+    if (k == "arm_swing_quiet_max" && ParseFloat(value, f))
+      c.arm_swing_quiet_max = Clamp(f, 0.1f, 3.0f);
+    if (k == "arm_swing_alternations" && ParseInt(value, i))
+      c.arm_swing_alternations = Clamp(i, 2, 12);
+    if (k == "arm_swing_hold_ms" && ParseInt(value, i))
+      c.arm_swing_hold_ms = Clamp(i, 200, 3000);
+    if (k == "reach_interact" && ParseBool(value, b)) c.reach_interact = b;
+    if (k == "reach_forward_min_m" && ParseFloat(value, f))
+      c.reach_forward_min_m = Clamp(f, 0.2f, 1.5f);
+    if (k == "reach_forward_max_m" && ParseFloat(value, f))
+      c.reach_forward_max_m = Clamp(f, 0.6f, 4.0f);
+    if (k == "reach_speed_min" && ParseFloat(value, f))
+      c.reach_speed_min = Clamp(f, 0.3f, 5.0f);
+    if (k == "reach_dominance_min" && ParseFloat(value, f))
+      c.reach_dominance_min = Clamp(f, 0.2f, 0.95f);
+    if (k == "reach_quiet_max" && ParseFloat(value, f))
+      c.reach_quiet_max = Clamp(f, 0.1f, 3.0f);
+    if (k == "reach_settle_ms" && ParseInt(value, i))
+      c.reach_settle_ms = Clamp(i, 0, 1000);
+    if (k == "reach_press_ms" && ParseInt(value, i))
+      c.reach_press_ms = Clamp(i, 30, 250);
+    if (k == "reach_cooldown_ms" && ParseInt(value, i))
+      c.reach_cooldown_ms = Clamp(i, 250, 3000);
     if (k == "hotkeys_enabled" && ParseBool(value, b)) c.hotkeys_enabled = b;
     if ((k == "xr_input_enabled" || k == "xr_actions_enabled") &&
         ParseBool(value, b))
       c.xr_input_enabled = b;
+      if (k == "bind_profile_quest3" && ParseBool(value, b))
+        c.bind_profile_quest3 = b;
+      if (k == "bind_profile_index" && ParseBool(value, b))
+        c.bind_profile_index = b;
+      if (k == "bind_profile_wmr" && ParseBool(value, b))
+        c.bind_profile_wmr = b;
+      if (k == "bind_profile_simple" && ParseBool(value, b))
+        c.bind_profile_simple = b;
+      if (k == "binding_live_reattach" && ParseBool(value, b))
+        c.binding_live_reattach = b;
     if (k == "log_marker_vk" && ParseInt(value, i))
       c.log_marker_vk = Clamp(i, 0, 255);
     if (k == "config_reload_vk" && ParseInt(value, i))
@@ -166,11 +205,15 @@ void Apply(Config& c, std::string_view section_raw, std::string_view key_raw,
       c.eye_height = Clamp(f, 0.5f, 2.5f);
     if (k == "world_scale" && ParseFloat(value, f))
       c.world_scale = Clamp(f, 0.5f, 2.0f);
+      if (k == "avatar_scale" && ParseFloat(value, f))
+      c.avatar_scale = Clamp(f, 0.6f, 1.6f);
     if (k == "forward_offset_m" && ParseFloat(value, f))
       c.forward_offset_m = Clamp(f, 0.0f, 0.4f);
     if (k == "eye_clearance_m" && ParseFloat(value, f))
       c.eye_clearance_m = Clamp(f, 0.0f, 1.2f);
     if (k == "hide_head" && ParseBool(value, b)) c.hide_head = b;
+    if (k == "hide_torso_and_legs" && ParseBool(value, b))
+      c.hide_torso_and_legs = b;
     if (k == "forearm_only" && ParseBool(value, b)) c.forearm_only = b;
     if (k == "hide_ui_in_vr" && ParseBool(value, b)) c.hide_ui_in_vr = b;
     if (k == "hide_player_model" && ParseBool(value, b))
@@ -198,21 +241,40 @@ void Apply(Config& c, std::string_view section_raw, std::string_view key_raw,
     if (k == "haptics" && ParseBool(value, b)) c.haptics = b;
     if (k == "arm_ik_enabled" && ParseBool(value, b)) c.arm_ik_enabled = b;
     if (k == "arm_ik_log_only" && ParseBool(value, b)) c.arm_ik_log_only = b;
+    if (k == "arm_ik_block_animation" && ParseBool(value, b))
+      c.arm_ik_block_animation = b;
     if (k == "grip_roll_correction_deg" && ParseFloat(value, f))
       c.grip_roll_correction_deg = Clamp(f, -45.0f, 45.0f);
     if (k == "contact_speed_min" && ParseFloat(value, f))
       c.contact_speed_min = Clamp(f, 0.1f, 5.0f);
     if (k == "rehit_window_ms" && ParseInt(value, i))
       c.rehit_window_ms = Clamp(i, 50, 2000);
-      if (k == "combat_test_bench" && ParseBool(value, b)) c.combat_test_bench = b;
-      if (k == "combat_test_target_m" && ParseFloat(value, f))
+    if (k == "physical_attacks" && ParseBool(value, b)) c.physical_attacks = b;
+    if (k == "swing_attack_speed_min" && ParseFloat(value, f))
+      c.swing_attack_speed_min = Clamp(f, 0.5f, 8.0f);
+    if (k == "swing_attack_heavy_min" && ParseFloat(value, f))
+      c.swing_attack_heavy_min = Clamp(f, 1.0f, 12.0f);
+    if (k == "combat_test_bench" && ParseBool(value, b)) c.combat_test_bench = b;
+    if (k == "combat_test_target_m" && ParseFloat(value, f))
       c.combat_test_target_m = Clamp(f, 0.5f, 2.0f);
-      if (k == "weapon_separation_min_m" && ParseFloat(value, f))
+    if (k == "weapon_separation_min_m" && ParseFloat(value, f))
       c.weapon_separation_min_m = Clamp(f, 0.0f, 0.5f);
+    if (k == "swing_attack_cooldown_ms" && ParseInt(value, i))
+      c.swing_attack_cooldown_ms = Clamp(i, 150, 2000);
+      if (k == "physical_defence" && ParseBool(value, b)) c.physical_defence = b;
+      if (k == "guard_settle_ms" && ParseInt(value, i))
+      c.guard_settle_ms = Clamp(i, 0, 500);
+      if (k == "guard_flick_speed_min" && ParseFloat(value, f))
+      c.guard_flick_speed_min = Clamp(f, 0.8f, 6.0f);
+      if (k == "guard_parry_press_ms" && ParseInt(value, i))
+      c.guard_parry_press_ms = Clamp(i, 40, 250);
+      if (k == "guard_parry_cooldown_ms" && ParseInt(value, i))
+      c.guard_parry_cooldown_ms = Clamp(i, 250, 2000);
   } else if (s == "diagnostics") {
     bool b;
     if (k == "verbose_logging" && ParseBool(value, b)) c.verbose_logging = b;
     if (k == "observer_only" && ParseBool(value, b)) c.observer_only = b;
+    if (k == "combat_trace_only" && ParseBool(value, b)) c.combat_trace_only = b;
     if (k == "hotkeys_enabled" && ParseBool(value, b)) c.hotkeys_enabled = b;
     if (k == "log_marker_vk") {
       int i;
@@ -401,9 +463,41 @@ bool ConfigSave(const wchar_t* toml_path, const Config& c) {
       c.movement_controller == MovementController::Right ? "right" : "non_dominant";
   fprintf(f, "movement_controller = \"%s\"\n", movement_controller);
   fprintf(f, "play_style = \"%s\"\n", c.play_style.c_str());
+  fprintf(f, "# Arm-swing locomotion: swinging the arms in loose alternation asks the\n");
+  fprintf(f, "# game to run. One forward amount joins the stick and roomscale input in\n");
+  fprintf(f, "# the same movement basis; acceleration, stamina, turning and the dash stay\n");
+  fprintf(f, "# the game's. Speeds are head-relative, so walking the room is not a stride.\n");
+  fprintf(f, "arm_swing_sprint = %s\n", c.arm_swing_sprint ? "true" : "false");
+  fprintf(f, "arm_swing_stride_min = %s\n", FmtFloat(c.arm_swing_stride_min).c_str());
+  fprintf(f, "arm_swing_stride_max = %s\n", FmtFloat(c.arm_swing_stride_max).c_str());
+  fprintf(f, "arm_swing_quiet_max = %s\n", FmtFloat(c.arm_swing_quiet_max).c_str());
+  fprintf(f, "arm_swing_alternations = %d\n", c.arm_swing_alternations);
+  fprintf(f, "arm_swing_hold_ms = %d\n", c.arm_swing_hold_ms);
+  fprintf(f, "# Reach-to-interact: thrust one hand forward through the reach envelope to\n");
+  fprintf(f, "# tap the native interact button. No native prompt flag is bound, so the\n");
+  fprintf(f, "# gesture alone decides -- reaching at a door or a face can interact.\n");
+  fprintf(f, "reach_interact = %s\n", c.reach_interact ? "true" : "false");
+  fprintf(f, "reach_forward_min_m = %s\n", FmtFloat(c.reach_forward_min_m).c_str());
+  fprintf(f, "reach_forward_max_m = %s\n", FmtFloat(c.reach_forward_max_m).c_str());
+  fprintf(f, "reach_speed_min = %s\n", FmtFloat(c.reach_speed_min).c_str());
+  fprintf(f, "reach_dominance_min = %s\n", FmtFloat(c.reach_dominance_min).c_str());
+  fprintf(f, "reach_quiet_max = %s\n", FmtFloat(c.reach_quiet_max).c_str());
+  fprintf(f, "reach_settle_ms = %d\n", c.reach_settle_ms);
+  fprintf(f, "reach_press_ms = %d\n", c.reach_press_ms);
+  fprintf(f, "reach_cooldown_ms = %d\n", c.reach_cooldown_ms);
   fprintf(f, "hotkeys_enabled = %s\n", c.hotkeys_enabled ? "true" : "false");
   fprintf(f, "# xr_input_enabled = true turns on OpenXR controller actions + pad bridge\n");
   fprintf(f, "xr_input_enabled = %s\n", c.xr_input_enabled ? "true" : "false");
+  fprintf(f, "# Per-profile suggested bindings: an off profile is never suggested, so the\n");
+  fprintf(f, "# runtime cannot resolve a binding that was removed. WMR carries the full\n");
+  fprintf(f, "# set; simple is the pose/haptic fallback for an unknown device.\n");
+  fprintf(f, "bind_profile_quest3 = %s\n", c.bind_profile_quest3 ? "true" : "false");
+  fprintf(f, "bind_profile_index = %s\n", c.bind_profile_index ? "true" : "false");
+  fprintf(f, "bind_profile_wmr = %s\n", c.bind_profile_wmr ? "true" : "false");
+  fprintf(f, "bind_profile_simple = %s\n", c.bind_profile_simple ? "true" : "false");
+  fprintf(f, "# Apply edited bindings during the session (short input dropout, refused by\n");
+  fprintf(f, "# some runtimes) instead of at the next session.\n");
+  fprintf(f, "binding_live_reattach = %s\n\n", c.binding_live_reattach ? "true" : "false");
   fprintf(f, "log_marker_vk = 0x%02x\n", (unsigned)c.log_marker_vk);
   fprintf(f, "config_reload_vk = 0x%02x\n\n", (unsigned)c.config_reload_vk);
 
@@ -412,11 +506,15 @@ bool ConfigSave(const wchar_t* toml_path, const Config& c) {
   fprintf(f, "eye_height_override = %s\n", c.eye_height_override ? "true" : "false");
   fprintf(f, "eye_height = %s\n", FmtFloat(c.eye_height).c_str());
   fprintf(f, "world_scale = %s\n", FmtFloat(c.world_scale).c_str());
+  fprintf(f, "# Avatar size trim: a second multiplier on the same applied camera packet,\n");
+  fprintf(f, "# so head, hands, roomscale and the IK body read one value. Not a mesh resize.\n");
+  fprintf(f, "avatar_scale = %s\n", FmtFloat(c.avatar_scale).c_str());
   fprintf(f, "# Horizontal clearance from the player mesh; 0 disables it.\n");
   fprintf(f, "forward_offset_m = %s\n", FmtFloat(c.forward_offset_m).c_str());
   fprintf(f, "eye_clearance_m = %s\n", FmtFloat(c.eye_clearance_m).c_str());
   fprintf(f, "hide_player_model = %s\n", c.hide_player_model ? "true" : "false");
   fprintf(f, "hide_head = %s\n", c.hide_head ? "true" : "false");
+  fprintf(f, "hide_torso_and_legs = %s\n", c.hide_torso_and_legs ? "true" : "false");
   fprintf(f, "forearm_only = %s\n", c.forearm_only ? "true" : "false");
   fprintf(f, "hide_ui_in_vr = %s\n", c.hide_ui_in_vr ? "true" : "false");
   fprintf(f, "# Second player render model (weapon/shield side) stays visible\n");
@@ -439,10 +537,28 @@ bool ConfigSave(const wchar_t* toml_path, const Config& c) {
   fprintf(f, "# IK arms: model arms follow controllers; kills canned melee.\n");
   fprintf(f, "arm_ik_enabled = %s\n", c.arm_ik_enabled ? "true" : "false");
   fprintf(f, "arm_ik_log_only = %s\n", c.arm_ik_log_only ? "true" : "false");
+  fprintf(f, "# true: the IK owns the arm/torso/head rows outright; native\n");
+  fprintf(f, "# animation cannot move them (writer and legs stay native).\n");
+  fprintf(f, "arm_ik_block_animation = %s\n", c.arm_ik_block_animation ? "true" : "false");
   fprintf(f, "grip_roll_correction_deg = %s\n",
           FmtFloat(c.grip_roll_correction_deg).c_str());
   fprintf(f, "contact_speed_min = %s\n", FmtFloat(c.contact_speed_min).c_str());
   fprintf(f, "rehit_window_ms = %d\n", c.rehit_window_ms);
+  fprintf(f, "# Physical attack bridge: a qualified weapon-hand swing presses the\n");
+  fprintf(f, "# native attack once; only live while the IK body is applied.\n");
+  fprintf(f, "physical_attacks = %s\n", c.physical_attacks ? "true" : "false");
+  fprintf(f, "swing_attack_speed_min = %s\n",
+          FmtFloat(c.swing_attack_speed_min).c_str());
+  fprintf(f, "swing_attack_heavy_min = %s\n",
+          FmtFloat(c.swing_attack_heavy_min).c_str());
+  fprintf(f, "swing_attack_cooldown_ms = %d\n", c.swing_attack_cooldown_ms);
+  fprintf(f, "# Physical defence bridge: a raised shield hand holds the native\n");
+  fprintf(f, "# shield button wherever it is held; a flick taps it as a parry.\n");
+  fprintf(f, "physical_defence = %s\n", c.physical_defence ? "true" : "false");
+  fprintf(f, "guard_settle_ms = %d\n", c.guard_settle_ms);
+  fprintf(f, "guard_flick_speed_min = %s\n", FmtFloat(c.guard_flick_speed_min).c_str());
+  fprintf(f, "guard_parry_press_ms = %d\n", c.guard_parry_press_ms);
+  fprintf(f, "guard_parry_cooldown_ms = %d\n", c.guard_parry_cooldown_ms);
   fprintf(f, "# Proving ground: fixed sparring target + live blade state, never native damage.\n");
   fprintf(f, "combat_test_bench = %s\n", c.combat_test_bench ? "true" : "false");
   fprintf(f, "combat_test_target_m = %s\n", FmtFloat(c.combat_test_target_m).c_str());
@@ -453,7 +569,9 @@ bool ConfigSave(const wchar_t* toml_path, const Config& c) {
   fprintf(f, "verbose_logging = %s\n", c.verbose_logging ? "true" : "false");
   fprintf(f, "# Startup-only desktop observer: no XR, gameplay writes or injected input.\n");
   fprintf(f, "# Does NOT isolate saves or enforce offline play. Restart to change.\n");
-  fprintf(f, "observer_only = %s\n\n", c.observer_only ? "true" : "false");
+  fprintf(f, "observer_only = %s\n", c.observer_only ? "true" : "false");
+  fprintf(f, "# Startup-only LAB combat observer; no render/constant-upload probes.\n");
+  fprintf(f, "combat_trace_only = %s\n\n", c.combat_trace_only ? "true" : "false");
 
   fprintf(f, "[safety]\n");
   fprintf(f, "offline_only_ack = %s\n", c.offline_only_ack ? "true" : "false");
@@ -468,7 +586,7 @@ bool ConfigValid(const Config& c) {
     return std::isfinite(v) && v >= lo && v <= hi;
   };
   return c.render_scale_percent >= 50 && c.render_scale_percent <= 200 &&
-      (c.frame_limit_fps == 60 || c.frame_limit_fps == 72 || c.frame_limit_fps == 90 ||
+      (c.frame_limit_fps == 60 || c.frame_limit_fps == 72 || c.frame_limit_fps == 80 || c.frame_limit_fps == 90 ||
        c.frame_limit_fps == 120 || c.frame_limit_fps == 144 || c.frame_limit_fps == 240) &&
       range(c.vignette_strength, 0, 1) && range(c.fov_scale, 0.7f, 1.3f) &&
       c.snap_turn_degrees >= 15 && c.snap_turn_degrees <= 90 &&
@@ -480,6 +598,13 @@ bool ConfigValid(const Config& c) {
       range(c.swing_damage_gain, .1f, 5) && range(c.thrust_speed_min, .2f, 10) &&
       range(c.grip_roll_correction_deg, -45, 45) && range(c.contact_speed_min, .1f, 5) &&
       c.rehit_window_ms >= 50 && c.rehit_window_ms <= 2000 &&
+      range(c.swing_attack_speed_min, .5f, 8) &&
+      range(c.swing_attack_heavy_min, 1.f, 12) &&
+      c.swing_attack_cooldown_ms >= 150 && c.swing_attack_cooldown_ms <= 2000 &&
+      c.guard_settle_ms >= 0 && c.guard_settle_ms <= 500 &&
+      range(c.guard_flick_speed_min, .8f, 6) &&
+      c.guard_parry_press_ms >= 40 && c.guard_parry_press_ms <= 250 &&
+      c.guard_parry_cooldown_ms >= 250 && c.guard_parry_cooldown_ms <= 2000 &&
       range(c.combat_test_target_m, 0.5f, 2.0f) && range(c.weapon_separation_min_m, 0.0f, 0.5f) &&
       c.log_marker_vk >= 0 && c.log_marker_vk <= 255 && c.config_reload_vk >= 0 && c.config_reload_vk <= 255 &&
       (c.play_style == "standing" || c.play_style == "seated" || c.play_style == "roomscale") &&

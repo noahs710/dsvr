@@ -3,6 +3,7 @@
 #include "combat_math.h"
 #include "gesture_math.h"
 #include "pad_math.h"
+#include "comfort_vignette.h"
 
 namespace dsvr {
 
@@ -89,6 +90,8 @@ void InputPollFrame(void* base_space, const float head_pos[3],
                     long long predicted_display_time);
 // Render thread: clear stale targets/pad/turns on skipped tracking or loss.
 void InputInvalidateFrame();
+// Render thread only, immediately after InputPollFrame. Excludes physical follow.
+ComfortMotion InputLatestComfortMotion();
 // Game thread publishes the applied camera frame: the head steering reference
 // and the movement basis native will interpret travel in. Both are the written
 // camera's planar heading unless a hand reference overrides the first. Render
@@ -113,5 +116,12 @@ bool InputLatestArmTarget(bool want_off_hand, ArmTarget& out);
 bool InputLatestPad(VirtualPadState& out);
 float InputTakeTurnYaw();
 void InputApplyHaptic(bool left, float amplitude, int duration_ms);
+
+// Ask the input thread to rebuild its action set from the currently applied
+// config. Only honoured while binding_live_reattach is on. The thread already
+// rebuilds on its own when the applied profile set changes, so this is the
+// manual retry path (after a refused attach, or an edited DSVR.toml), not a
+// per-edit requirement. Costs one invalidated frame: nothing held stays down.
+void InputRequestBindingReload();
 
 }  // namespace dsvr

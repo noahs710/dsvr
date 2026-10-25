@@ -53,9 +53,7 @@ bool Copy(std::uintptr_t address,void* out,std::size_t size) {
 }
 namespace dsvr {
 void ArmIkResetCalibration() {}
-bool ArmIkHeadWorldDelta(Vec3&, std::uint64_t& sequence, std::uint64_t& epoch) {
-  sequence = 0; epoch = 0; return false;
-}
+
 bool ArmIkCombatBench(CombatBenchSnapshot& out) { out = {}; return false; }
 void InputPublishRoomscaleBasis(const RoomscaleBasis& basis) {published_roomscale=basis;}
 bool InputLatestRoomscaleMotion(RoomscaleMotion&) { return false; }
@@ -145,6 +143,36 @@ int main() {
   // Calibrate against the measured body, independent of the logic-yaw formula.
   const Vec3 native_right{.99883664f,0,-.04822187f};
   CHECK(VDot(r,native_right)>.999f && VDot(f,{.04822187f,0,.99883664f})>.999f);
+  // The actual writer must preserve physical pitch/roll, including vertical
+  // gaze, without inheriting native animation bob or roll. Quarter turns have
+  // independent integer-axis expectations, not recomputed production math.
+  const Vec3 native_forward{.04822187f,0,.99883664f},world_up{0,1,0};
+  const float quarter_turn_component=std::sqrt(.5f);
+  struct Tilt { float x,z; Vec3 right,up,forward; };
+  const Tilt tilts[]={
+      {quarter_turn_component,0,native_right,VScale(native_forward,-1),world_up},
+      {-quarter_turn_component,0,native_right,native_forward,VScale(world_up,-1)},
+      {0,quarter_turn_component,world_up,VScale(native_right,-1),native_forward},
+      {0,-quarter_turn_component,VScale(world_up,-1),native_right,native_forward}};
+  for(const auto& tilt:tilts) {
+    const float native_bob[16]={0,1,0,0,-1,0,0,0,0,0,1,0,7,9,11,1};
+    std::memcpy(follow.data()+0x10,native_bob,sizeof(native_bob));
+    std::memcpy(follow.data()+0x2d0,native_bob,sizeof(native_bob));
+    CHECK(CameraApplyFirstPerson(follow.data(),tilt.x,0,tilt.z,quarter_turn_component,
+        0,1.6f,0,1.6f,1,0,0,1.4f,1.1f));
+    Vec3 head_right{},head_up{},head_forward{};
+    CHECK(CameraHeadBasis(head_right,head_up,head_forward));
+    CHECK(VDot(head_right,tilt.right)>.99999f);
+    CHECK(VDot(head_up,tilt.up)>.99999f);
+    CHECK(VDot(head_forward,tilt.forward)>.99999f);
+    CHECK(VDot(Vec3{Float(0x10),Float(0x14),Float(0x18)},tilt.right)>.99999f);
+    CHECK(VDot(Vec3{Float(0x20),Float(0x24),Float(0x28)},tilt.up)>.99999f);
+    CHECK(VDot(Vec3{Float(0x30),Float(0x34),Float(0x38)},tilt.forward)>.99999f);
+    CHECK(std::memcmp(follow.data()+0x10,follow.data()+0x2d0,64)==0);
+    CHECK(Float(0x40)==1 && std::fabs(Float(0x44)-3.6f)<1e-5f && Float(0x48)==3);
+
+  }
+  CHECK(CameraApplyFirstPerson(follow.data(),0,0,0,1,0,1.6f,0,1.6f,1,0,0,1.4f,1.1f));
   // Home/theater and temporary tracking loss suspend the camera override.
   // Native animation may face another direction while suspended; resuming
   // must preserve both the intentional stick heading and physical origin.

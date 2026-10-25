@@ -16,6 +16,7 @@
 #include "lab_runner.h"
 #include "mod_menu.h"
 #include "calibration.h"
+#include "combat_native.h"
 
 namespace dsvr {
 namespace {
@@ -217,6 +218,9 @@ bool ReloadConfig() {
     if (fresh.observer_only != g_config.observer_only)
       DSVR_WARN("Diagnostics: observer_only change ignored until process restart");
     fresh.observer_only = g_config.observer_only;
+    if(fresh.combat_trace_only!=g_config.combat_trace_only)
+      DSVR_WARN("Diagnostics: combat_trace_only change ignored until process restart");
+    fresh.combat_trace_only=g_config.combat_trace_only;
     ConfigRestrictObserver(fresh);
     if (g_settings_busy) return false;
     g_config = fresh;
@@ -240,11 +244,32 @@ DWORD WINAPI DiagnosticsThread(LPVOID /*param*/) {
   bool sanctuary_down = false;
   bool recenter_down = false;
   bool home_down = false;
+  unsigned long long next_combat_health=0;
+  unsigned previous_combat_health=~0u;
   DSVR_LOG("Diagnostics: hotkeys ready (marker=F-key 0x%02x, reload=0x%02x)",
            DiagnosticsCurrentConfig().log_marker_vk,
            DiagnosticsCurrentConfig().config_reload_vk);
   while (g_running.load(std::memory_order_acquire)) {
     Config cfg = DiagnosticsCurrentConfig();
+    const auto now=GetTickCount64();
+    if(now>=next_combat_health) {
+      const auto combat=CombatNativeGetStatus();
+      const unsigned health=unsigned(combat.equipment_bound) |
+          (unsigned(combat.physical_damage_bound)<<1) |
+          (unsigned(combat.shield_contact_bound)<<2) |
+          (unsigned(combat.two_hand_rules_bound)<<3);
+      if(health!=previous_combat_health || cfg.verbose_logging) {
+        DSVR_LOG("CombatHealth: equipment=%d damage_binding=%d shield_binding=%d "
+                 "two_hand_binding=%d motion_requested=%d observer_only=%d "
+                 "weapons=%d/%d stance=%d; bench classifications are NOT native outcomes",
+                 combat.equipment_bound,combat.physical_damage_bound,
+                 combat.shield_contact_bound,combat.two_hand_rules_bound,
+                 cfg.motion_attacks,cfg.observer_only,combat.equipment.weapon_id[0],
+                 combat.equipment.weapon_id[1],combat.equipment.native_stance);
+        previous_combat_health=health;
+      }
+      next_combat_health=now+5000;
+    }
     if (cfg.hotkeys_enabled && GameIsForeground()) {
       bool m = cfg.log_marker_vk > 0 &&
                (GetAsyncKeyState(cfg.log_marker_vk) & 0x8000) != 0;
@@ -338,7 +363,8 @@ bool DiagnosticsRequestConfig(const Config& requested, bool save) {
   std::lock_guard<std::mutex> lock(g_mutex);
   if (!g_initialized || !g_running.load() || g_settings_busy) return false;
   Config effective = requested;
-  effective.observer_only = g_config.observer_only;
+    effective.observer_only = g_config.observer_only;
+    effective.combat_trace_only = g_config.combat_trace_only;
   ConfigRestrictObserver(effective);
   g_pending_config = effective;
   g_pending_save = save;
@@ -393,8 +419,9 @@ bool DiagnosticsBeginCapture() {
   if (install) {
     // No mutex across native installation. Only observational rights, unchanged
     // across reload/restart of diagnostics; never acquire XR/body/pad permissions.
-    const bool camera = CameraHookInstall(false, true);
-    const bool trace = camera && VrTraceInstall(true);
+    const bool camera = config.combat_trace_only || CameraHookInstall(false, true);
+    const bool trace = config.combat_trace_only ? VrTraceInstallCombat() :
+                       camera && VrTraceInstall(true);
     {
       std::lock_guard<std::mutex> lock(g_mutex);
       g_observer_hooks_ready = camera && trace;

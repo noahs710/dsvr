@@ -32,6 +32,11 @@ struct VrPadHand {
   bool secondary = false;
   bool menu = false;
   bool stick_click = false;
+  // The controller's own D-pad component (Quest Touch x_axis/y_axis): one
+  // discrete -1/0/1 per axis. Profiles that expose no D-pad leave this at zero
+  // and the left stick keeps synthesising the same bits in menu_navigation.
+  float dpad_x = 0.0f;
+  float dpad_y = 0.0f;
 };
 
 struct VrPadInput {
@@ -44,6 +49,27 @@ struct VrPadInput {
   // suppress_weapon_attacks is set.
   std::uint16_t pulse_buttons = 0;
   bool pulse_heavy = false;
+  // Physical attack bridge (swing_attack_math.h): a qualified physical swing
+  // of the weapon hand. Unlike the deprecated pulse fields these apply even
+  // when suppress_weapon_attacks is set -- that is the entire point: the
+  // swing replaces the button the player no longer presses. The caller owns
+  // the press/release window so the game sees one discrete attack.
+  std::uint16_t swing_buttons = 0;
+  bool swing_heavy = false;
+  // Physical defence bridge (shield_guard_math.h): the shield hand's tracked
+  // pose. A raised, still hand holds block (LB); a qualified flick taps parry
+  // (LT). The caller owns both press windows, so the
+  // two lines are mutually exclusive and apply even when
+  // suppress_weapon_attacks is set -- the physical shield replaces the button
+  // the player no longer presses.
+  bool guard_block = false;
+  bool guard_parry = false;
+  // Reach-to-interact bridge (reach_intent_math.h): a forward thrust of the
+  // free hand taps the native interact button. No native prompt flag is bound,
+  // so the gesture alone decides when it is pressed -- reaching at a door or a
+  // face can interact. The caller owns the press window; this is one line held
+  // down for that window, not a damage or target claim.
+  bool reach_interact = false;
   // IK arms on: weapon-hand squeeze/trigger must NOT fire RB/RT canned
   // attacks (the arm itself is the attack). Off-hand, buttons, sticks
   // and menus are unaffected.
@@ -108,6 +134,21 @@ inline std::uint8_t PadTrigger(float value) {
   return static_cast<std::uint8_t>(value * 255.0f + 0.5f);
 }
 
+// The controller's own D-pad, mapped in gameplay and menu navigation alike.
+// Native DSR reads these bits for item/spell selection, equipping and the map,
+// so a D-pad that is bound but never read is an invisible missing control.
+// A diagonal collapses to one axis (the native D-pad has no diagonal state)
+// and a non-finite axis reads as neutral.
+inline void ApplyDpad(const VrPadHand& hand, VirtualPadState& out) {
+  const float x = std::isfinite(hand.dpad_x) ? hand.dpad_x : 0.0f;
+  const float y = std::isfinite(hand.dpad_y) ? hand.dpad_y : 0.0f;
+  if (std::fabs(y) >= std::fabs(x)) {
+    if (y >= 0.5f) out.buttons |= kPadDpadUp;
+    else if (y <= -0.5f) out.buttons |= kPadDpadDown;
+  } else if (x >= 0.5f) out.buttons |= kPadDpadRight;
+  else if (x <= -0.5f) out.buttons |= kPadDpadLeft;
+}
+
 // Motion-controller policy:
 // - left stick feeds native locomotion;
 // - right stick stays out of XInput because turn_math owns VR turning;
@@ -124,13 +165,19 @@ inline std::uint8_t PadTrigger(float value) {
 //   RB/RT, off-hand squeeze = LB, off-hand trigger = LT.
 inline VirtualPadState MapVrPad(const VrPadInput& input,bool menu_navigation=false) {
   VirtualPadState out;
+  ApplyDpad(input.left, out);
+  ApplyDpad(input.right, out);
   if(menu_navigation) {
-    // Native DSR menu lists consume D-pad, rather than locomotion axes.
-    const float x=input.left.stick_x,y=input.left.stick_y;
-    if(std::isfinite(x) && std::isfinite(y)) {
-      if(std::fabs(y)>=std::fabs(x) && std::fabs(y)>.55f)
-        out.buttons|=y>0?kPadDpadUp:kPadDpadDown;
-      else if(std::fabs(x)>.55f)out.buttons|=x>0?kPadDpadRight:kPadDpadLeft;
+    // Native DSR menu lists consume D-pad, rather than locomotion axes. A real
+    // D-pad component is the direct channel and wins outright; the stick keeps
+    // synthesising the same bits for profiles that expose no D-pad at all.
+    if(!(out.buttons & (kPadDpadUp|kPadDpadDown|kPadDpadLeft|kPadDpadRight))) {
+      const float x=input.left.stick_x,y=input.left.stick_y;
+      if(std::isfinite(x) && std::isfinite(y)) {
+        if(std::fabs(y)>=std::fabs(x) && std::fabs(y)>.55f)
+          out.buttons|=y>0?kPadDpadUp:kPadDpadDown;
+        else if(std::fabs(x)>.55f)out.buttons|=x>0?kPadDpadRight:kPadDpadLeft;
+      }
     }
   } else {
     out.thumb_lx = PadAxis(input.left.stick_x + input.roomscale_x);
@@ -155,9 +202,23 @@ inline VirtualPadState MapVrPad(const VrPadInput& input,bool menu_navigation=fal
       if (off.squeeze > 0.5f) out.buttons |= kPadLeftShoulder;
       out.left_trigger = PadTrigger(off.trigger);
   }
-  // suppress_weapon_attacks (IK arms on): RB/RT/LB/LT all stay zero.
-  // The physical arms ARE the attack, block and parry; any canned
-  // native animation would fight the IK solve for the same bones.
+  // suppress_weapon_attacks (IK arms on): squeeze/trigger RB/RT/LB/LT all
+  // stay zero. The physical arms ARE the attack, block and parry; any canned
+  // native animation driven by a controller button would fight the IK solve
+  // for the same bones.
+  //
+  // The opt-in preview requests ordinary native attacks independently of manual
+  // button suppression. It does not bind physical hit geometry or damage.
+  if (!menu_navigation) {
+    out.buttons |= input.swing_buttons;
+    if (input.swing_heavy) out.right_trigger = 255;
+    // Native DSR controls use distinct channels: LB blocks, LT parries.
+    if (input.guard_block) out.buttons |= kPadLeftShoulder;
+    if (input.guard_parry) out.left_trigger = 255;
+  // The reach gesture taps the same A the player's thumb would press. Which
+  // object it lands on, and whether anything answers at all, is the game's.
+  if (input.reach_interact) out.buttons |= kPadA;
+  }
   return out;
 }
 

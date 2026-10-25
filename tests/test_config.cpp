@@ -203,6 +203,10 @@ int main() {
     want.forearm_only = true;
     want.hide_ui_in_vr = true;
     want.arm_ik_log_only = false;
+    // Both new keys are exercised away from their default, so a dropped
+    // parse or save line shows up as a round-trip failure.
+    want.hide_torso_and_legs = true;
+    want.arm_ik_block_animation = false;
     want.stereo_enabled = true;
     want.afr_enabled = true;
     want.force_disable_motion_blur = true;
@@ -212,6 +216,19 @@ int main() {
     want.combat_test_bench = true;
     want.combat_test_target_m = 1.25f;
     want.weapon_separation_min_m = 0.15f;
+    want.physical_attacks = true;
+    // Per-profile bindings are exercised off-default too: a profile switched off
+    // must survive the round-trip or a saved setup silently re-binds it.
+    want.bind_profile_wmr = false;
+    want.binding_live_reattach = true;
+    want.swing_attack_speed_min = 2.6f;
+    want.swing_attack_heavy_min = 6.0f;
+    want.swing_attack_cooldown_ms = 700;
+    want.physical_defence = true;
+    want.guard_settle_ms = 200;
+    want.guard_flick_speed_min = 3.0f;
+    want.guard_parry_press_ms = 120;
+    want.guard_parry_cooldown_ms = 900;
     want.embodiment_fit = "arm";
     CHECK(dsvr::ConfigSave(path.c_str(), want));
     dsvr::Config got;
@@ -230,10 +247,19 @@ int main() {
     CHECK(got.eye_clearance_m == 0.3f);
     CHECK(got.hide_second_model);
     CHECK(got.arm_ik_enabled && !got.arm_ik_log_only);
+    CHECK(got.hide_torso_and_legs && !got.arm_ik_block_animation);
     CHECK(got.forearm_only && got.hide_ui_in_vr);
     CHECK(got.contact_speed_min == 1.2f && got.rehit_window_ms == 350);
     CHECK(got.combat_test_bench && got.combat_test_target_m == 1.25f);
     CHECK(got.weapon_separation_min_m == 0.15f);
+    CHECK(got.physical_attacks && got.swing_attack_speed_min == 2.6f);
+    CHECK(!got.bind_profile_wmr && got.binding_live_reattach);
+    CHECK(got.bind_profile_quest3 && got.bind_profile_index &&
+          got.bind_profile_simple);
+    CHECK(got.swing_attack_heavy_min == 6.0f && got.swing_attack_cooldown_ms == 700);
+    CHECK(got.physical_defence && got.guard_settle_ms == 200);
+    CHECK(got.guard_flick_speed_min == 3.0f && got.guard_parry_press_ms == 120);
+    CHECK(got.guard_parry_cooldown_ms == 900);
     CHECK(got.embodiment_fit == "arm");
     CHECK(got.force_disable_motion_blur && got.motion_blur_original == "1");
     CHECK(got.stereo_enabled);
@@ -251,6 +277,15 @@ int main() {
     CHECK(gate.contact_speed_min == 0.8f && gate.rehit_window_ms == 280);
     CHECK(!gate.combat_test_bench && gate.combat_test_target_m == 1.0f);
     CHECK(gate.weapon_separation_min_m == 0.0f);
+    CHECK(!gate.physical_attacks && gate.swing_attack_speed_min == 2.0f);
+    CHECK(gate.bind_profile_quest3 && gate.bind_profile_index &&
+          gate.bind_profile_wmr && gate.bind_profile_simple);
+    CHECK(!gate.binding_live_reattach);
+    CHECK(gate.swing_attack_heavy_min == 4.5f);
+    CHECK(gate.swing_attack_cooldown_ms == 500);
+    CHECK(!gate.physical_defence && gate.guard_settle_ms == 120);
+    CHECK(gate.guard_flick_speed_min == 2.2f && gate.guard_parry_press_ms == 90);
+    CHECK(gate.guard_parry_cooldown_ms == 700);
     FILE* f = nullptr;
     CHECK(_wfopen_s(&f, path.c_str(), L"w") == 0 && f);
     fputs("[controls]\nxr_input_enabled = true\n", f);
@@ -293,6 +328,11 @@ int main() {
     CHECK(dsvr::ConfigLoad(path.c_str(), c));
     CHECK(c.menu_distance_m == 4.0f && c.menu_reading_fov_deg == 45.0f);
   }
+  // 80 Hz is a native Quest display rate and must survive fallback persistence.
+  c.frame_limit_fps = 80;
+  CHECK(dsvr::ConfigValid(c));
+  CHECK(dsvr::ConfigSave(path.c_str(), c));
+  CHECK(dsvr::ConfigLoad(path.c_str(), c) && c.frame_limit_fps == 80);
   DeleteFileW(path.c_str());
 
   printf("test_config: PASS\n");

@@ -1,5 +1,8 @@
 // Actual mono submission with a fake XR runtime and a headless D3D11 WARP device.
 // No headset, game, native stereo rendering or user input is exercised.
+#define xrEnumerateInstanceExtensionProperties TestEnumerateInstanceExtensionProperties
+#define xrCreateInstance TestCreateInstance
+#define xrGetInstanceProperties TestGetInstanceProperties
 #define xrGetSystem TestGetSystem
 #define xrGetSystemProperties TestGetSystemProperties
 #define xrEnumerateViewConfigurationViews TestEnumerateViewConfigurationViews
@@ -32,6 +35,14 @@
 namespace {
 const XrSwapchain chains[2]{reinterpret_cast<XrSwapchain>(11), reinterpret_cast<XrSwapchain>(12)};
 bool setup_unavailable=true;unsigned system_calls=0,session_creates=0;
+bool advertise_refresh=false,refresh_proc_available=true,refresh_enabled=false;
+unsigned refresh_proc_lookups=0,refresh_queries=0;
+XrResult refresh_proc_result=XR_SUCCESS,refresh_query_result=XR_SUCCESS;
+float physical_refresh=120.0f;
+XrDuration application_period=11'111'111;
+bool refresh_event_pending=false,events_lost_pending=false,instance_loss_pending=false;
+float event_refresh=0.0f;
+XrResult poll_error=XR_SUCCESS;
 bool acquired[2]{}, ready[2]{}, frame_begun = false, bad_order = false;
 unsigned acquisitions = 0, frame_waits = 0, submitted = 0;
 XrDuration longest_wait = 0;
@@ -40,10 +51,12 @@ XrResult image_release[2]{XR_SUCCESS, XR_SUCCESS};
 XrResult destroy_result[2]{XR_SUCCESS, XR_SUCCESS};
 XrTime predicted = 0;
 dsvr::Config config{};
+dsvr::ComfortMotion comfort_motion{};
 dsvr::UserCalibration calibration_profile{};
 bool gameplay_ready = true, mod_menu_visible = false, calibration_visible = false;
 bool physical_trigger = false;
 bool tracking_valid=true,should_render=true;
+XrFovf view_fov[2]{{-1,1,1,-1},{-1,1,1,-1}};
 bool block_inactive_wait=false;
 HANDLE inactive_wait_entered=nullptr,inactive_wait_release=nullptr;
 XrSessionState next_session_state=XR_SESSION_STATE_UNKNOWN;
@@ -89,17 +102,67 @@ HRESULT STDMETHODCALLTYPE CountGetData(ID3D11DeviceContext* context, ID3D11Async
 }
 }
 
+XRAPI_ATTR XrResult XRAPI_CALL TestEnumerateInstanceExtensionProperties(
+    const char*, uint32_t capacity, uint32_t* count, XrExtensionProperties* out) {
+  *count=advertise_refresh?2:1;
+  if(capacity) {
+    if(capacity<*count)return XR_ERROR_SIZE_INSUFFICIENT;
+    strcpy_s(out[0].extensionName,XR_KHR_D3D11_ENABLE_EXTENSION_NAME);
+    if(advertise_refresh)strcpy_s(out[1].extensionName,XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
+  }
+  return XR_SUCCESS;
+}
+XRAPI_ATTR XrResult XRAPI_CALL TestCreateInstance(const XrInstanceCreateInfo* info,XrInstance* out) {
+  refresh_enabled=false;
+  for(uint32_t i=0;i<info->enabledExtensionCount;++i) {
+    const auto* name=info->enabledExtensionNames[i];
+    if(!strcmp(name,XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME))refresh_enabled=true;
+    else if(strcmp(name,XR_KHR_D3D11_ENABLE_EXTENSION_NAME))bad_order=true;
+  }
+  if(refresh_enabled!=advertise_refresh)bad_order=true;
+  *out=reinterpret_cast<XrInstance>(1);return XR_SUCCESS;
+}
+XRAPI_ATTR XrResult XRAPI_CALL TestGetInstanceProperties(XrInstance,XrInstanceProperties* out) {
+  strcpy_s(out->runtimeName,"test refresh runtime");return XR_SUCCESS;
+}
+XRAPI_ATTR XrResult XRAPI_CALL TestGetDisplayRefreshRateFB(XrSession,float* out) {
+  ++refresh_queries;*out=physical_refresh;return refresh_query_result;
+}
 XRAPI_ATTR XrResult XRAPI_CALL TestGetSystem(XrInstance,const XrSystemGetInfo*,XrSystemId* out) {
   ++system_calls;if(setup_unavailable)return XR_ERROR_FORM_FACTOR_UNAVAILABLE;*out=7;return XR_SUCCESS;
 }
 XRAPI_ATTR XrResult XRAPI_CALL TestGetSystemProperties(XrInstance,XrSystemId,XrSystemProperties*) {return XR_SUCCESS;}
 XRAPI_ATTR XrResult XRAPI_CALL TestEnumerateViewConfigurationViews(XrInstance,XrSystemId,XrViewConfigurationType,uint32_t,uint32_t* count,XrViewConfigurationView*) {*count=0;return XR_SUCCESS;}
-XRAPI_ATTR XrResult XRAPI_CALL TestGetInstanceProcAddr(XrInstance,const char*,PFN_xrVoidFunction* out) {*out=nullptr;return XR_SUCCESS;}
+XRAPI_ATTR XrResult XRAPI_CALL TestGetInstanceProcAddr(XrInstance,const char* name,PFN_xrVoidFunction* out) {
+  *out=nullptr;
+  if(!strcmp(name,"xrGetDisplayRefreshRateFB")) {
+    ++refresh_proc_lookups;
+    if(!refresh_enabled)bad_order=true;
+    if(refresh_proc_available)*out=reinterpret_cast<PFN_xrVoidFunction>(&TestGetDisplayRefreshRateFB);
+    return refresh_proc_result;
+  }
+  if(strcmp(name,"xrGetD3D11GraphicsRequirementsKHR"))bad_order=true;
+  return XR_SUCCESS;
+}
 XRAPI_ATTR XrResult XRAPI_CALL TestCreateSession(XrInstance,const XrSessionCreateInfo*,XrSession* out) {++session_creates;*out=reinterpret_cast<XrSession>(2);return XR_SUCCESS;}
 XRAPI_ATTR XrResult XRAPI_CALL TestBeginSession(XrSession,const XrSessionBeginInfo*) {
   ++begun_sessions;return XR_SUCCESS;
 }
 XRAPI_ATTR XrResult XRAPI_CALL TestPollEvent(XrInstance, XrEventDataBuffer* out) {
+  if(poll_error!=XR_SUCCESS){const auto result=poll_error;poll_error=XR_SUCCESS;return result;}
+  if(refresh_event_pending) {
+    auto* event=reinterpret_cast<XrEventDataDisplayRefreshRateChangedFB*>(out);
+    *event={XR_TYPE_EVENT_DATA_DISPLAY_REFRESH_RATE_CHANGED_FB};
+    event->toDisplayRefreshRate=event_refresh;refresh_event_pending=false;return XR_SUCCESS;
+  }
+  if(events_lost_pending) {
+    *reinterpret_cast<XrEventDataEventsLost*>(out)={XR_TYPE_EVENT_DATA_EVENTS_LOST};
+    events_lost_pending=false;return XR_SUCCESS;
+  }
+  if(instance_loss_pending) {
+    *reinterpret_cast<XrEventDataInstanceLossPending*>(out)={XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING};
+    instance_loss_pending=false;return XR_SUCCESS;
+  }
   if(next_session_state!=XR_SESSION_STATE_UNKNOWN){
     auto* state=reinterpret_cast<XrEventDataSessionStateChanged*>(out);
     *state={XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED};
@@ -114,9 +177,11 @@ XRAPI_ATTR XrResult XRAPI_CALL TestWaitFrame(XrSession, const XrFrameWaitInfo*, 
     WaitForSingleObject(inactive_wait_release,2000);
   }
   if (frame_begun) bad_order = true;
-  predicted = 1'000'000'000 + ++frame_waits * 11'111'111;
+  ++frame_waits;
+  predicted += application_period;
+  if(predicted<1'000'000'000)predicted+=1'000'000'000;
   out->predictedDisplayTime = predicted;
-  out->predictedDisplayPeriod = 11'111'111;
+  out->predictedDisplayPeriod = application_period;
   out->shouldRender = should_render?XR_TRUE:XR_FALSE;
   return XR_SUCCESS;
 }
@@ -133,7 +198,7 @@ XRAPI_ATTR XrResult XRAPI_CALL TestLocateViews(XrSession, const XrViewLocateInfo
   for (int eye = 0; eye < 2; ++eye) {
     views[eye].pose.orientation.w = 1;
     views[eye].pose.position.x = eye ? .032f : -.032f;
-    views[eye].fov = {-1, 1, 1, -1};
+    views[eye].fov = view_fov[eye];
   }
   return XR_SUCCESS;
 }
@@ -248,7 +313,8 @@ void CalibrationSample(const TrackingFrame& frame, bool trigger, bool gameplay,
   sampled_height = height; sampled_fallback = fallback;
 }
 void InputAttachSession(void*, void*) {}
-void InputInvalidateFrame() {}
+void InputInvalidateFrame() { comfort_motion = {}; }
+ComfortMotion InputLatestComfortMotion() { return comfort_motion; }
 void InputPollFrame(void*, const float*, std::uint64_t, long long) {}
 bool DepthProbeInstall(ID3D11Device*) { return false; }
 bool DepthProbeMainPair(ID3D11Texture2D*&, ID3D11Texture2D*&, std::uint32_t&,
@@ -267,7 +333,8 @@ int main() {
   CHECK(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0,
       nullptr, 0, D3D11_SDK_VERSION, &g_device, nullptr, &g_context)));
   auto** original_vtable = *reinterpret_cast<void***>(g_context);
-  std::array<void*, 115> context_vtable{};
+  // Include Context1's constant-buffer range methods used by the state guard.
+  std::array<void*, 134> context_vtable{};
   std::memcpy(context_vtable.data(), original_vtable, sizeof(context_vtable));
   original_copy = reinterpret_cast<CopyFn>(context_vtable[47]);
   original_map = reinterpret_cast<MapFn>(context_vtable[14]);
@@ -277,13 +344,23 @@ int main() {
   context_vtable[29] = reinterpret_cast<void*>(&CountGetData);
   *reinterpret_cast<void***>(g_context) = context_vtable.data();
   config.headlook_enabled = true;
-  g_instance = reinterpret_cast<XrInstance>(1);
-  g_session=XR_NULL_HANDLE;g_next_retry_ms=0;
+  g_instance=XR_NULL_HANDLE;g_session=XR_NULL_HANDLE;g_next_retry_ms=0;
   XrOnDeviceCaptured(g_device);
   CHECK(system_calls==1 && !g_session && session_creates==0);
+  CHECK(!refresh_enabled && refresh_proc_lookups==0 && !g_get_display_refresh_rate);
+  // Advertised-but-missing/failed procedure lookup is optional, never fatal.
+  advertise_refresh=true;refresh_proc_available=false;
+  g_instance=XR_NULL_HANDLE;g_next_retry_ms=0;XrOnDeviceCaptured(g_device);
+  CHECK(refresh_enabled && refresh_proc_lookups==1 && !g_get_display_refresh_rate);
+  refresh_proc_available=true;refresh_proc_result=XR_ERROR_FUNCTION_UNSUPPORTED;
+  g_instance=XR_NULL_HANDLE;g_next_retry_ms=0;XrOnDeviceCaptured(g_device);
+  CHECK(refresh_proc_lookups==2 && !g_get_display_refresh_rate);
+  refresh_proc_result=XR_SUCCESS;
+  g_instance=XR_NULL_HANDLE;g_next_retry_ms=0;XrOnDeviceCaptured(g_device);
+  CHECK(g_get_display_refresh_rate && refresh_queries==0);
   setup_unavailable=false;g_next_retry_ms=0;
   XrOnDeviceCaptured(g_device);
-  CHECK(system_calls==2 && g_session && session_creates==1);
+  CHECK(g_session && session_creates==1 && refresh_queries==1 && g_display_refresh_hz==120.0);
 
   g_session = reinterpret_cast<XrSession>(2);
   g_space = reinterpret_cast<XrSpace>(3);
@@ -317,6 +394,16 @@ int main() {
   const D3D11_VIEWPORT native_viewport{3,5,41,37,.2f,.8f};
   g_context->RSSetViewports(1,&native_viewport);
   g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_LINESTRIP);
+  D3D11_BUFFER_DESC native_cb_desc{};
+  native_cb_desc.ByteWidth=1024;native_cb_desc.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+  ID3D11Buffer* native_cb=nullptr;
+  CHECK(SUCCEEDED(g_device->CreateBuffer(&native_cb_desc,nullptr,&native_cb)));
+  g_context->PSSetConstantBuffers(0,1,&native_cb);
+  ID3D11DeviceContext1* context1=nullptr;
+  CHECK(SUCCEEDED(g_context->QueryInterface(__uuidof(ID3D11DeviceContext1),
+                                            reinterpret_cast<void**>(&context1))));
+  const UINT first_constant=16,constant_count=16;
+  context1->PSSetConstantBuffers1(0,1,&native_cb,&first_constant,&constant_count);
   // During title/login there may be no follow-camera callback at all, so the
   // title-camera heuristic cannot be the only way to enable menu navigation.
   gameplay_ready=false;g_menu_debounce=MenuDebouncer{0};
@@ -330,6 +417,14 @@ int main() {
   CHECK(viewport_count==1 && std::memcmp(&native_viewport,&restored_viewport,sizeof(native_viewport))==0);
   D3D11_PRIMITIVE_TOPOLOGY restored_topology{};g_context->IAGetPrimitiveTopology(&restored_topology);
   CHECK(restored_topology==D3D11_PRIMITIVE_TOPOLOGY_LINESTRIP);
+  ID3D11Buffer* restored_cb=nullptr;
+  g_context->PSGetConstantBuffers(0,1,&restored_cb);
+  CHECK(restored_cb==native_cb);if(restored_cb)restored_cb->Release();
+  UINT got_first=0,got_count=0;
+  restored_cb=nullptr;
+  context1->PSGetConstantBuffers1(0,1,&restored_cb,&got_first,&got_count);
+  CHECK(restored_cb==native_cb);if(restored_cb)restored_cb->Release();
+  CHECK(got_first==first_constant && got_count==constant_count);
   CHECK(submitted == 1 && !acquired[0] && !acquired[1]);
   CHECK(calibration_samples == 1 && !sampled_gameplay && !sampled_trigger && !sampled_floor);
   const unsigned first_frame_copies = source_copies;
@@ -381,6 +476,42 @@ int main() {
   CHECK(metrics.gpu_valid && metrics.gpu_frame_sequence < metrics.frame_sequence);
   CHECK(metrics.gpu_copy_ms >= 0 && metrics.gpu_blit_ms >= 0);
   CHECK(!query_flush_requested);
+  // Exercise the shipped shader and envelope through actual mono submission.
+  // Readback is TEST ONLY; the production compositor never maps GPU pixels.
+  {
+    const auto saved=config;
+    const float white[4]{1,1,1,1};g_context->ClearRenderTargetView(native_target,white);
+    D3D11_TEXTURE2D_DESC read_desc=desc;
+    read_desc.Usage=D3D11_USAGE_STAGING;read_desc.BindFlags=0;
+    read_desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+    ID3D11Texture2D* readback=nullptr;
+    CHECK(SUCCEEDED(g_device->CreateTexture2D(&read_desc,nullptr,&readback)));
+    const auto pixel = [&](int eye, unsigned x, unsigned y) {
+      g_context->CopyResource(readback,textures[eye]);
+      D3D11_MAPPED_SUBRESOURCE mapped{};
+      if(FAILED(g_context->Map(readback,0,D3D11_MAP_READ,0,&mapped)))return -1;
+      const int value=static_cast<const unsigned char*>(mapped.pData)[y*mapped.RowPitch+x*4];
+      g_context->Unmap(readback,0);return value;
+    };
+    comfort_motion={.7f,0};config.comfort_vignette=true;config.vignette_strength=1;
+    for(unsigned i=0;i<45;++i)XrSubmitMonoFrame(backbuffer);
+    CHECK(pixel(0,32,32)>250 && pixel(1,32,32)>250);
+    const int left=pixel(0,2,32),right=pixel(1,2,32);
+    CHECK(left>=0 && left<200 && std::abs(left-right)<=1);
+    CHECK(pixel(0,12,32)>left); // feathered aperture, not a hard rectangle
+    comfort_motion={1,0};
+    view_fov[0]={-1.1f,.7f,.9f,-.8f};view_fov[1]={-.7f,1.1f,.9f,-.8f};
+    for(unsigned i=0;i<45;++i)XrSubmitMonoFrame(backbuffer);
+    CHECK(pixel(0,44,35)>250 && pixel(1,19,35)>250); // asymmetric optical axes
+    CHECK(pixel(0,25,35)<60 && pixel(1,38,35)<60);
+    config.comfort_vignette=false;XrSubmitMonoFrame(backbuffer);
+    CHECK(pixel(0,25,35)>250 && pixel(1,38,35)>250);
+    comfort_motion={};config.comfort_vignette=true;
+    for(unsigned i=0;i<5;++i)XrSubmitMonoFrame(backbuffer);
+    CHECK(pixel(0,25,35)>250); // no stick/turn demand after Off
+    view_fov[0]=view_fov[1]={-1,1,1,-1};
+    config=saved;readback->Release();
+  }
   // The explicit menu and calibration overlays force readable theater output.
   // Calibration readiness still comes from the natural gameplay observation,
   // including when that overlay itself is visible.
@@ -484,6 +615,56 @@ int main() {
   should_render=true;tracking_valid=false;XrSubmitMonoFrame(backbuffer);
   CHECK(!XrLatestTrackingFrame(suppressed));
   tracking_valid=true;XrSubmitMonoFrame(backbuffer);CHECK(XrLatestTrackingFrame(suppressed));
+  // Exercise the actual mono -> PublishRate -> XrEffectiveRate path, not just
+  // the policy helper. Application reprojection must not masquerade as 60 Hz.
+  {
+    EffectiveRate rate{};
+    const auto saved_config=config;
+    config.frame_limit_fps=90;application_period=16'666'667;
+    g_rate_stabilizer=RateStabilizer{};
+    const auto queries_before=refresh_queries;
+    for(int i=0;i<6;++i)XrSubmitMonoFrame(backbuffer);
+    CHECK(XrEffectiveRate(rate) && rate.from_display && rate.effective_fps==120);
+    CHECK(rate.display_hz==120.0 && std::fabs(rate.runtime_hz-60.0)<.01);
+    CHECK(refresh_queries==queries_before); // cache, not a per-frame API poll
+    event_refresh=80.0f;refresh_event_pending=true;
+    for(int i=0;i<kStableRateSamples;++i)XrSubmitMonoFrame(backbuffer);
+    CHECK(XrEffectiveRate(rate) && rate.from_display && rate.effective_fps==80);
+    CHECK(rate.display_hz==80.0 && refresh_queries==queries_before);
+    // Invalid FB values must clear, not pin the last physical refresh forever.
+    const float invalid[]{0.0f,-90.0f,NAN,INFINITY,1.0f};
+    for(float hz:invalid) {
+      event_refresh=hz;refresh_event_pending=true;
+      for(int i=0;i<kStableRateSamples;++i)XrSubmitMonoFrame(backbuffer);
+      CHECK(XrEffectiveRate(rate) && !rate.from_display && rate.effective_fps==60);
+    }
+    // Lost events trigger one resync; failed query never uses a written value.
+    physical_refresh=144.0f;events_lost_pending=true;
+    for(int i=0;i<kStableRateSamples;++i)XrSubmitMonoFrame(backbuffer);
+    CHECK(refresh_queries==queries_before+1);
+    CHECK(XrEffectiveRate(rate) && rate.from_display && rate.effective_fps==144);
+    refresh_query_result=XR_ERROR_RUNTIME_FAILURE;events_lost_pending=true;
+    for(int i=0;i<kStableRateSamples;++i)XrSubmitMonoFrame(backbuffer);
+    CHECK(refresh_queries==queries_before+2 && g_display_refresh_hz==0.0);
+    CHECK(XrEffectiveRate(rate) && !rate.from_display && rate.effective_fps==60);
+    refresh_query_result=XR_SUCCESS;
+    for(float hz:invalid) {
+      physical_refresh=hz;events_lost_pending=true;
+      for(int i=0;i<kStableRateSamples;++i)XrSubmitMonoFrame(backbuffer);
+      CHECK(XrEffectiveRate(rate) && !rate.from_display && rate.effective_fps==60);
+    }
+    // Extension absent: same runtime frame path, predicted fallback, no query.
+    g_get_display_refresh_rate=nullptr;g_display_refresh_hz=0.0;
+    const auto absent_queries=refresh_queries;
+    events_lost_pending=true;event_refresh=120.0f;refresh_event_pending=true;
+    for(int i=0;i<kStableRateSamples;++i)XrSubmitMonoFrame(backbuffer);
+    CHECK(XrEffectiveRate(rate) && !rate.from_display && rate.effective_fps==60);
+    CHECK(refresh_queries==absent_queries);
+    g_get_display_refresh_rate=&TestGetDisplayRefreshRateFB;
+    physical_refresh=120.0f;QueryDisplayRefresh();
+    application_period=11'111'111;config=saved_config;
+    g_rate_stabilizer=RateStabilizer{};
+  }
   // A sleeping headset must not hold up the actual native render callback.
   inactive_wait_entered=CreateEventW(nullptr,TRUE,FALSE,nullptr);
   inactive_wait_release=CreateEventW(nullptr,TRUE,FALSE,nullptr);
@@ -581,6 +762,9 @@ int main() {
   XrOnPresentFrame();CHECK(WaitForSingleObject(inactive_wait_entered,1000)==WAIT_OBJECT_0);
   next_session_state=XR_SESSION_STATE_STOPPING;
   XrOnPresentFrame();CHECK(!XrSessionRunning() && ended_sessions==0);
+  CHECK(g_display_refresh_hz==0.0);
+  EffectiveRate stopped_rate{};CHECK(XrEffectiveRate(stopped_rate));
+  CHECK(!stopped_rate.from_runtime && !stopped_rate.from_display && stopped_rate.effective_fps==config.frame_limit_fps);
   CHECK(!DestroySwapchains()); // no resource teardown may race that frame
   SetEvent(inactive_wait_release);
   const auto stop_deadline=GetTickCount64()+1000;
@@ -589,22 +773,41 @@ int main() {
   block_inactive_wait=false;
   XrOnPresentFrame();CHECK(ended_sessions==1 && !bad_order);
   // The same native session handle can restart after deferred cleanup.
+  const auto restart_queries=refresh_queries;
   next_session_state=XR_SESSION_STATE_READY;XrOnPresentFrame();
   CHECK(begun_sessions==1 && XrSessionRunning());
+  CHECK(refresh_queries==restart_queries+1 && g_display_refresh_hz==120.0);
   next_session_state=XR_SESSION_STATE_FOCUSED;XrOnPresentFrame();
   const auto restart_deadline=GetTickCount64()+1000;
   while(!g_inactive_pump.PauseAndIdle() && GetTickCount64()<restart_deadline)Sleep(1);
   CHECK(g_inactive_pump.PauseAndIdle());
   CHECK(g_inactive_pump.StopAndWait(1000));
   CloseHandle(inactive_wait_entered);CloseHandle(inactive_wait_release);
+  // Both session and instance loss clear the physical authority immediately.
+  next_session_state=XR_SESSION_STATE_LOSS_PENDING;XrOnPresentFrame();
+  CHECK(!XrSessionRunning() && g_display_refresh_hz==0.0);
+  CHECK(XrEffectiveRate(stopped_rate) && !stopped_rate.from_runtime && !stopped_rate.from_display);
+  event_refresh=144.0f;refresh_event_pending=true;XrOnPresentFrame();
+  CHECK(g_display_refresh_hz==0.0); // late event cannot revive a lost session
+  g_state=XR_SESSION_STATE_FOCUSED;g_running=true;QueryDisplayRefresh();
+  instance_loss_pending=true;XrOnPresentFrame();
+  CHECK(!XrSessionRunning() && g_display_refresh_hz==0.0);
+  CHECK(XrEffectiveRate(stopped_rate) && !stopped_rate.from_display);
+  g_state=XR_SESSION_STATE_FOCUSED;g_running=true;QueryDisplayRefresh();
+  poll_error=XR_ERROR_INSTANCE_LOST;XrOnPresentFrame();
+  CHECK(!XrSessionRunning() && g_display_refresh_hz==0.0);
+  CHECK(XrEffectiveRate(stopped_rate) && !stopped_rate.from_runtime);
   backbuffer->Release();
   for (auto* texture : textures) texture->Release();
   g_context->ClearState();
   native_target->Release();
+  native_cb->Release();
+  context1->Release();
   g_context->Flush();
   auto release = [](auto*& object) { if (object) object->Release(); object = nullptr; };
   release(g_blit_vs); release(g_blit_ps); release(g_blit_sampler);
   release(g_blit_blend); release(g_blit_depth); release(g_blit_raster);
+  release(g_blit_constants);
   release(g_blit_srv); release(g_stage);
   *reinterpret_cast<void***>(g_context) = original_vtable;
   g_context->Release();

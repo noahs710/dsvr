@@ -18,6 +18,8 @@ HMODULE image = nullptr;
 const auto provider = reinterpret_cast<HMODULE>(1);
 int creates = 0;
 bool motion_available = false;
+bool physical_connected = true;
+dsvr::VirtualPadState motion_state{dsvr::kPadA};
 bool capabilities_available = false;
 bool capabilities_hook_created = false;
 using CapsPoll = DWORD(WINAPI*)(DWORD, DWORD, XINPUT_CAPABILITIES*);
@@ -33,7 +35,7 @@ DWORD WINAPI Physical(DWORD user, XINPUT_STATE* state) {
     pause_cv.notify_all();
     pause_cv.wait(lock, [] { return resume; });
   }
-  if (user != 0) return ERROR_DEVICE_NOT_CONNECTED;
+  if (user != 0 || !physical_connected) return ERROR_DEVICE_NOT_CONNECTED;
   *state = {};
   state->Gamepad.wButtons = XINPUT_GAMEPAD_X;
   state->Gamepad.sThumbLY = 123;
@@ -157,8 +159,7 @@ const char* WINAPI MH_StatusToString(MH_STATUS) { return "forced allocation fail
 namespace dsvr {
 void LogWrite(LogLevel, const char*, int, const char*, ...) {}
 bool InputLatestPad(VirtualPadState& state) {
-  state = {};
-  if (motion_available) state.buttons = XINPUT_GAMEPAD_A;
+  state = motion_available ? motion_state : VirtualPadState{};
   return motion_available;
 }
 bool LabPollPad(const VirtualPadState&, const VirtualPadState&, VirtualPadState&) {
@@ -166,6 +167,38 @@ bool LabPollPad(const VirtualPadState&, const VirtualPadState&, VirtualPadState&
 }
 }
 #define CHECK(x) do { if (!(x)) { std::printf("FAIL %d: %s\n", __LINE__, #x); return 1; } } while (0)
+
+int QuestOnlyPad() {
+  using namespace dsvr;
+  Fixture();
+  physical_connected = false;
+  motion_available = true;
+  CHECK(XInputBridgeInstall(true));
+  auto detour = reinterpret_cast<DWORD(WINAPI*)(DWORD, XINPUT_STATE*)>(LoadSlot());
+  VrPadInput quest{};
+  quest.left.stick_y = 1;
+  quest.right.primary = true;
+  motion_state = MapVrPad(quest, true);
+  XINPUT_STATE state;
+  std::memset(&state, 0xff, sizeof(state));
+  CHECK(detour(0, &state) == ERROR_SUCCESS);
+  CHECK(state.Gamepad.wButtons == (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_DPAD_UP));
+  CHECK(state.Gamepad.sThumbLX == 0 && state.Gamepad.sThumbLY == 0);
+  CHECK(state.Gamepad.sThumbRX == 0 && state.Gamepad.sThumbRY == 0);
+  CHECK(state.Gamepad.bLeftTrigger == 0 && state.Gamepad.bRightTrigger == 0);
+  const auto pressed_packet = state.dwPacketNumber;
+  CHECK(detour(0, &state) == ERROR_SUCCESS && state.dwPacketNumber == pressed_packet);
+  motion_state = {};
+  CHECK(detour(0, &state) == ERROR_SUCCESS && state.Gamepad.wButtons == 0);
+  CHECK(state.dwPacketNumber != pressed_packet);
+  motion_available = false;
+  CHECK(detour(0, &state) == ERROR_DEVICE_NOT_CONNECTED);
+  XInputBridgeUninstall();
+  physical_connected = true;
+  motion_available = true;
+  motion_state = {kPadA};
+  return 0;
+}
 
 int FailureCases() {
   using namespace dsvr;
@@ -311,6 +344,7 @@ int main() {
   CHECK(!XInputBridgeInstall(true));
   CHECK(LoadSlot() == reinterpret_cast<void*>(&Physical));
   CHECK(FailureCases() == 0); CHECK(AdditionalRefusals() == 0);
+  CHECK(QuestOnlyPad() == 0);
   // Exports can choose different bridge routes. Reinstall must restore the
   // state IAT patch and re-enable the retained capabilities trampoline.
   Fixture();

@@ -72,6 +72,33 @@ struct Config {
   MovementOrientation movement_orientation = MovementOrientation::Head;
   MovementController movement_controller = MovementController::NonDominant;
   std::string play_style = "standing";   // standing | seated | roomscale
+  // Arm-swing locomotion (arm_swing_math.h): swinging the arms in loose
+  // alternation, the way a body runs, asks the native game to run. The output
+  // is one forward amount that composes with the stick and roomscale input in
+  // the same movement basis, so native acceleration, stamina drain, turning
+  // and the dash all stay the game's -- holding the stick forward still dashes
+  // exactly as before. Speeds are head-relative, so riding a lift or walking
+  // the room cannot manufacture a stride, and one hand flapping or a
+  // two-handed swing is not a gait (both put the hands in motion together).
+  bool arm_swing_sprint = false;
+  float arm_swing_stride_min = 1.6f;  // m/s hand speed that counts as a stride
+  float arm_swing_stride_max = 8.0f;  // m/s above which this is a swing, not a stride
+  float arm_swing_quiet_max = 0.9f;   // m/s at or below which the other hand is quiet
+  int arm_swing_alternations = 3;     // hand swaps before the run engages
+  int arm_swing_hold_ms = 600;        // ms the run lingers after the last stride
+  // Reach-to-interact: thrusting one hand forward through the reach envelope
+  // taps the native interact button. No native prompt flag is bound, so the
+  // gesture ALONE decides: reaching toward a fog gate, a door or an enemy's
+  // face can interact. Off by default until that trade-off is lived with.
+  bool reach_interact = false;
+  float reach_forward_min_m = 0.75f;  // m ahead of the head the hand must reach
+  float reach_forward_max_m = 2.2f;   // m ahead of the head beyond which nothing counts
+  float reach_speed_min = 1.2f;       // m/s forward hand speed that reads as a thrust
+  float reach_dominance_min = 0.6f;   // fraction of hand speed that must point forward
+  float reach_quiet_max = 0.8f;       // m/s a hand must stay below to count as still
+  int reach_settle_ms = 250;          // ms both hands must rest before a thrust can count
+  int reach_press_ms = 60;            // ms the interact tap is held
+  int reach_cooldown_ms = 900;        // ms before the same hand may reach again
   bool hotkeys_enabled = true;
   int log_marker_vk = 0x78;              // VK_F9: timestamped marker in DSVR.log
   int config_reload_vk = 0x76;           // VK_F7: reload DSVR.toml without restart
@@ -81,12 +108,38 @@ struct Config {
   // back to a physical controller / keyboard only.
   bool xr_input_enabled = true;
 
+  // [controls] per-profile suggested bindings (input.cpp SuggestAll). A profile
+  // that is off is never suggested, so the runtime cannot resolve a binding the
+  // operator removed. WMR carries the full set (poses, squeeze, trigger, stick,
+  // haptics, menu, stick clicks); Quest 3 and Index carry their own face-button
+  // rows; the KHR simple profile is the pose/haptic-only fallback that lets an
+  // unknown device still drive the hands. Leave the fallback on unless every
+  // device in the room is known.
+  bool bind_profile_quest3 = true;
+  bool bind_profile_index = true;
+  bool bind_profile_wmr = true;
+  bool bind_profile_simple = true;
+  // When edited bindings take effect. Off (default): the next session, with the
+  // current session's input untouched. On: the action set is rebuilt on the
+  // input thread the moment Apply is pressed, which costs a short input dropout
+  // and is refused by runtimes that will not attach a second action set
+  // mid-session -- a refused attach leaves this session without controller
+  // input, so it is opt-in until the headset proves the answer.
+  bool binding_live_reattach = false;
+
   // [camera]
   // Calibration owns the default. Legacy eye_height alone is a fallback, not
   // an implicit override. Only the in-game menu exposes this opt-in.
   bool eye_height_override = false;
   float eye_height = 1.65f;       // manual/fallback metres above player anchor
   float world_scale = 1.0f;       // 0.5..2.0 trim on automatic native-world/avatar fit
+  // Avatar size trim (0.6..1.6): a second multiplier on the SAME applied camera
+  // snapshot, so the head, hands, roomscale and the IK body all read one value
+  // and nothing detaches from anything else. Like world_scale it changes the
+  // apparent size of the whole world/avatar together through one ratio; it is
+  // NOT an independent skinned-mesh resize, which still needs a verified native
+  // render owner, and it never scales a bone base or a collider.
+  float avatar_scale = 1.0f;
   float forward_offset_m = 0.0f;  // 0..0.4; 0 = camera at the head (0.12.0:
                                   // the old 0.22 hovered in front of the face)
   // Height band around eye_height that the tracked eye may leave. Physical
@@ -106,6 +159,12 @@ struct Config {
   // observer-only, headlook on, XR session running, no menu presentation);
   // it does NOT require arm_ik_enabled. Menus keep the native head.
   bool hide_head = true;
+  // Torso and legs can be excluded on their own while the arms stay: the
+  // native part table keeps body (slot 3) and legs (slot 5) as separate
+  // records from arms (slot 4), so this clears part types only and never a
+  // bone transform. The weapon lives on the primary render model, which this
+  // filter never touches.
+  bool hide_torso_and_legs = false;
   bool forearm_only = false;
   bool hide_ui_in_vr = false;
   // The local player owns two render models (presence.cpp): the primary at
@@ -141,6 +200,14 @@ struct Config {
   // damage is still unfinished.
   bool arm_ik_enabled = false;
   bool arm_ik_log_only = true;
+  // Animation ownership. The IK-owned subtrees (both arm chains, the torso
+  // chain and the head) are written only by the IK: each frame their source
+  // rows restart from a frozen upright native reference palette captured once
+  // per rig revision, so no clip, blend, attack or idle animation can move an
+  // IK bodypart. The native animation writer still runs, so animation state,
+  // event counters, legs, equipment and every non-owned row stay native.
+  // false restores the previous post-animation retarget.
+  bool arm_ik_block_animation = true;
   // Provisional outward roll correction (degrees, mirrored per hand) for
   // the calibrated grip: live report was hands rotated inwards a bit with
   // controllers held straight. Positive turns palms outward; set negative
@@ -148,6 +215,25 @@ struct Config {
   float grip_roll_correction_deg = 12.0f;
   float contact_speed_min = 0.8f;  // m/s tip speed below which contact = 0 dmg
   int rehit_window_ms = 280;       // per-enemy minimum ms between IK hits
+  // Opt-in native attack-input preview, not a physical-damage binding.
+  // Requires a fresh committed weapon-hand IK pose with animation ownership.
+  // Rest then sustained head-relative blade speed requests one native attack;
+  // speed selects light/strong. Thrust bars are 0.75x when thrusts are enabled.
+  // Native animation windows, collision and outcomes remain unqualified.
+  // Keep manual combat controls and leave this off until the live gate passes.
+  bool physical_attacks = false;
+  float swing_attack_speed_min = 2.0f;  // m/s tip speed for a light slash
+  float swing_attack_heavy_min = 4.5f;  // m/s tip speed for a strong slash
+  int swing_attack_cooldown_ms = 500;   // ms before the same hand attacks again
+  // Physical defence bridge: the mirror of the attack bridge for the shield
+  // hand. A raised, still hand holds native block (LB); a qualified flick
+  // taps native parry (LT). Same qualification limits:
+  // native guard windows, chip damage and parry judgement stay unqualified.
+  bool physical_defence = false;
+  int guard_settle_ms = 120;             // ms a raised hand must stay still
+  float guard_flick_speed_min = 2.2f;    // m/s hand speed that reads as a flick
+  int guard_parry_press_ms = 90;         // ms the parry tap is held
+  int guard_parry_cooldown_ms = 700;     // ms before the same hand may parry again
   // Combat proving ground (offline/headset, no native writes): when true,
   // the pose thread classifies live blade contact against a fixed
   // sparring target in front of the player and logs hit/block/parry +
@@ -164,6 +250,9 @@ struct Config {
   // Startup-only, desktop native observation. Overrides VR and all gameplay
   // adapters; changing it requires a process restart, not F7. Not save isolation.
   bool observer_only = false;
+  // Startup-only LAB observer domain: native contact + Step only, no renderer
+  // probes. Broad constant-upload tracing overwhelmed the first B1 capture.
+  bool combat_trace_only = false;
 
   // [safety]
   bool offline_only_ack = false;  // installer sets this after showing warning

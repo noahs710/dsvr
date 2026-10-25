@@ -227,7 +227,10 @@ int main() {
   manual_eye_height=true;
   detour(follow, 0.25f, &words, follow);
   CHECK(camera_applies==3 && applied_mapping.world_scale==automatic_scale);
-  CHECK(std::fabs(applied_mapping.eye_height/automatic_scale-1.82f)<1e-5f);
+  // Manual placement carries the same +0.2 m calibration height trim as every
+  // other path; the world scale is untouched by it.
+  CHECK(std::fabs(applied_mapping.eye_height/automatic_scale
+                  -(1.82f+kCalibrationHeightOffsetM))<1e-5f);
   manual_eye_height=false;
   detour(follow, 0.25f, &words, follow);
   CHECK(camera_applies==4 && std::fabs(applied_mapping.eye_height-1.8f)<1e-5f);

@@ -23,6 +23,8 @@ CombatNativeStatus g_status;
 constexpr unsigned char kPlayerAccessor[]{0x48,0x8b,0x89,0x40,0x08,0,0,0xe9,0x64,0xf7,0xea,0xff};
 constexpr unsigned char kSlotAccessor[]{0x83,0xfa,0xfe,0x75,0x0a,0x8b,0x51,0x0c,0x03,0xd2,0xe9,0x51,0x07,0x11,0};
 constexpr unsigned char kIdAccessor[]{0x83,0xfa,0x13,0x77,0x08,0x48,0x63,0xc2,0x8b,0x44,0x81,0x24,0xc3,0x83,0xc8,0xff,0xc3};
+// Pinned PlayerIns vtable address; identity claims are checked against it.
+constexpr std::uintptr_t kPlayerInsVtableRva=0x13251f0;
 
 bool LocalPlayer(std::uintptr_t base, std::uintptr_t& player) {
   std::uintptr_t world = 0;
@@ -31,13 +33,25 @@ bool LocalPlayer(std::uintptr_t base, std::uintptr_t& player) {
 }
 }  // namespace
 
+bool CombatNativeLocalPlayer(std::uintptr_t& player) {
+  player = 0;
+  const std::uintptr_t base = ModuleBase(nullptr);
+  std::uintptr_t candidate = 0, vtable = 0;
+  if (!base || !LocalPlayer(base, candidate) ||
+      !GuardedRead(candidate, vtable) ||
+      vtable != base + kPlayerInsVtableRva)
+    return false;
+  player = candidate;
+  return true;
+}
+
 bool CombatNativeReadEquipment(std::uintptr_t expected_player, CombatEquipment& out) {
   out = {};
   const auto refuse = [&]() { CombatNativeInvalidateEquipment(); return false; };
   const auto base = ModuleBase(nullptr);
   std::uintptr_t player = 0, vtable = 0, accessor = 0, assembly = 0, stance = 0;
   if (!expected_player || !base || !LocalPlayer(base, player) || player != expected_player ||
-      !GuardedRead(player, vtable) || vtable != base + 0x13251f0 ||
+      !GuardedRead(player, vtable) || vtable != base + kPlayerInsVtableRva ||
       !GuardedRead(vtable + 0x3a0, accessor) || accessor != base + 0x35b880 ||
       !BytesMatch(accessor, kPlayerAccessor, sizeof(kPlayerAccessor)) ||
       !BytesMatch(base + 0x20aff0, kSlotAccessor, sizeof(kSlotAccessor)) ||

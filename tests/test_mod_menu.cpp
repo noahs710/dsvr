@@ -88,7 +88,16 @@ int CheckPanelRegistration() {
 
 namespace dsvr {
 NativeUiStatus NativeUiGetStatus() {return {};}
-BodyVisibilityStatus BodyVisibilityGetStatus() {return {};}
+bool capture_menu_text=false;
+BodyVisibilityStatus BodyVisibilityGetStatus() {
+  if (capture_menu_text) { ImGui::LogToFile(-1,"menu-label-capture.txt"); capture_menu_text=false; }
+  return {};
+}
+// The panel asks for a fresh native parts command when a visibility row is
+// ticked. The status stub reports the filter as unavailable, so the row stays
+// disabled here and the count stays zero; test_body_visibility owns the path.
+int visibility_refresh_requests = 0;
+bool BodyVisibilityRequestRefresh() { ++visibility_refresh_requests; return true; }
 MotionBlurStatus MotionBlurGetStatus() {return {};}
 CalibrationStatus CalibrationGetStatus() {
   if (ImGui::GetCurrentContext()) {
@@ -152,6 +161,8 @@ std::string DiagnosticsSettingsStatus() {
 void DiagnosticsRequestLogExport() {}
 void DiagnosticsLogMarker() {}
 bool DiagnosticsRequestCommand(const char*,std::function<bool()>) {return true;}
+int binding_reloads=0;
+void InputRequestBindingReload() {++binding_reloads;}
 CombatNativeStatus CombatNativeGetStatus() {return {};}
 bool ArmIkCombatBench(CombatBenchSnapshot& out) {out = {};return false;}
 bool WeaponGripGet(int,bool,WeaponGripProfile&) {return false;}
@@ -184,7 +195,32 @@ int main(int argc,char** argv) {
   const float color[]={.12f,.14f,.17f,1};context->ClearRenderTargetView(target.Get(),color);
   ModMenuToggle();CHECK(ModMenuCapturesInput());
   for(int i=0;i<3;++i) ModMenuRenderTexture(device.Get(),image.Get());
+  // Assert the shipped palette, readable fallback body font, and persistent
+  // keyboard/gamepad navigation rather than a duplicate theme fixture.
+  CHECK(menu_context);ImGui::SetCurrentContext(menu_context);
+  const auto& theme=ImGui::GetStyle();
+  const auto ash=theme.Colors[ImGuiCol_WindowBg];
+  const auto parchment=theme.Colors[ImGuiCol_Text];
+  const auto ochre=theme.Colors[ImGuiCol_CheckMark];
+  CHECK(ash.x<.08f && ash.y<.08f && ash.z<.08f);
+  CHECK(parchment.x>.8f && parchment.x>parchment.y && parchment.y>parchment.z);
+  CHECK(ochre.x>ochre.y && ochre.y>ochre.z);
+  CHECK(theme.Colors[ImGuiCol_PopupBg].x<.12f);
+  CHECK(theme.Colors[ImGuiCol_TitleBgActive].z<.12f);
+  CHECK(theme.WindowBorderSize==1 && theme.FrameBorderSize==1);
+  CHECK(ImGui::GetIO().FontDefault);
+  CHECK(ImGui::GetIO().ConfigFlags&ImGuiConfigFlags_NavEnableKeyboard);
+  CHECK(ImGui::GetIO().ConfigFlags&ImGuiConfigFlags_NavEnableGamepad);
   if(!calibration) {
+    std::remove("menu-label-capture.txt");
+    capture_menu_text=true;
+    ModMenuRenderTexture(device.Get(),image.Get());
+    FILE* captured=nullptr;
+    CHECK(fopen_s(&captured,"menu-label-capture.txt","rb")==0 && captured);
+    char menu_text[8192]{};
+    const auto captured_size=fread(menu_text,1,sizeof(menu_text)-1,captured);
+    fclose(captured);
+    CHECK(std::string(menu_text,captured_size).find("Hide face, headgear and hair")!=std::string::npos);
     // Drive the shipped controls through ImGui's navigation activation, not a
     // duplicate settings-state helper: edit -> Apply -> Save identical values.
     CHECK(menu_context);ImGui::SetCurrentContext(menu_context);
@@ -194,6 +230,12 @@ int main(int argc,char** argv) {
     CHECK(panel);
     ImGui::ActivateItemByID(ImHashStr("Track native arms",0,panel->ID));
     ModMenuRenderTexture(device.Get(),image.Get());
+    // Profile refresh is reachable by navigation, not only by aiming. It asks
+    // the input thread to refresh the applied filter (never reattach actions),
+    // without touching draft config or being mistaken for an Apply press.
+    ImGui::ActivateItemByID(ImHashStr("Refresh profile filter now",0,panel->ID));
+    ModMenuRenderTexture(device.Get(),image.Get());
+    CHECK(binding_reloads==1 && applies==0);
     auto click=[&](float x) {
       pointer_state={true,true,false,x,footer_y};
       ModMenuRenderTexture(device.Get(),image.Get());
@@ -245,6 +287,12 @@ int main(int argc,char** argv) {
     probe_pointer_click=true;ModMenuRenderTexture(device.Get(),image.Get());
     CHECK(navigation_select_down && !pointer_mouse_down);
     pointer_state.navigation_select=false;
+    probe_pointer_click=true;ModMenuRenderTexture(device.Get(),image.Get());
+    CHECK(!navigation_select_down && !pointer_mouse_down);
+    ModMenuControllerInput(0,0,true,false);
+    probe_pointer_click=true;ModMenuRenderTexture(device.Get(),image.Get());
+    CHECK(navigation_select_down && !pointer_mouse_down);
+    ModMenuControllerInput(0,0,false,false);
     probe_pointer_click=true;ModMenuRenderTexture(device.Get(),image.Get());
     CHECK(!navigation_select_down && !pointer_mouse_down);
     pointer_state={true,true,false,100.f,65.f};

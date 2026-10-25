@@ -44,7 +44,8 @@ struct Binding {
 };
 struct AppliedParts {
   Binding binding{};
-  bool valid = false, filtered = false;
+  bool valid = false;
+  unsigned mask = 0;
 };
 std::mutex g_applied_mutex;
 AppliedParts g_applied;
@@ -91,11 +92,21 @@ bool ReadBinding(Binding& out) {
   return true;
 }
 
-bool HideHead() {
+// Part records that lose their low type nibble. Bits are native part slots in
+// the pinned 206590 corpus: 0 is the FgModel-generated face, 1 face, 2 head
+// gear, 3 body, 4 arms, 5 legs, 6 hair. Clearing a type excludes geometry
+// without stretching skin, and the primary (weapon) model is never read here,
+// so a torso/leg filter keeps arms and weapons drawing.
+unsigned FilterMask() {
   const auto config = DiagnosticsCurrentConfig();
-  return g_enabled.load() && config.vr_enabled && !config.observer_only &&
-      config.headlook_enabled && config.hide_head && XrSessionRunning() &&
-      !XrMenuPresentationActive();
+  if (!g_enabled.load() || !config.vr_enabled || config.observer_only ||
+      !config.headlook_enabled || !XrSessionRunning() ||
+      XrMenuPresentationActive())
+    return 0;
+  unsigned mask = 0;
+  if (config.hide_head) mask |= (1u << 0) | (1u << 1) | (1u << 2) | (1u << 6);
+  if (config.hide_torso_and_legs) mask |= (1u << 3) | (1u << 5);
+  return mask;
 }
 
 bool IsLocalAlternate(std::uintptr_t model) {
@@ -106,9 +117,9 @@ bool IsLocalAlternate(std::uintptr_t model) {
       GuardedRead(player + 0x850, alternate) && alternate == model;
 }
 
-void Remember(const Binding& binding, bool filtered) {
+void Remember(const Binding& binding, unsigned mask) {
   std::lock_guard<std::mutex> lock(g_applied_mutex);
-  g_applied = {binding, true, filtered};
+  g_applied = {binding, true, mask};
 }
 
 // A policy transition needs a fresh native parts command, even when equipment
@@ -137,9 +148,9 @@ void __fastcall QueuePartsDetour(void* queue, std::uint32_t id, const void* reco
     g_original_queue(queue, id, records, count);
     return;
   }
-  const bool hide = HideHead();
-  if (!hide) {
-    Remember(binding, false);
+  const unsigned mask = FilterMask();
+  if (!mask) {
+    Remember(binding, 0);
     g_original_queue(queue, id, records, count);
     return;
   }
@@ -153,16 +164,22 @@ void __fastcall QueuePartsDetour(void* queue, std::uint32_t id, const void* reco
   scratch = original;
   std::uintptr_t slot_zero = 0;
   std::memcpy(&slot_zero, original.data(), sizeof(slot_zero));
-  if (binding.generated_face && slot_zero == binding.generated_face) scratch[9] &= 0xf0;
-  for (const auto slot : {1u, 2u, 6u}) scratch[slot * 16 + 9] &= 0xf0;
-  if (!ReadBinding(current) || current != binding ||
+  if ((mask & 1u) && binding.generated_face && slot_zero == binding.generated_face)
+      scratch[9] &= 0xf0;
+  for (unsigned slot = 1; slot <= 6u; ++slot)
+      if (mask & (1u << slot)) scratch[slot * 16 + 9] &= 0xf0;
+    // The live records must still be the ones just read and the mask must still
+    // be wanted: a scene swap or an operator un-tick between the read and the
+    // queue hands the native game its own unfiltered copy instead of a stale
+    // filtered one.
+    if (!ReadBinding(current) || current != binding ||
       !GuardedReadBytes(binding.parts, verified.data(), verified.size()) ||
-      verified != original || !HideHead()) {
+        verified != original || FilterMask() != mask) {
     ++g_refused;
     g_original_queue(queue, id, records, count);
     return;
   }
-  Remember(binding, true);
+  Remember(binding, mask);
   ++g_filtered;
   // Native 219230 copies all 13 records into the command buffer synchronously.
   g_original_queue(queue, id, scratch.data(), count);
@@ -180,8 +197,8 @@ void __fastcall ModelUpdateDetour(void* model, float delta) {
     // Normal frames require no skeleton/parts scan or additional queue command.
     // Nonlocal models do not acquire XR state or copy the full mod config.
     if (known || IsLocalAlternate(address)) {
-      const bool hide = HideHead();
-      if ((!known && hide) || (known && applied.filtered != hide)) {
+      const unsigned mask = FilterMask();
+      if ((!known && mask) || (known && applied.mask != mask)) {
         Binding binding{};
         if (ReadBinding(binding) && binding.alternate == address) {
           if (MarkPartsDirty(binding)) ++g_refreshes;
@@ -193,6 +210,19 @@ void __fastcall ModelUpdateDetour(void* model, float delta) {
   g_original_update(model, delta);
 }
 }  // namespace
+
+// A queue command is already pending when the dirty bit is set, so an
+// already-dirty binding counts as refreshed: the native updater will re-read the
+// part records and the detour will then apply whatever mask is live at that
+// moment, which is the config the caller just changed.
+bool BodyVisibilityRequestRefresh() {
+  if (!g_enabled.load()) return false;
+  Binding binding{};
+  if (!ReadBinding(binding)) return false;
+  if (MarkPartsDirty(binding)) { ++g_refreshes; return true; }
+  ++g_refused;
+  return false;
+}
 
 bool BodyVisibilityHookInstall(bool enabled) {
   if (!enabled) return false;
@@ -227,7 +257,7 @@ void BodyVisibilityHookUninstall() {
     applied = g_applied;
     g_applied = {};
   }
-  if (applied.valid && applied.filtered && !MarkPartsDirty(applied.binding)) ++g_refused;
+  if (applied.valid && applied.mask && !MarkPartsDirty(applied.binding)) ++g_refused;
   const auto base = ModuleBase(nullptr);
   if (g_original_update) MH_DisableHook(reinterpret_cast<void*>(base + kModelUpdate));
   if (g_original_queue) MH_DisableHook(reinterpret_cast<void*>(base + kQueueParts));

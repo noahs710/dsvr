@@ -31,9 +31,9 @@ std::atomic<bool> g_logged_first_caps{false};
 
 extern "C" std::uintptr_t DsvrIatCompareExchange(void* slot, std::uintptr_t expected,
                                                  std::uintptr_t desired);
-// One game-local IAT patch per hooked export. Feeding XInputGetState alone is not
-// enough: the game's front-end gates menu input on XInputGetCapabilities, so with
-// no physical pad present it never treats user 0 as a controller at all.
+// One game-local IAT patch per export. The pinned game enumerates through
+// XInputGetState. Capabilities is best-effort for other callers; a missing
+// capabilities import does not mean the state bridge or enumeration failed.
 struct IatPatch {
   std::atomic<void*> original{nullptr};
   std::atomic<bool> enabled{false};
@@ -259,6 +259,18 @@ DWORD MergeXInputState(DWORD user_index, XINPUT_STATE* state, DWORD result) {
   if (result != ERROR_SUCCESS) std::memset(state, 0, sizeof(*state));
   if (!lab_owned) merged = OverlayMotionPad(physical, motion);
   ToXInput(merged, state->Gamepad);
+  static std::atomic<ULONGLONG> last_route_log{0};
+  const auto now = GetTickCount64();
+  auto last = last_route_log.load(std::memory_order_relaxed);
+  if ((!last || now < last || now - last >= 1000) &&
+      last_route_log.compare_exchange_strong(last, now, std::memory_order_relaxed)) {
+    DWORD foreground_pid = 0;
+    GetWindowThreadProcessId(GetForegroundWindow(), &foreground_pid);
+    DSVR_LOG("XInputRoute: user=%lu native_result=%lu motion=%d lab=%d foreground=%d motion_buttons=0x%04x merged_buttons=0x%04x left=(%d,%d)",
+             user_index, result, have_motion, lab_owned, foreground_pid == GetCurrentProcessId(),
+             static_cast<unsigned>(motion.buttons), static_cast<unsigned>(merged.buttons),
+             static_cast<int>(merged.thumb_lx), static_cast<int>(merged.thumb_ly));
+  }
   const unsigned long long hash = HashPad(state->Gamepad);
   unsigned long long previous = g_last_hash.load(std::memory_order_relaxed);
   if (previous != hash && g_last_hash.compare_exchange_strong(
@@ -431,7 +443,7 @@ bool XInputBridgeInstall(bool enabled) {
           reinterpret_cast<void*>(&XInputGetCapabilitiesDetour),
           reinterpret_cast<void*>(&XInputCapsIatDetour), g_caps_inline_enabled,
           g_caps_iat))
-    DSVR_WARN("XInput: capabilities unbridged; the game's front-end may still ignore user 0");
+    DSVR_WARN("XInput: capabilities route unavailable; the verified state route remains live");
   return true;
 }
 

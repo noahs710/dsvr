@@ -10,7 +10,11 @@ void ModMenuToggle();
 void ModMenuClose();
 bool ModMenuVisible();
 bool ModMenuCapturesInput();
-void ModMenuControllerInput(float x, float y, bool select, bool back);
+// select is the A/confirm button only; triggers belong to the spatial ray.
+// prev_panel/next_panel are the left hand's X/Y while the menu captures input:
+// the headset has no keyboard, so this is the only way to change screens.
+void ModMenuControllerInput(float x, float y, bool select, bool back,
+                            bool prev_panel = false, bool next_panel = false);
 void ModMenuRenderTexture(ID3D11Device* device, ID3D11Texture2D* image);
 void ModMenuShutdown();
 using ModMenuPanel = void (*)();

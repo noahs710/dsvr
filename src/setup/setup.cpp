@@ -405,6 +405,14 @@ bool RestoreBlurOnUninstall(const std::wstring& game_dir, const LogFn& log) {
   return ok;
 }
 
+InstallState InstallStateOf(const std::wstring& exe) {
+  const std::wstring dir = DirNameOf(exe);
+  InstallState st;
+  st.has_loader = PathExists(JoinPath(dir, L"dinput8.dll"));
+  st.has_core = PathExists(JoinPath(dir, L"DSVR.dll"));
+  return st;
+}
+
 std::vector<std::wstring> DoctorChecks(const std::wstring& exe,
                                        const LogFn& log) {
   std::vector<std::wstring> lines;
@@ -418,11 +426,10 @@ std::vector<std::wstring> DoctorChecks(const std::wstring& exe,
   emit(IsGameRunning() ? L"[WARN] Game is RUNNING -- close it before install/uninstall"
                        : L"[OK] Game not running");
   std::wstring dir = DirNameOf(exe);
-  bool has_loader = PathExists(JoinPath(dir, L"dinput8.dll"));
-  bool has_core = PathExists(JoinPath(dir, L"DSVR.dll"));
-  emit(has_loader && has_core
+  const InstallState st = InstallStateOf(exe);
+  emit(st.installed()
            ? L"[OK] DSVR installed (dinput8.dll + DSVR.dll present)"
-           : has_loader || has_core
+           : st.partial()
                  ? L"[WARN] Partial install -- run Install again or Uninstall"
                  : L"[OK] DSVR not installed (vanilla folder)");
   if (PathExists(JoinPath(dir, L"dxgi.dll")))

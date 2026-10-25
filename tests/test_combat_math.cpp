@@ -109,6 +109,60 @@ int main() {
     check(!BladeSweptOverlapsSphere(sg, st, {NAN, 0, 0}, enemy, 0.1f));
   }
 
+  // Rotational sweep: a fast wrist rotation carries the tip along an ARC, and
+  // the straight prev_tip->tip chord cuts inside that arc. A small target on
+  // the arc's outer side sits inside the volume the blade actually occupied
+  // yet outside the previous capsule, the current capsule and the chord.
+  {
+    CombatParams p;
+    p.blade_radius_m = 0.03f;
+    const Vec3 g{0, 1.4f, 0};
+    const Vec3 prev_tip{0.9f, 1.4f, 0.0f};   // blade pointed +X last frame
+    const Vec3 tip{0.0f, 1.4f, -0.9f};       // pointed -Z this frame: 90 deg
+    const Vec3 on_arc{0.6364f, 1.4f, -0.6364f};  // mid-arc at full reach
+    check(!BladeOverlapsSphere(g, tip, on_arc, 0.05f, p));
+    check(!BladeOverlapsSphere(g, prev_tip, on_arc, 0.05f, p));
+    check(!BladeSweptOverlapsSphere(g, tip, prev_tip, on_arc, 0.05f, p));
+    check(BladeSweptOverlapsSphereArc(g, prev_tip, g, tip, on_arc, 0.05f, p));
+    // Nothing outside the swept band becomes a hit, and the sweep stays
+    // bounded: a target half a metre beyond the arc stays a miss.
+    check(!BladeSweptOverlapsSphereArc(g, prev_tip, g, tip,
+                                       {1.0f, 1.4f, -1.0f}, 0.05f, p));
+    check(!BladeSweptOverlapsSphereArc(g, prev_tip, g, tip,
+                                       {0.6364f, 2.4f, -0.6364f}, 0.05f, p));
+    // Pure translation has no rotation plane to invent: the arc path must
+    // agree with the chord, never invent coverage and never go NaN.
+    check(BladeSweptOverlapsSphereArc({0, 1.4f, 0.9f}, {0, 1.4f, 0.0f}, g, tip,
+                                      {0, 1.4f, -0.45f}, 0.1f, p));
+    check(!BladeSweptOverlapsSphereArc({0, 1.4f, 0.9f}, {0, 1.4f, 0.0f}, g, tip,
+                                       {0, 1.4f, 0.45f}, 0.1f, p));
+    check(!BladeSweptOverlapsSphereArc(g, prev_tip, g, tip, on_arc, -1.0f, p));
+    check(!BladeSweptOverlapsSphereArc({NAN, 0, 0}, prev_tip, g, tip, on_arc,
+                                       0.05f, p));
+    CombatParams bad = p;
+    bad.blade_radius_m = NAN;
+    check(!BladeSweptOverlapsSphereArc(g, prev_tip, g, tip, on_arc, 0.05f, bad));
+    // A 180-degree flip has no unique axis: fall back to the chord alone
+    // rather than choosing an arbitrary rotation plane.
+    check(!BladeSweptOverlapsSphereArc(g, {0, 1.4f, -0.9f}, g,
+                                       {0, 1.4f, 0.9f}, {0.9f, 1.4f, 0}, 0.05f,
+                                       p));
+    // End-to-end: the runtime decision reports the arc-only contact.
+    RehitGate gate;
+    BladeKinematics blade;
+    blade.valid = true;
+    blade.grip = g;
+    blade.tip = tip;
+    blade.prev_grip = g;
+    blade.prev_tip = prev_tip;
+    blade.tip_speed = 3.0f;
+    BladeContactTarget targets[] = {{7, on_arc, 0.05f}};
+    BladeHit hit{};
+    check(EvaluateBladeContact(blade, GestureKind::Slash, targets, 0.8f, 1.0f,
+                               280, 1000, true, gate, hit));
+    check(hit.target_id == 7 && hit.damage_scale > 0.0f);
+  }
+
   // Re-hit gate: same enemy blocked inside the window, others pass.
   {
     RehitGate gate;

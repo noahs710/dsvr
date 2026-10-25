@@ -62,6 +62,7 @@ add_library(dsvr_core SHARED
   weapon_grip.h
   combat_native.cpp
   combat_native.h
+  combat_atkparam.h
   render.h
   render.cpp
   render_host.h
@@ -93,9 +94,12 @@ add_library(dsvr_core SHARED
   body_visibility.cpp
   arm_ik.h
   arm_ik.cpp
-  head_rider.h
   arm_ik_math.h
   combat_math.h
+  swing_attack_math.h
+  shield_guard_math.h
+  arm_swing_math.h
+  reach_intent_math.h
   hand_math.h
   gesture_math.h
   vr_trace.h

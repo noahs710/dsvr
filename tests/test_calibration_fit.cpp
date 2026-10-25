@@ -13,7 +13,11 @@ int main() {
   p.arm_reach_m[0]=p.arm_reach_m[1]=.6f;
   const auto fit=ResolveCalibrationMapping(p,1.65f,false,1.f,.54f,3);
   CHECK(fit.valid && fit.fitted && near(fit.world_scale,.9f));
-  CHECK(near(fit.eye_height,1.485f) && fit.calibration_revision==7 && fit.model_revision==3);
+  CHECK(near(fit.eye_height,1.85f*.9f) && fit.calibration_revision==7 && fit.model_revision==3);
+  // The +0.2 m height trim is an applied offset, never a profile write: the
+  // saved profile still reports the height that was actually captured.
+  CHECK(near(p.eye_height_m,1.65f));
+  CHECK(near(fit.eye_height/fit.world_scale,1.65f+kCalibrationHeightOffsetM));
   // The same conversion fits the ENTIRE native avatar/world, not an arm-only
   // controller gain. One physical metre, including head motion, is .9 native.
   const auto moved=HeadTranslationWorld({1,0,0},{1,0,0},{0,1,0},{0,0,1},fit.world_scale);
@@ -21,14 +25,14 @@ int main() {
   for(float height:{1.2f,1.65f,2.1f}) {
     p.eye_height_m=height;
     const auto stature=ResolveCalibrationMapping(p,1.65f,false,1.f,.54f,3);
-    CHECK(stature.valid && near(stature.eye_height/ stature.world_scale,height));
+    CHECK(stature.valid && near(stature.eye_height/ stature.world_scale,height+kCalibrationHeightOffsetM));
     CHECK(near(stature.world_scale,fit.world_scale)); // height is not arm reach
     const auto seated=ResolveCalibrationMapping(p,1.65f,true,1.f,.54f,3);
-    CHECK(seated.valid && near(seated.eye_height,height*.9f));
+    CHECK(seated.valid && near(seated.eye_height,(height+kCalibrationHeightOffsetM)*.9f));
   }
   p.eye_height_m=1.65f;
   const auto trim=ResolveCalibrationMapping(p,1.65f,false,1.5f,.54f,3);
-  CHECK(near(trim.world_scale,1.35f) && near(trim.eye_height,2.2275f));
+  CHECK(near(trim.world_scale,1.35f) && near(trim.eye_height,1.85f*1.35f));
   const auto model=ResolveCalibrationMapping(p,1.65f,false,1.f,.72f,4);
   CHECK(near(model.world_scale,1.2f) && model.model_revision==4);
   p.arm_reach_m[0]=p.arm_reach_m[1]=.72f;++p.revision;
@@ -45,19 +49,23 @@ int main() {
   const float head_native=1.83f, shoulders_native=.42f;
   const auto head_fit=ResolveCalibrationMapping(p,1.65f,false,1.f,.72f,4,head_native,shoulders_native);
   CHECK(head_fit.valid && head_fit.fitted && head_fit.fit==CalibrationFit::Head);
-  CHECK(near(head_fit.world_scale,head_native/1.65f));
+  CHECK(near(head_fit.world_scale,head_native/(1.65f+kCalibrationHeightOffsetM)));
   CHECK(near(head_fit.eye_height,head_native));  // camera sits on the head bone
+  // The trim raises the avatar and the world together: the head anchor still
+  // holds, so the camera never floats above the shell, and the ratio between
+  // native units and the wearer's metres falls by exactly the trim fraction.
+  CHECK(head_fit.world_scale<1.83f/1.65f);  // fewer native units per wearer metre
   CHECK(near(head_fit.native_head_height,head_native));
   CHECK(near(head_fit.native_shoulder_width,shoulders_native));
   CHECK(head_fit.model_revision==4);
   // The manual trim still moves the world and the head anchor together.
   const auto head_trim=ResolveCalibrationMapping(p,1.65f,false,1.5f,.72f,4,head_native,shoulders_native);
-  CHECK(near(head_trim.world_scale,head_native/1.65f*1.5f));
+  CHECK(near(head_trim.world_scale,head_native/(1.65f+kCalibrationHeightOffsetM)*1.5f));
   CHECK(near(head_trim.eye_height,head_native*1.5f));
   // embodiment_fit="arm" keeps the exact-hand fit even with a head measurement.
   const auto arm_pref=ResolveCalibrationMapping(p,1.65f,false,1.f,.72f,4,head_native,shoulders_native,false);
   CHECK(arm_pref.fit==CalibrationFit::Arm && near(arm_pref.world_scale,1.f));
-  CHECK(near(arm_pref.eye_height,1.65f));
+  CHECK(near(arm_pref.eye_height,1.65f+kCalibrationHeightOffsetM));
   // No upright measurement yet (0) falls back to the arm fit, never a guess.
   const auto no_head=ResolveCalibrationMapping(p,1.65f,false,1.f,.72f,4,0.f,shoulders_native);
   CHECK(no_head.fit==CalibrationFit::Arm && near(no_head.world_scale,1.f));
@@ -72,11 +80,11 @@ int main() {
   CHECK(seated_head.fit==CalibrationFit::Arm && near(seated_head.world_scale,1.f));
   p.eye_height_m=1.1f;
   const auto sitting=ResolveCalibrationMapping(p,1.65f,true,1.f,.72f,4,head_native,shoulders_native);
-  CHECK(near(sitting.world_scale,1.f) && near(sitting.eye_height,1.1f));
+  CHECK(near(sitting.world_scale,1.f) && near(sitting.eye_height,1.1f+kCalibrationHeightOffsetM));
   p.eye_height_m=1.65f;
   const auto manual=ResolveCalibrationMapping(p,1.9f,false,1.f,.72f,4,head_native,shoulders_native,true,true);
   CHECK(near(manual.world_scale,head_fit.world_scale));
-  CHECK(near(manual.eye_height/manual.world_scale,1.9f));
+  CHECK(near(manual.eye_height/manual.world_scale,1.9f+kCalibrationHeightOffsetM));
   const auto automatic=ResolveCalibrationMapping(p,1.9f,false,1.f,.72f,4,head_native,shoulders_native);
   CHECK(near(automatic.eye_height,head_native));
   CHECK(near(CalibrationViewHeight(p,1.9f,false,true),1.9f));
@@ -102,6 +110,6 @@ int main() {
   CHECK(!ResolveCalibrationMapping(p,1.65f,false,1.f,.54f,3).valid);
   p={};
   const auto pending=ResolveCalibrationMapping(p,1.65f,false,1.5f);
-  CHECK(pending.valid && !pending.fitted && near(pending.eye_height,2.475f));
+  CHECK(pending.valid && !pending.fitted && near(pending.eye_height,(1.65f+kCalibrationHeightOffsetM)*1.5f));
   std::puts("PASS coherent automatic native-world/avatar fit (head and arm anchors), stature, seated, trim, lifetimes and refusals");
 }
