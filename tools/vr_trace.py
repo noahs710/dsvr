@@ -58,12 +58,29 @@ def _record_ok(event):
     if kind == "footer" and not _integer(event.get("dropped")):
         return False
     if kind == "footer":
+        if "combat_self" in event:
+            fields = ("combat_total", "combat_non_player", "combat_self",
+                      "combat_refused", "combat_detail", "combat_detail_limit")
+            if any(not _integer(event.get(k)) for k in fields) or \
+                    event["combat_total"] != sum(event[k] for k in fields[1:5]) or \
+                    event["combat_detail"] > event["combat_detail_limit"]:
+                return False
         if "queue_peak" in event and not _integer(event["queue_peak"]):
             return False
         if event.get("queue_peak", 0) > 4096:
             return False
         if "contended" in event and (not _integer(event["contended"]) or
                                       event["contended"] > event["dropped"]):
+            return False
+    if kind == "native_interaction_activation":
+        flags = event.get("flags")
+        values = event.get("values")
+        if not _integer(event.get("seq"), 1) or not _integer(event.get("thread"), 1) or \
+                type(flags) is not int or not 0 <= flags <= 15 or \
+                not _finite_vector(values, 16) or \
+                any(type(v) not in (int, float) or int(v) != v or not 0 <= v <= 65535
+                    for v in values) or \
+                (flags & 4 and flags & 3 != 3) or (flags & 8 and not flags & 1):
             return False
     if kind == "combat_bench_provisional":
         if not _integer(event.get("seq"), 1) or not _integer(event.get("epoch"), 1) or \
@@ -174,9 +191,21 @@ def _record_ok(event):
             return False
         values = event["values"]
         if kind == "native_combat_diagnostics":
-            return (0 <= flags <= 0xffff and
+            if not (0 <= flags <= 0xffff and
                     all(((flags >> shift) & 15) <= 9 for shift in (0, 4, 8, 12)) and
-                    _integer(event.get("duration_qpc")) and all(v == 0 for v in values))
+                    _integer(event.get("duration_qpc"))):
+                return False
+            if all(v == 0 for v in values):  # legacy: response fields unavailable
+                return True
+            if values[15] != 1 or any(v != 0 for v in values[9:15]):
+                return False
+            limits = [15] + [65535]*4 + [255]*4
+            if any(not 0 <= value <= limit or int(value) != value
+                   for value, limit in zip(values[:9], limits)):
+                return False
+            mask = int(values[0])
+            return all(mask & bit or not any(values[start:end])
+                       for bit, start, end in ((1,1,3), (2,3,5), (4,5,7), (8,7,9)))
         if not 0 <= flags <= 15 or (flags >> 2) & ~flags:
             return False
         limb_count = 16 if kind == "native_combat_identity" else 8
@@ -350,6 +379,17 @@ def _combat_observations(records, require_diagnostics=False, frequency=0, cases=
                   "read_reasons": [reason_names[code] for code in codes] if codes is not None else None,
                   "case": next((label for label, start, end in cases
                                 if start <= outcome["qpc"] <= end), None)}
+        sample["native_response"] = None
+        if isinstance(diagnostic, dict) and diagnostic["values"][15] == 1:
+            values = diagnostic["values"]
+            mask = int(values[0])
+            sample["native_response"] = {
+                "schema": 1,
+                "kind_before": _limbs(values[1:3]) if mask & 1 else None,
+                "kind_after": _limbs(values[3:5]) if mask & 2 else None,
+                "status_before": [int(v) for v in values[5:7]] if mask & 4 else None,
+                "status_after": [int(v) for v in values[7:9]] if mask & 8 else None,
+            }
         context_rows = contexts.get(key, [])
         sample["native_context"] = None
         if len(context_rows) > 1 or (require_context and len(context_rows) != 1):
@@ -761,6 +801,16 @@ def read_capture(path, cases_path=None):
         len(headers) == 1 and headers[0].get("combat_detail_schema") == 1, frequency, cases,
         len(headers) == 1 and headers[0].get("combat_context_schema") == 1)
     report["native_combat_observations"] = combat
+    combat["callback_counts"] = {
+        field: footers[0].get(field) if len(footers) == 1 else None
+        for field in ("combat_total", "combat_non_player", "combat_self",
+                      "combat_refused", "combat_detail", "combat_detail_limit")}
+    activations = [e for e in records if e["event"] == "native_interaction_activation"]
+    report["native_interaction_observations"] = {
+        "status": "UNVERIFIED", "activation_callbacks": len(activations), "samples": activations,
+        "detail": "Natural object-action requests only. Raw handles, state, PARAM distance and "
+                  "return bits do not certify eligibility, prompt visibility, LOS, completion "
+                  "or physical interaction. Handles have no qualified cross-callback generation."}
     span = ([headers[0]["qpc"], footers[0]["qpc"]] if len(headers) == 1 and len(footers) == 1
             and _integer(headers[0].get("qpc")) and _integer(footers[0].get("qpc")) else None)
     coverage = _case_coverage(cases, declared, span, frequency)
@@ -836,7 +886,8 @@ def read_capture(path, cases_path=None):
         report["error_counts"]["case plan rejected"] = len(case_errors)
     combat["coverage_limitations"] = [
         "Only natural callbacks completing within the capture are observed; simulation/contact producer identity is unverified.",
-        "Observation is bounded to 256 calls; absence of an HP delta does not prove a miss or block."]
+        "Detail admission follows the recorded capture limit when present; legacy captures "
+        "may use a 256-call ceiling. Absence of an HP delta does not prove a miss or block."]
     if cases:
         combat["coverage_limitations"].append(
             "Case labels bind by QPC window only. A window with no samples proves nothing "

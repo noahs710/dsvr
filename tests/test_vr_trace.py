@@ -415,6 +415,41 @@ def main():
                        object="1403c4020", flags=7, native_rate=0x12345678,
                        values=[64,0,0x5678,0x1234,6000,0,1,0,65534,65535,
                                41248,7,19,1,47768,65244])
+        response_values = [15, 2, 0, 47768, 65244, 165, 90, 1, 0] + [0]*6 + [1]
+        response_record = dict(samples[2], values=response_values)
+        response_report = combat_capture(samples[:2] + [response_record])
+        check(response_report["valid"], "raw native response fields rejected")
+        response = response_report["native_combat_observations"]["samples"][0]["native_response"]
+        check(response == dict(schema=1, kind_before=2, kind_after=0xfedcba98,
+                               status_before=[165,90], status_after=[1,0]),
+              "native response kind/status lost or truncated")
+        check(response_report["native_combat_observations"]["status"] == "UNVERIFIED",
+              "raw response fields promoted to a defense verdict")
+        check(combat_capture(samples[:3])["native_combat_observations"]["samples"][0]["native_response"] is None,
+              "legacy capture invented native response fields")
+        for mask in range(16):
+            values = response_values.copy()
+            values[0] = mask
+            for bit, start, end in ((1,1,3), (2,3,5), (4,5,7), (8,7,9)):
+                if not mask & bit:
+                    values[start:end] = [0]*(end-start)
+            partial = combat_capture(samples[:2] + [dict(response_record, values=values)])
+            check(partial["valid"], "partial native response read rejected")
+            decoded_response = partial["native_combat_observations"]["samples"][0]["native_response"]
+            check((decoded_response["kind_before"] is not None) == bool(mask & 1) and
+                  (decoded_response["kind_after"] is not None) == bool(mask & 2) and
+                  (decoded_response["status_before"] is not None) == bool(mask & 4) and
+                  (decoded_response["status_after"] is not None) == bool(mask & 8),
+                  "unread native response manufactured as zero")
+        for index, value in ((0,16), (1,65536), (3,-1), (5,256), (7,.5), (9,1), (15,2)):
+            bad_values = response_values.copy()
+            bad_values[index] = value
+            check(not combat_capture(samples[:2] + [dict(response_record, values=bad_values)])["valid"],
+                  "malformed native response accepted")
+        masked_values = response_values.copy()
+        masked_values[0] = 0
+        check(not combat_capture(samples[:2] + [dict(response_record, values=masked_values)])["valid"],
+              "native response payload accepted without read-validity bits")
         contextual = combat_capture(samples[:3] + [context], context_schema=1)
         native = contextual["native_combat_observations"]
         decoded = native["samples"][0]["native_context"]
@@ -657,6 +692,33 @@ def main():
             check(timing["native_call"]["p99_ms"] == expected_max and
                   timing["native_call"]["p95_ms"] == expected_max,
                   "tail timing underestimated on small samples")
+    interaction = dict(event="native_interaction_activation", qpc=1, thread=7, seq=1,
+                       object="10000", flags=15,
+                       values=[0, 0, 65535, 65535, 22136, 4660, 0, 0, 3, 0,
+                               61185, 43981, 22136, 4660, 90, 0])
+    header = dict(event="header", qpc=0, schema=2, capture_domain="combat", qpc_hz=1000)
+    footer = dict(event="footer", qpc=2, dropped=0, events=1, interrupted=False,
+                  io_error=False, combat_total=2, combat_non_player=0, combat_self=2,
+                  combat_refused=0, combat_detail=0, combat_detail_limit=4294967295)
+    import tempfile
+    with tempfile.TemporaryDirectory() as temporary:
+        observation_path = Path(temporary) / "interaction.jsonl"
+        def interaction_report(rows):
+            observation_path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+            return read_capture(observation_path)
+        observed = interaction_report([header, interaction, footer])
+        check(observed["valid"] and observed["native_interaction_observations"]["activation_callbacks"] == 1,
+              "native object-action observation rejected")
+        check(not observed["complete"] and observed["native_interaction_observations"]["status"] == "UNVERIFIED",
+              "object-action request certified physical interaction")
+        for bad in (dict(interaction, flags=True), dict(interaction, flags=4),
+                    dict(interaction, flags=8), dict(interaction, seq=0),
+                    dict(interaction, values=[0.5] + interaction["values"][1:])):
+            check(not interaction_report([header, bad, footer])["valid"], "malformed interaction evidence accepted")
+        for fields in (dict(combat_self=True), dict(combat_self=-1), dict(combat_total=3),
+                       dict(combat_detail=1, combat_detail_limit=0)):
+            check(not interaction_report([header, interaction, dict(footer, **fields)])["valid"],
+                  "malformed continuous callback counts accepted")
     print("test_vr_trace: checks passed")
 
 

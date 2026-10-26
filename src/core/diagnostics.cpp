@@ -33,17 +33,19 @@ HANDLE g_thread = nullptr;
 unsigned long g_marker_count = 0;
 std::optional<Config> g_pending_config;
 bool g_pending_save = false, g_export_logs = false;
+unsigned long long g_save_after_ms = 0;
 std::string g_settings_status;
 std::deque<std::pair<std::string,std::function<bool()>>> g_commands;
 
-void PumpMenuRequests() {
+void PumpMenuRequests(bool flush = false) {
   std::optional<Config> pending;
   bool save = false, export_logs = false;
   std::wstring path;
   std::pair<std::string,std::function<bool()>> command;
   {
     std::lock_guard<std::mutex> lock(g_mutex);
-    pending.swap(g_pending_config);
+    if (g_pending_config && (!g_pending_save || flush || GetTickCount64() >= g_save_after_ms))
+      pending.swap(g_pending_config);
     save = g_pending_save;
     export_logs = g_export_logs;
     g_export_logs = false;
@@ -61,12 +63,12 @@ void PumpMenuRequests() {
     {
       std::lock_guard<std::mutex> lock(g_mutex);
       if (ok) {
-        g_config = *pending;
         if (save) g_saved_config = *pending;
       }
-      g_settings_busy = false;
-      g_settings_status = ok ? (save ? "Settings saved." : "Settings applied for this session.") :
-                               "Could not save settings. Previous settings remain active.";
+      g_settings_busy = g_pending_config.has_value();
+      g_settings_status = g_settings_busy ? "Saving latest settings..." :
+          ok ? (save ? "Settings saved." : "Settings applied for this session.") :
+               "Settings applied, but could not be saved. Check folder permissions.";
     }
     if (!ok) DSVR_WARN("Menu: could not save settings");
   }
@@ -244,6 +246,8 @@ DWORD WINAPI DiagnosticsThread(LPVOID /*param*/) {
   bool sanctuary_down = false;
   bool recenter_down = false;
   bool home_down = false;
+  bool automatic_combat_attempted = false;
+  unsigned long long next_automatic_probe = 0;
   unsigned long long next_combat_health=0;
   unsigned previous_combat_health=~0u;
   DSVR_LOG("Diagnostics: hotkeys ready (marker=F-key 0x%02x, reload=0x%02x)",
@@ -252,6 +256,17 @@ DWORD WINAPI DiagnosticsThread(LPVOID /*param*/) {
   while (g_running.load(std::memory_order_acquire)) {
     Config cfg = DiagnosticsCurrentConfig();
     const auto now=GetTickCount64();
+    if(cfg.observer_only && cfg.combat_trace_only && !automatic_combat_attempted &&
+        now>=next_automatic_probe) {
+      next_automatic_probe=now+100;
+      std::uintptr_t player=0;
+      if(CombatNativeLocalPlayer(player)) {
+        automatic_combat_attempted=true;
+        const bool started=DiagnosticsBeginCapture();
+        DSVR_LOG("Diagnostics: automatic ten-minute combat capture started=%d; "
+                 "no F9 required; one attempt per process after local player appears",started);
+      }
+    }
     if(now>=next_combat_health) {
       const auto combat=CombatNativeGetStatus();
       const unsigned health=unsigned(combat.equipment_bound) |
@@ -303,6 +318,7 @@ DWORD WINAPI DiagnosticsThread(LPVOID /*param*/) {
     Sleep(40);
   }
   // This path runs on the writer, not an animation/render callback or DllMain.
+  PumpMenuRequests(true); // persist the last edit even when the menu/session closes during debounce
   // Hard process termination cannot be acknowledged: its trace stays incomplete.
   if (!DiagnosticsCurrentConfig().observer_only) {
     LabRequestAbort();
@@ -361,13 +377,15 @@ bool DiagnosticsReloadConfig() { return ReloadConfig(); }
 bool DiagnosticsRequestConfig(const Config& requested, bool save) {
   if (!ConfigValid(requested)) return false;
   std::lock_guard<std::mutex> lock(g_mutex);
-  if (!g_initialized || !g_running.load() || g_settings_busy) return false;
+  if (!g_initialized || !g_running.load()) return false;
   Config effective = requested;
     effective.observer_only = g_config.observer_only;
     effective.combat_trace_only = g_config.combat_trace_only;
   ConfigRestrictObserver(effective);
+  g_config = effective; // live consumers see the edit immediately; disk I/O stays on the worker
   g_pending_config = effective;
   g_pending_save = save;
+  g_save_after_ms = GetTickCount64() + 350;
   g_settings_busy = true;
   g_settings_status = "Applying settings...";
   return true;
@@ -400,7 +418,8 @@ void DiagnosticsLogMarker() {
            "you saw, then send DSVR.log) ===",
            n, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
   LogSnapshot();
-  DiagnosticsBeginCapture();
+  const auto cfg=DiagnosticsCurrentConfig();
+  if(!cfg.observer_only || !cfg.combat_trace_only) DiagnosticsBeginCapture();
 }
 
 bool DiagnosticsBeginCapture() {
@@ -429,7 +448,8 @@ bool DiagnosticsBeginCapture() {
     DSVR_LOG("Diagnostics: deferred observer hooks camera=%d trace=%d", camera, trace);
     if (!camera || !trace) return false;
   }
-  return (config.observer_only || config.verbose_logging) && VrTraceBegin();
+  return (config.observer_only || config.verbose_logging) &&
+      VrTraceBegin(nullptr,config.observer_only && config.combat_trace_only ? 600000u : 20000u);
 }
 
 }  // namespace dsvr

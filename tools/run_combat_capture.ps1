@@ -1,3 +1,4 @@
+#requires -Version 7.0
 # Desktop natural-combat observation only. No input injection, XR or game writes.
 # Files/save roots are changed only inside a receipted, reversible transaction.
 # Recovered from build/desktop-observer-session.ps1; do not use its old observer
@@ -18,20 +19,15 @@ $game='C:\Program Files (x86)\Steam\steamapps\common\DARK SOULS REMASTERED'
 $steam='C:\Program Files (x86)\Steam'
 $account=1843241039
 $backupParent=Join-Path $env:USERPROFILE '.dsvr-backups'
+$transactionParent=[IO.Path]::GetFullPath((Join-Path $repo 'build\native-transactions'))
 $saveRoots=@((Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'NBGI\DARK SOULS REMASTERED'),
              (Join-Path $env:APPDATA 'DarkSoulsRemastered'))
 $installNames=@('dinput8.dll','DSVR.dll','DSVR.toml')
-function Hash($path) { (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() }
-# [IO.Path]::GetRelativePath needs .NET Core 2.0+; Windows PowerShell 5.1 lacks it, so an
-# operator running 'powershell' instead of 'pwsh' would fail mid-transaction. Keep both engines.
+function Hash($path) {
+  (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
 function RelPath($root,$full) {
-  $root=[IO.Path]::GetFullPath($root).TrimEnd([IO.Path]::DirectorySeparatorChar)
-  $full=[IO.Path]::GetFullPath($full)
-  if($full.Length -gt $root.Length -and $full.StartsWith($root,[StringComparison]::OrdinalIgnoreCase) -and
-     ($full[$root.Length] -eq [IO.Path]::DirectorySeparatorChar -or $full[$root.Length] -eq '/')) {
-    return $full.Substring($root.Length+1)
-  }
-  return (New-Object Uri(($root+[IO.Path]::DirectorySeparatorChar))).MakeRelativeUri((New-Object Uri($full))).ToString().Replace('/',[IO.Path]::DirectorySeparatorChar)
+  [IO.Path]::GetRelativePath([IO.Path]::GetFullPath($root),[IO.Path]::GetFullPath($full))
 }
 function Games { @(Get-Process -Name DarkSoulsRemastered -ErrorAction SilentlyContinue | Where-Object { -not $_.HasExited }) }
 function Inventory($path) {
@@ -49,13 +45,49 @@ function AssertInventory($path,$expected) {
   $wanted=@($expected | ForEach-Object { $_.relative+':'+$_.sha256 } | Sort-Object)
   if(($actual -join "`n") -cne ($wanted -join "`n")) { throw "Inventory changed: $path" }
 }
+function WriteNewReceiptJson($path,$value) {
+  $temporary=$path+'.pending-'+[guid]::NewGuid().ToString('N')
+  $bytes=[Text.UTF8Encoding]::new($false).GetBytes(($value | ConvertTo-Json -Depth 16))
+  $stream=[IO.File]::Open($temporary,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+  try { $stream.Write($bytes,0,$bytes.Length); $stream.Flush($true) }
+  finally { $stream.Dispose() }
+  # Publish only complete files. Neither destination nor prior versions are replaced.
+  [IO.File]::Move($temporary,$path)
+}
+function ReadReceipt {
+  $latest=Get-Content -LiteralPath $Receipt -Raw | ConvertFrom-Json
+  if($null -eq $latest) { throw 'Empty receipt.' }
+  $baseHash=Hash $Receipt; $previous=$baseHash; $revision=0
+  $journal=$Receipt+'.journal'
+  if(Test-Path -LiteralPath $journal) {
+    if((Get-Item -LiteralPath $journal -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Reparse receipt journal refused.' }
+    foreach($file in @(Get-ChildItem -LiteralPath $journal -Filter '*.json' -File | Sort-Object Name)) {
+      if($file.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Reparse receipt version refused.' }
+      if($file.Name -notmatch '^(\d{8})-([0-9a-f]{64})\.json$') { throw 'Unknown receipt journal entry.' }
+      $number=[int]$Matches[1]; $declaredHash=$Matches[2]
+      if($number -ne $revision+1 -or (Hash $file.FullName) -ne $declaredHash) { throw 'Receipt version hash/order mismatch.' }
+      $entry=Get-Content -LiteralPath $file.FullName -Raw | ConvertFrom-Json
+      if($entry.schema -ne 1 -or $entry.revision -ne $number -or
+         $entry.base_sha256 -ne $baseHash -or $entry.previous_sha256 -ne $previous -or
+         $null -eq $entry.receipt) { throw 'Receipt journal chain mismatch.' }
+      $latest=$entry.receipt; $revision=$number; $previous=$declaredHash
+    }
+  }
+  $script:receiptRevision=$revision; $script:receiptPrevious=$previous
+  return $latest
+}
 function SaveReceipt {
-  $temp=$Receipt+'.tmp-'+$PID
-  [IO.File]::WriteAllText($temp,($script:r | ConvertTo-Json -Depth 12),[Text.UTF8Encoding]::new($false))
-  # File.Move(s,d,overwrite) is .NET Core only and File.Replace(s,d,$null) misbinds $null as an
-  # empty path on Windows PowerShell 5.1. A named third-party backup works on both engines.
-  $bak=$Receipt+'.bak'
-  if(Test-Path -LiteralPath $Receipt) { [IO.File]::Replace($temp,$Receipt,$bak); Remove-Item -LiteralPath $bak -Force } else { [IO.File]::Move($temp,$Receipt) }
+  if(-not (Test-Path -LiteralPath $Receipt)) { WriteNewReceiptJson $Receipt $script:r }
+  $null=ReadReceipt
+  $journal=$Receipt+'.journal'
+  [IO.Directory]::CreateDirectory($journal) | Out-Null
+  $revision=$script:receiptRevision+1
+  $entry=[ordered]@{schema=1;revision=$revision;base_sha256=(Hash $Receipt);previous_sha256=$script:receiptPrevious;receipt=$script:r}
+  $pending=Join-Path $journal ('.pending-'+[guid]::NewGuid().ToString('N'))
+  WriteNewReceiptJson $pending $entry
+  $digest=Hash $pending
+  $destination=Join-Path $journal ('{0:D8}-{1}.json' -f $revision,$digest)
+  [IO.File]::Move($pending,$destination)
 }
 function CopyTree($source,$destination) {
   $inventory=@(Inventory $source)
@@ -97,8 +129,14 @@ function StageRoots($roots) {
     AssertInventory $root.original $root.inventory
     if((Test-Path -LiteralPath $root.held) -or (Test-Path -LiteralPath $root.testOutput)) { throw 'Save staging target already exists.' }
     $root.moved=$true; SaveReceipt
-    Move-Item -LiteralPath $root.original -Destination $root.held
+    # This must be a directory rename, never a provider copy/merge. Check both
+    # sides before seeding: an independently recreated root must not receive a
+    # disposable save over newer personal files.
+    [IO.Directory]::Move([IO.Path]::GetFullPath($root.original),[IO.Path]::GetFullPath($root.held))
+    AssertInventory $root.held $root.inventory
+    if(Test-Path -LiteralPath $root.original) { throw "Save root reappeared after rename: $($root.original)" }
     [IO.Directory]::CreateDirectory($root.original) | Out-Null
+    AssertInventory $root.original @()
     CopyTree $root.seed $root.original | Out-Null
   }
 }
@@ -155,7 +193,7 @@ offline_only_ack = true
 }
 function ValidateReceipt {
   $vault=[IO.Path]::GetFullPath($r.vault)
-  if((Split-Path $vault -Parent) -ine $backupParent -or (Split-Path $vault -Leaf) -notlike 'combat-observer-*') { throw 'Unsafe vault.' }
+  if((Split-Path $vault -Parent) -ine $transactionParent -or (Split-Path $vault -Leaf) -notlike 'combat-observer-*') { throw 'Unsafe or legacy transaction directory; existing backup vault is not writable through this runner.' }
   if($r.roots.Count -ne 2 -or $r.files.Count -ne 3) { throw 'Unexpected transaction shape.' }
   for($i=0;$i -lt 2;++$i) {
     $root=$r.roots[$i]
@@ -175,14 +213,66 @@ function ValidateReceipt {
   }
 }
 function TrackGames {
-  foreach($process in (Games)) {
-    if($process.Path -ine (Join-Path $game 'DarkSoulsRemastered.exe') -or $process.StartTime -lt [datetime]$r.started) {
+  # Ownership floor: only generations created after this session's own launch
+  # request can belong to us. Legacy receipts have no launch_requested, so
+  # their staging start remains the floor. Never infer ownership solely from
+  # the executable name plus a time after transaction start.
+  $floor=if($r.launch_requested) { [datetime]$r.launch_requested } else { [datetime]$r.started }
+  $live=@(Games)
+  if($live.Count -gt 1) {
+    throw 'Two game instances are live; this session launched one; do not change files beneath them.'
+  }
+  foreach($process in $live) {
+    if($process.Path -ine (Join-Path $game 'DarkSoulsRemastered.exe') -or $process.StartTime -lt $floor) {
       throw 'Unexpected game process; do not change files beneath it.'
     }
-    if($process.Id -notin @($r.pids.id)) {
+    $existing=@($r.pids | Where-Object { $_.id -eq $process.Id })
+    if($existing.Count -and ($existing.Count -ne 1 -or
+       $existing[0].path -ine $process.Path -or
+       ([datetime]$existing[0].start).Ticks -ne $process.StartTime.Ticks)) {
+      throw 'Reused or contradictory game process identity; do not assume ownership.'
+    }
+    if(-not $existing.Count) {
+      # Adoption is only possible while the session is still open. A fresh
+      # generation after the finish request is excluded from stopping and
+      # observation; RestoreTransaction then pauses and records that pause.
+      if(FinishRequested) {
+        throw 'Game generation appeared after the finish request; excluding the late launch from ownership.'
+      }
       $r.pids+=@([pscustomobject]@{id=$process.Id;start=$process.StartTime.ToString('o');path=$process.Path})
       SaveReceipt
     }
+  }
+}
+function WaitForSingleGameLaunch {
+  # Steam can overlap its bootstrap and persistent game for a short interval.
+  # Adopt neither while ambiguous. Steady-state TrackGames still refuses two
+  # instances; startup must first settle to one exact generation for one second.
+  $limit=(Get-Date).AddSeconds(90); $stable=$null; $stableSince=Get-Date
+  while((Get-Date) -lt $limit -and (Get-Date) -lt [datetime]$r.deadline -and -not (FinishRequested)) {
+    $live=@(Games)
+    foreach($process in $live) {
+      if($process.Path -ine (Join-Path $game 'DarkSoulsRemastered.exe') -or
+          $process.StartTime -lt [datetime]$r.launch_requested) { throw 'Unexpected process during launch settling.' }
+    }
+    if($live.Count -eq 1) {
+      $identity=([string]$live[0].Id)+':'+$live[0].StartTime.Ticks
+      if($stable -eq $identity) {
+        if(((Get-Date)-$stableSince).TotalMilliseconds -ge 1000) { TrackGames; return }
+      } else { $stable=$identity; $stableSince=Get-Date }
+    } else { $stable=$null }
+    Start-Sleep -Milliseconds 250
+  }
+  throw 'Game launch did not settle to one stable generation within its bounded startup window.'
+}
+function WaitForGameSession {
+  # Steam may replace a short-lived game bootstrap after an empty process poll.
+  # Process disappearance is not session completion: keep the original fixed
+  # protection window. Only the deadline or an explicit operator finish ends it.
+  # TrackGames still refuses unexpected identities; never swallow that failure.
+  while((Get-Date) -lt [datetime]$r.deadline -and -not (FinishRequested)) {
+    TrackGames
+    Start-Sleep -Milliseconds 500
   }
 }
 function ParseCases([string]$text) {
@@ -308,7 +398,8 @@ function RestoreTransaction {
       Wait-Process -Id $process.Id -Timeout 10 -ErrorAction SilentlyContinue
     }
   }
-  if((Games).Count) { throw 'Untracked game process exists; restoration paused.' }
+  # Force array shape so a one-process result blocks restoration.
+  if(@(Games).Count) { throw 'Untracked game process exists; restoration paused.' }
   AssertFiles $r.files; AssertRoots $r.roots
   foreach($trace in @(Get-ChildItem -LiteralPath $game -Filter 'DSVR-trace-*.jsonl')) {
     if($trace.Name -notin $r.traces_before) { Copy-Item -LiteralPath $trace.FullName -Destination $r.evidence }
@@ -335,10 +426,196 @@ function RestoreTransaction {
   $r.state='Restored'; SaveReceipt
   Write-Output "Restored and hash-verified original save roots and install files. Receipt: $Receipt"
 }
+function CompleteTransaction {
+  # A tracking refusal must not skip stopping known generations or leave a
+  # receipt saying ObserverReady. RestoreTransaction still checks for ANY live
+  # game before touching roots/files; trying cleanup does not waive admission.
+  $trackingFailure=$null
+  try { TrackGames } catch {
+    $trackingFailure=$_
+    SetReceiptValue 'tracking_error' $_.Exception.Message
+  }
+  try {
+    if($r.roots.Count -eq 2 -and $r.files.Count -eq 3) { RestoreTransaction }
+    else { $r.state='PreparationFailedBeforeStaging'; SaveReceipt; Write-Warning 'Preparation failed before staging; no roots/files were replaced.' }
+  } catch {
+    $r.state='RecoveryBlocked'
+    SetReceiptValue 'recovery_error' $_.Exception.Message
+    SaveReceipt
+    throw
+  }
+  if($trackingFailure) { throw $trackingFailure }
+}
+function SetReceiptValue($name,$value) {
+  # New transactions use a dictionary; Restore reads a PSCustomObject on both
+  # PowerShell engines. Keep diagnostic fields writable for either shape.
+  if($r -is [Collections.IDictionary]) { $r[$name]=$value }
+  else { $r | Add-Member -NotePropertyName $name -NotePropertyValue $value -Force }
+}
 if($Mode -eq 'SelfTest') {
+  & {
+    $base=[datetime]'2026-10-25T12:00:00Z'
+    $path=Join-Path $game 'DarkSoulsRemastered.exe'
+    $r=@{started=$base.ToString('o');pids=@([pscustomobject]@{id=10;start=$base.AddSeconds(1).ToString('o');path=$path})}
+    $observed=[pscustomobject]@{Id=10;StartTime=$base.AddSeconds(1);Path=$path}
+    function Games { @($observed) }
+    function SaveReceipt { }
+    TrackGames; TrackGames
+    if($r.pids.Count -ne 1) { throw 'Repeated identity polling duplicated a receipt.' }
+    $observed=[pscustomobject]@{Id=11;StartTime=$base.AddSeconds(2);Path=$path}
+    TrackGames
+    if($r.pids.Count -ne 2) { throw 'Distinct replacement generation was lost.' }
+    $observed=[pscustomobject]@{Id=10;StartTime=$base.AddSeconds(2);Path=$path}
+    $refused=$false
+    try { TrackGames } catch { $refused=$true }
+    if(-not $refused) { throw 'Reused PID silently inherited an old process receipt.' }
+  }
+  # Generation provenance. A matching exe name and start time after transaction
+  # start is not ownership: only generations this session's own launch request
+  # produced may be recorded and later stopped. A pre-request launch, a second
+  # concurrent instance, or a generation appearing after the finish request all
+  # refuse, while a legitimate bootstrap -> replacement chain still adopts.
+  & {
+    $base=[datetime]'2026-10-25T12:00:00Z'
+    $path=Join-Path $game 'DarkSoulsRemastered.exe'
+    $r=@{started=$base.ToString('o');launch_requested=$base.AddSeconds(60).ToString('o');
+      pids=@([pscustomobject]@{id=10;start=$base.AddSeconds(61).ToString('o');path=$path})}
+    function SaveReceipt { }
+    $script:fixtureFinish=$false
+    function FinishRequested { return [bool]$script:fixtureFinish }
+    $observed=@()
+    function Games { return @($observed) }
+    # (a) Created before this session's launch request: someone else's game.
+    $observed=@([pscustomobject]@{Id=20;StartTime=$base.AddSeconds(30);Path=$path})
+    $refused=$false
+    try { TrackGames } catch { $refused=$true }
+    if(-not $refused -or $r.pids.Count -ne 1) { throw 'A process older than the launch request was adopted.' }
+    # (b) Second concurrent instance while a tracked generation is live.
+    $observed=@(
+      [pscustomobject]@{Id=10;StartTime=$base.AddSeconds(61);Path=$path},
+      [pscustomobject]@{Id=21;StartTime=$base.AddSeconds(90);Path=$path})
+    $refused=$false
+    try { TrackGames } catch { $refused=$true }
+    if(-not $refused -or $r.pids.Count -ne 1) { throw 'A concurrent late Steam launch was adopted.' }
+    # (c) Session is finishing; a fresh generation is not ours to stop or observe.
+    $observed=@([pscustomobject]@{Id=22;StartTime=$base.AddSeconds(120);Path=$path})
+    $script:fixtureFinish=$true
+    $refused=$false
+    try { TrackGames } catch { $refused=$true }
+    if(-not $refused -or $r.pids.Count -ne 1) { throw 'A post-finish launch was adopted for stopping.' }
+    $script:fixtureFinish=$false
+    # (d) Sole replacement generation after the launch request: still adoptable.
+    $observed=@([pscustomobject]@{Id=23;StartTime=$base.AddSeconds(70);Path=$path})
+    TrackGames
+    if($r.pids.Count -ne 2 -or 23 -notin @($r.pids.id)) { throw 'Legitimate replacement generation was refused.' }
+  }
+  & {
+    $base=[datetime]'2026-10-25T12:00:00Z'
+    $path=Join-Path $game 'DarkSoulsRemastered.exe'
+    $r=[pscustomobject]@{state='ObserverReady';roots=@(1,2);files=@(1,2,3);
+      pids=@([pscustomobject]@{id=10;start=$base.ToString('o');path=$path})}
+    $script:fixtureRestoreAttempted=$false; $script:fixtureReceiptSaved=$false
+    $script:fixtureFilesTouched=$false; $script:fixtureKills=@()
+    function TrackGames { throw 'fixture unexpected process' }
+    function ValidateReceipt { $script:fixtureRestoreAttempted=$true }
+    function Get-Process { [pscustomobject]@{Id=10;StartTime=$base;Path=$path} }
+    function Stop-Process { param($Id) $script:fixtureKills+=,$Id }
+    function Wait-Process { }
+    function Games { @([pscustomobject]@{Id=99}) }
+    function AssertFiles { $script:fixtureFilesTouched=$true; throw 'Unsafe file access' }
+    function SaveReceipt { $script:fixtureReceiptSaved=$true }
+    try { CompleteTransaction } catch { }
+    if(-not $script:fixtureRestoreAttempted -or -not $script:fixtureReceiptSaved -or
+       $r.state -ne 'RecoveryBlocked' -or $script:fixtureFilesTouched -or
+       $r.tracking_error -ne 'fixture unexpected process' -or
+       $r.recovery_error -ne 'Untracked game process exists; restoration paused.' -or
+       $script:fixtureKills.Count -ne 1 -or $script:fixtureKills[0] -ne 10) {
+      throw ('Tracking refusal skipped safe recoverable cleanup: '+($r | ConvertTo-Json -Depth 5 -Compress)+
+        ' kills='+($script:fixtureKills -join ',')+' attempted='+$script:fixtureRestoreAttempted+
+        ' saved='+$script:fixtureReceiptSaved+' files='+$script:fixtureFilesTouched)
+    }
+    # The same numeric PID with another creation time must NOT be killed.
+    $script:fixtureKills=@()
+    function Get-Process { [pscustomobject]@{Id=10;StartTime=$base.AddSeconds(1);Path=$path} }
+    try { CompleteTransaction } catch { }
+    if($script:fixtureKills.Count -or $script:fixtureFilesTouched) { throw 'Cleanup killed a reused PID or touched active saves.' }
+  }
+  # Exercise startup settling without weakening steady-state process refusal.
+  & {
+    $base=[datetime]'2026-10-26T12:00:00Z'; $script:settleElapsed=0
+    $script:adopted=@(); $path=Join-Path $game 'DarkSoulsRemastered.exe'
+    $r=@{deadline=$base.AddSeconds(150);launch_requested=$base.ToString('o')}
+    function Get-Date { $base.AddMilliseconds($script:settleElapsed) }
+    function Start-Sleep { param($Milliseconds) $script:settleElapsed+=$Milliseconds }
+    function FinishRequested { $false }
+    function Games {
+      if($script:settleElapsed -lt 500) {
+        return @([pscustomobject]@{Id=1;Path=$path;StartTime=$base.AddTicks(1)},
+                 [pscustomobject]@{Id=2;Path=$path;StartTime=$base.AddTicks(2)})
+      }
+      if($script:settleElapsed -lt 750) { return @() }
+      $id=if($script:settleElapsed -lt 1000) { 3 } else { 4 }
+      return @([pscustomobject]@{Id=$id;Path=$path;StartTime=$base.AddTicks($id)})
+    }
+    function TrackGames { $script:adopted+=@((Games)[0].Id) }
+    WaitForSingleGameLaunch
+    if($script:settleElapsed -ne 2000 -or $script:adopted.Count -ne 1 -or $script:adopted[0] -ne 4) {
+      throw 'Transient, empty or changing startup generation was adopted.'
+    }
+    $script:settleElapsed=0; $script:adopted=@()
+    function Games { @([pscustomobject]@{Id=9;Path=$path;StartTime=$base.AddTicks(-1)}) }
+    $refused=$false
+    try { WaitForSingleGameLaunch } catch { $refused=$_.Exception.Message -eq 'Unexpected process during launch settling.' }
+    if(-not $refused -or $script:adopted.Count) { throw 'Pre-existing game was adopted while settling.' }
+  }
+  # Exercise the production monitor with a deterministic bootstrap -> empty ->
+  # replacement timeline. No Steam, real processes, installs or saves are touched.
+  & {
+    $base=[datetime]'2026-10-25T12:00:00Z'; $script:fixtureElapsed=0
+    $script:fixtureVisits=@()
+    $r=@{deadline=$base.AddSeconds(5);pids=@(@{id=1})}
+    function Get-Date { $base.AddMilliseconds($script:fixtureElapsed) }
+    function Start-Sleep { param($Milliseconds)
+      $script:fixtureElapsed+=$Milliseconds
+      if($script:fixtureElapsed -gt 10000) { throw 'Fixture monitor did not stop.' }
+    }
+    function FinishRequested { $false }
+    function TrackGames {
+      $script:fixtureVisits+=,$script:fixtureElapsed
+      if($script:fixtureElapsed -eq 1000) { $r.pids+=@(@{id=2}) }
+    }
+    function Games {
+      if($script:fixtureElapsed -eq 500) { return @() }
+      return @([pscustomobject]@{Id=2})
+    }
+    WaitForGameSession
+    if($script:fixtureElapsed -ne 5000 -or 2 -notin @($r.pids.id)) {
+      throw "Bootstrap exit ended protection before the replacement: elapsed=$script:fixtureElapsed ms."
+    }
+    # Explicit finish stops promptly, without extending the recorded deadline.
+    $script:fixtureElapsed=0; $script:fixtureVisits=@()
+    function FinishRequested { $script:fixtureElapsed -ge 1500 }
+    WaitForGameSession
+    if($script:fixtureElapsed -ne 1500 -or $r.deadline -ne $base.AddSeconds(5)) {
+      throw 'Explicit finish or immutable session deadline was lost.'
+    }
+    # A refused process remains an error, never a successful monitor completion.
+    $script:fixtureElapsed=0
+    function FinishRequested { $false }
+    function TrackGames { throw 'fixture unexpected process' }
+    $refused=$false
+    try { WaitForGameSession } catch {
+      if($_.Exception.Message -ne 'fixture unexpected process') { throw }
+      $refused=$true
+    }
+    if(-not $refused) { throw 'Process refusal was swallowed.' }
+  }
   $dir=Join-Path $env:LOCALAPPDATA ('Temp\opencode\combat-transaction-test-'+[guid]::NewGuid())
   [IO.Directory]::CreateDirectory($dir) | Out-Null
   $Receipt=Join-Path $dir 'receipt.json'; $script:r=[ordered]@{state='Fixture'}
+  SaveReceipt; $initialReceiptHash=Hash $Receipt
+  $r.state='FixtureUpdated'; SaveReceipt
+  if((Hash $Receipt) -ne $initialReceiptHash) { throw 'Immutable receipt was overwritten.' }
   $original=Join-Path $dir 'installed'; $backup=Join-Path $dir 'backup'; $candidate=Join-Path $dir 'candidate'
   [IO.File]::WriteAllText($original,'personal'); Copy-Item $original $backup
   [IO.File]::WriteAllText($candidate,'observer')
@@ -479,12 +756,14 @@ $evidence=Split-Path $Receipt -Parent
 $allowed=[IO.Path]::GetFullPath((Join-Path $repo 'build\verification'))+[IO.Path]::DirectorySeparatorChar
 if(-not $Receipt.StartsWith($allowed,[StringComparison]::OrdinalIgnoreCase)) { throw 'Receipt must be under build/verification.' }
 if($Mode -eq 'Restore') {
-  $script:r=Get-Content -LiteralPath $Receipt -Raw | ConvertFrom-Json
+  [IO.Directory]::CreateDirectory($transactionParent) | Out-Null
+  $script:transactionLease=[IO.File]::Open((Join-Path $transactionParent 'active-session.lock'),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+  $script:r=ReadReceipt
   RestoreTransaction
   exit 0
 }
 # Entire preflight is read-only. Never infer safety from a prior run's receipt.
-if((Games).Count) { throw 'Game must be closed.' }
+if(@(Games).Count) { throw 'Game must be closed.' }
 if((Get-ItemProperty 'HKCU:\Software\Valve\Steam\ActiveProcess').ActiveUser -ne $account) { throw 'Active Steam account changed.' }
 if(-not (Get-Process -Name steam -ErrorAction SilentlyContinue)) { throw 'Steam must already be running in Offline mode.' }
 $login=Get-Content -LiteralPath (Join-Path $steam 'config\loginusers.vdf') -Raw
@@ -525,7 +804,9 @@ Write-Output 'CHECK PASS: pinned candidate, offline/disconnected Steam, exact-ga
 if($Mode -eq 'Check') { exit 0 }
 [IO.Directory]::CreateDirectory($evidence) | Out-Null
 $CasesPath=Join-Path $evidence 'combat-cases.json'
-$vault=Join-Path $backupParent ('combat-observer-'+(Get-Date -Format 'yyyyMMdd-HHmmss'))
+[IO.Directory]::CreateDirectory($transactionParent) | Out-Null
+$script:transactionLease=[IO.File]::Open((Join-Path $transactionParent 'active-session.lock'),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+$vault=Join-Path $transactionParent ('combat-observer-'+(Get-Date -Format 'yyyyMMdd-HHmmss')+'-'+[guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $vault | Out-Null
 $steamConfig=Join-Path $steam "userdata\$account\config\localconfig.vdf"
 $script:r=[ordered]@{state='Preparing';vault=$vault;started=(Get-Date).ToString('o');deadline=(Get-Date).AddMinutes($WindowMinutes).ToString('o');pids=@();roots=@();files=@();evidence=$evidence;steam_data=$steamData;steam_config=$steamConfig;steam_before=@();traces_before=@((Get-ChildItem -LiteralPath $game -Filter 'DSVR-trace-*.jsonl').Name);notes='Operator controls all gameplay. Observer-only LAB core; no XR/input/gameplay writes. Steam metadata snapshotted, live cache not overwritten. Keep Steam Offline. Cloud state is not independently proven; offline/exact-EXE blocking remain required.'}
@@ -556,24 +837,17 @@ try {
   [IO.File]::WriteAllText($config,(ObserverConfig),[Text.UTF8Encoding]::new($false))
   StageFile $r.files[0] $loader; StageFile $r.files[1] $core; StageFile $r.files[2] $config
   $r.state='ObserverReady'; SaveReceipt
-  Write-Output "Launching protected desktop observer; operator input only; deadline $($r.deadline). F9 captures 20 seconds."
+  # Generation-adoption floor: any game created before this instant came from
+  # someone else's launch, so TrackGames must refuse it (see fixtures).
+  $r.launch_requested=(Get-Date).ToString('o'); SaveReceipt
+  Write-Output "Launching protected desktop observer; operator input only; deadline $($r.deadline). Combat recording starts automatically for ten minutes; no F9 required."
   Start-Process -FilePath (Join-Path $steam 'steam.exe') -ArgumentList '-applaunch','570940' | Out-Null
-  $launchDeadline=(Get-Date).AddSeconds(90)
-  while((Get-Date) -lt [datetime]$r.deadline -and -not (FinishRequested) -and -not $r.pids.Count) {
-    TrackGames
-    if(-not $r.pids.Count -and (Get-Date) -gt $launchDeadline) { throw 'Game did not launch within 90 seconds.' }
-    Start-Sleep -Milliseconds 500
-    }
+  WaitForSingleGameLaunch
   RunCasePlan $plan { TrackGames }
   ReportCaseCoverage
-  while((Get-Date) -lt [datetime]$r.deadline -and -not (FinishRequested)) {
-    TrackGames
-    if($r.pids.Count -and -not (Games).Count) { break }
-    Start-Sleep -Milliseconds 500
-  }
+  WaitForGameSession
 } finally {
-  # Take a final exact-PID inventory before restoration, including a late launch.
-  TrackGames
-  if($r.roots.Count -eq 2 -and $r.files.Count -eq 3) { RestoreTransaction }
-  else { $r.state='PreparationFailedBeforeStaging'; SaveReceipt; Write-Warning 'Preparation failed before staging; no roots/files were replaced.' }
+  # Final exact-identity inventory before restoration; a launch this session
+  # did not produce is excluded from ownership and pauses restoration instead.
+  CompleteTransaction
 }

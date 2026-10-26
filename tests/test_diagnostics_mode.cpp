@@ -20,9 +20,14 @@ namespace {
 std::atomic<unsigned> xr_calls{0}, lab_calls{0}, camera_calls{0}, trace_calls{0}, captures{0};
 bool refuse_camera = false;
 bool combat_install=false;
+std::atomic<unsigned> capture_duration{0};
+std::atomic<bool> player_loaded{false};
 }
 namespace dsvr {
 CombatNativeStatus CombatNativeGetStatus() { return {}; }
+bool CombatNativeLocalPlayer(std::uintptr_t& player) {
+  player=player_loaded ? 0x10000 : 0;return player!=0;
+}
 void ModMenuToggle() {}
 void CalibrationRecenter() {}
 void XrToggleSanctuary() { ++xr_calls; }
@@ -32,7 +37,7 @@ void LabRequestAbort() { ++lab_calls; }
 bool CameraHookInstall(bool vr, bool observer) { ++camera_calls; return !vr && observer && !refuse_camera; }
 bool VrTraceInstall(bool enabled) { ++trace_calls; return enabled; }
 bool VrTraceInstallCombat() { ++trace_calls;combat_install=true;return true; }
-bool VrTraceBegin(const wchar_t*, unsigned) { ++captures; return true; }
+bool VrTraceBegin(const wchar_t*, unsigned duration) { capture_duration=duration; ++captures; return true; }
 void VrTracePump() {}
 void VrTraceFinish(bool) {}
 TraceCaptureState VrTraceState() { return TraceCaptureState::Complete; }
@@ -71,13 +76,22 @@ int main(int argc, char** argv) {
   requested.verbose_logging = true;
   CHECK(ConfigSave(path, requested));
   DiagnosticsStart(requested, path);
-  CHECK(camera_calls == 0 && trace_calls == 0 && captures == 0);
-  CHECK(DiagnosticsBeginCapture() == !refuse_camera);
-  CHECK(DiagnosticsBeginCapture() == !refuse_camera);
+  if(combat) {
+    Sleep(60);CHECK(captures==0 && trace_calls==0);
+    player_loaded=true;
+    for(unsigned i=0;i<100 && captures==0;++i) Sleep(10);
+    CHECK(captures==1 && capture_duration==600000);
+    Sleep(120); // a completed capture must not automatically start another
+    CHECK(captures==1);
+  } else {
+    CHECK(camera_calls == 0 && trace_calls == 0 && captures == 0);
+    CHECK(DiagnosticsBeginCapture() == !refuse_camera);
+    CHECK(DiagnosticsBeginCapture() == !refuse_camera);
+  }
   CHECK(camera_calls == (observer && !combat ? 1u : 0u));
   CHECK(combat_install==combat);
   CHECK(trace_calls == (observer && !refuse_camera ? 1u : 0u));
-  CHECK(captures == (refuse_camera ? 0u : 2u));
+  CHECK(captures == (refuse_camera ? 0u : combat ? 1u : 2u));
   auto c = DiagnosticsCurrentConfig();
   CHECK(c.observer_only == observer && c.vr_enabled == (!observer && !disabled));
   requested.observer_only = !observer;  // F7 must not change the startup mode
@@ -98,15 +112,23 @@ int main(int argc, char** argv) {
   CHECK(DiagnosticsReloadConfig());  // retained original config path
 
   Config applied=DiagnosticsCurrentConfig();
+  for(int scale:{126,127,128}) {
+    auto rapid=applied;rapid.render_scale_percent=scale;
+    CHECK(DiagnosticsRequestConfig(rapid,true));
+    CHECK(DiagnosticsCurrentConfig().render_scale_percent==scale);
+  }
+  CHECK(WaitForSettingsStatus("Settings saved."));
+  Config coalesced{};
+  CHECK(ConfigLoad(path,coalesced) && coalesced.render_scale_percent==128);
   applied.render_scale_percent=133;
   applied.eye_height_override=true;applied.eye_height=1.82f;
   CHECK(DiagnosticsRequestConfig(applied,false));
   CHECK(WaitForSettingsStatus("Settings applied for this session."));
   CHECK(DiagnosticsCurrentConfig().render_scale_percent==133);
   Config on_disk{};
-  CHECK(ConfigLoad(path,on_disk) && on_disk.render_scale_percent==125);
+  CHECK(ConfigLoad(path,on_disk) && on_disk.render_scale_percent==128);
   auto state=DiagnosticsSettingsSnapshot();
-  CHECK(!state.busy && state.applied.render_scale_percent==133 && state.saved.render_scale_percent==125);
+  CHECK(!state.busy && state.applied.render_scale_percent==133 && state.saved.render_scale_percent==128);
   // Apply -> test -> Save must persist the exact same candidate, not force an
   // additional edit to re-enable Save. Save failures must retain this receipt.
   CHECK(DiagnosticsRequestConfig(applied,true));
@@ -128,15 +150,15 @@ int main(int argc, char** argv) {
   Config failed_save=saved;
   failed_save.render_scale_percent=151;
   CHECK(DiagnosticsRequestConfig(failed_save,true));
-  const bool save_failed=WaitForSettingsStatus("Could not save settings. Previous settings remain active.");
+  const bool save_failed=WaitForSettingsStatus("Settings applied, but could not be saved. Check folder permissions.");
   CloseHandle(prevent_replace);
   CHECK(save_failed);
-  CHECK(DiagnosticsCurrentConfig().render_scale_percent==143);
+  CHECK(DiagnosticsCurrentConfig().render_scale_percent==151);
   CHECK(ConfigLoad(path,on_disk) && on_disk.render_scale_percent==143);
   CHECK(DeleteFileW(path));
   CHECK(!DiagnosticsReloadConfig());
   CHECK(DiagnosticsCurrentConfig().observer_only == observer);
-  CHECK(DiagnosticsCurrentConfig().render_scale_percent == 143);
+  CHECK(DiagnosticsCurrentConfig().render_scale_percent == 151);
   DiagnosticsStop();
   bool health_logged=false;
   for(const auto& entry:LogRecent())
