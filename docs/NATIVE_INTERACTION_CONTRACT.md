@@ -60,6 +60,24 @@ Two bulk calls, read-only, no invocation:
   attribution claimed. H1 advances on selection mechanics; LOS/reach
   owner named but unrecovered.
 
+### 26 Oct predicate shims mapped; NULL paths are refusals
+
+Two bulk calls, read-only. Both predicates are split-entry shims:
+
+- Eligibility `14203FAB4`: clears `[RCX+0xB8]` bit 7, NULL-checks RDX
+  (actor): nonzero continues to `14238E1C6` (unrecovered, one hop);
+  zero diverts to `14030D903` (`JMP 142F52810` split entry,
+  unrecovered). The NULL-actor path is a refusal, not gameplay.
+- LOS `1420BEFB7`: spills regs, RCX->RSI (row), RDX->R14 (actor),
+  NULL-checks RDX: nonzero continues to `142B32AD7` (unrecovered,
+  one hop); zero diverts to `thunk_142EEE285` (8 indexed callers,
+  shared forged-return utility, not interaction-specific).
+- Accepted continuations (14238E1C6, 142B32AD7) remain unrecovered,
+  but the predicate *structure* is closed: eligibility = bit-clear +
+  actor-present + 38E1C6; LOS = actor-present + B32AD7 decides
+  prompt vs activation. No distance formula or prompt text claimed;
+  H1 static mapping complete to the same one-hop boundary as melee.
+
 ## Installed ObjActParam rows, 26 October 2026
 
 Read-only installed `param/GameParam/GameParam.parambnd.dcx`: 498,505 bytes,

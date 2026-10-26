@@ -1,5 +1,13 @@
 # DSVR current handoff
 
+### 26 Oct predicate shims mapped; NULL paths are refusals
+
+Eligibility (14203FAB4) = bit-clear + actor-present + 38E1C6; LOS
+(1420BEFB7) = actor-present + B32AD7 decides prompt vs activation.
+NULL paths divert to refusal entries. Accepted bodies one hop out;
+H1 static mapping at the same boundary as melee. Full note in
+docs/NATIVE_INTERACTION_CONTRACT.md. No invocation; DB unsaved.
+
 ### 26 Oct selection loop recovered: prompt/LOS owner placed
 
 140314E30 enumerates ObjAct rows, rejects state 3/4, tests eligibility
