@@ -1257,6 +1257,20 @@ Two bulk calls, read-only, no invocation. The +0x54 store is closed:
   attribution and live elicitation of kind-2 remain. B/C/H stay open
   pending a targeted capture against a kind-2 PARAM attack.
 
+### 26 Oct kind-0 gate trace complete (Asylum demon hit, seq 912)
+
+Post-hoc mining of the Asylum trace (no game): the demon-hit contact
+(seq 912, flags 15, rate nonzero, HP 659->440 side1) carries v2 store
+weight 1.0 + paired b0=12. Reading against the 140529670 gate
+(`0.0 < fVar8 && (paired valid || +200&0x10)` then `uVar4 = +0x6a==2?2:+0x6a==1?1:0`):
+weight 1.0 passes the float gate, b0=12 is a present paired event, and
+the PARAM +0x6a byte for the demon's slam is 0 -> kind 0 stored. The
+195-strong b0=12/flags-0 family around it (weights 3.0/1.0) are the same
+gate passing with actor-unreadable contacts -- creation succeeded,
+dispatch outcome unobserved. Kind-2 now reduces to: which PARAM rows
+carry +0x6a==2. That is answerable from the installed GameParam
+(AtkParam rows readable offline in param.parambnd) without any game.
+
 ### 26 Oct +150/+148 predicates resolved: flag-bit tests, not deep logic
 
 One bulk call, read-only. The source-side dispatch predicates:

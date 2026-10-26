@@ -1,5 +1,15 @@
 # DSVR current handoff
 
+### 26 Oct kind-0 creation story closed end to end
+
+195 paired (b0=12) records, all flags 0 / kind 0 (actor-unreadable
+family). The demon hit itself (seq 912, flags 15) carries store
+weight 1 + paired b0=12: paired event present, weight positive, but
+PARAM +0x6a byte 0 -> kind 0. Complete gate trace: weight-gate passed,
+paired-ID present, vocabulary byte selected 0. Kind-2 needs +0x6a==2
+in the attack PARAM -- now a PARAM-hunting question, not a dispatch
+question. Full note in carrier receipt below. Inner loop green.
+
 ### 26 Oct Asylum session: firebomb kill leaves no contact, demon hit kind-0
 
 Session 2 (PID 54260, 35,776 lines, rev 19 Restored): firebomb kill
