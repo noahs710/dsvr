@@ -1,5 +1,14 @@
 # DSVR current handoff
 
+### 26 Oct Codex efficiency work landed (4 verified slices)
+
+Audited + verified + committed in-flight work: shared test-support libs
+(29f70b0, 9x->2x TU compiles), RecordBatch fast path (9223edb, verified
+Debug+Release 100/100 and both auto_verify modes), verifier skip flags
++ archive pointer (172668d), split/prune scripts + archive (366814d).
+Prune applied: 14.9MB stale Oct-20 runtime log removed; today's capture
+evidence untouched. Tree clean.
+
 ### 26 Oct full gate green + package refreshed (evening)
 
 Release 100/100, Debug 100/100 (inner loop 0.58s throughout the day).
