@@ -14,7 +14,10 @@ option(DSVR_BUILD_RESHADE_ADDON "Build the optional ReShade D3D11 host adapter" 
 
 # Warnings as errors for our own code (not third_party).
 if(MSVC)
-  add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:/W4;/permissive-;/EHsc>")
+  # /MP: compile translation units within each target in parallel. Safe: no
+  # #import, no PCH, no /Gm; every TU owns its object file. MSBuild /m
+  # (--parallel) still owns project-level parallelism on top of this.
+  add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:/W4;/MP;/permissive-;/EHsc>")
   add_compile_definitions(_CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
 endif()
 

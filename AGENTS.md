@@ -87,8 +87,10 @@ The exact recovered boundary and next counter-owner probe are in
   The headless `tools/ghidra/query.ps1` wrapper and the `mcp_read.py` shim were
   deleted on 24 October 2026 - do not reintroduce them, and leave
   `GHIDRA_MCP_ALLOW_SCRIPTS` unset.
-- Run `cmake --build build --config Debug --parallel 4`, then
-  `ctest --test-dir build -C Debug --output-on-failure`; repeat for Release.
+- Run `cmake --build build --config Debug --parallel`, then
+  `ctest --test-dir build -C Debug --parallel --output-on-failure`; repeat for Release.
+  Bare `--parallel` uses all cores (/MP parallelizes inside targets);
+  parallel ctest is safe (all temp-output tests are PID-unique).
   `ctest -N` is the source of registered test names. Never copy an old test count.
 - Source questions go through the harness graph tools first (`find`, `grep`,
   `navigate`, `genome_query`, `code_script`); they answer from an index, and one

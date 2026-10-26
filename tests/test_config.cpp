@@ -21,7 +21,9 @@
 int main() {
   wchar_t tmp[32768]{};
   GetTempPathW(32767, tmp);
-  std::wstring path = std::wstring(tmp) + L"DSVR-test-config.toml";
+  // PID-unique so parallel ctest runs cannot share/trample one file.
+  std::wstring path = std::wstring(tmp) + L"DSVR-test-config-" +
+      std::to_wstring(GetCurrentProcessId()) + L".toml";
   DeleteFileW(path.c_str());
 
   // Save defaults, then load them back.

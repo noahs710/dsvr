@@ -180,7 +180,7 @@ def main() -> int:
                     if attempt == 5:
                         print(f"Locked, cannot refresh: {dest}")
                         raise
-                    import time; time.sleep(2)
+                    import time; time.sleep(0.25)  # transient AV/Explorer locks clear fast; 2 s cost ~10 s in the lock-contention test
         for path in sorted((p for p in stage.rglob("*") if p.is_file()),
                            reverse=True):
             if path.relative_to(stage).as_posix() not in new_names:

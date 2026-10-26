@@ -13,9 +13,12 @@ $root = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
 Set-Location $root
 cmake -S . -B build -G "Visual Studio 18 2026" -A x64 -DDSVR_ENABLE_LAB=OFF -DDSVR_BUILD_RESHADE_ADDON=ON
 if ($LASTEXITCODE -ne 0) { exit 1 }
-cmake --build build --config Release
+# --parallel without a number uses all logical cores (/MP handles TU-level
+# parallelism inside each target); -j/--parallel on the ctest below is safe:
+# every temp-output test is PID-unique.
+cmake --build build --config Release --parallel
 if ($LASTEXITCODE -ne 0) { exit 1 }
-ctest --test-dir build -C Release --output-on-failure 2>&1 | Tee-Object -FilePath build\latest-ctest.txt
+ctest --test-dir build -C Release --parallel --output-on-failure 2>&1 | Tee-Object -FilePath build\latest-ctest.txt
 if ($LASTEXITCODE -ne 0) { exit 1 }
 & .\build\src\setup\Release\DSVR-Setup.exe --doctor
 if ($LASTEXITCODE -ne 0) { exit 1 }

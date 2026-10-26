@@ -477,11 +477,11 @@ Run from the repository root. Verify tool availability and existing CMake cache 
 ```powershell
 git status --short
 git diff --stat
-cmake --build build --config Debug --parallel 4
+cmake --build build --config Debug --parallel
 ctest --test-dir build -C Debug -N
-ctest --test-dir build -C Debug --output-on-failure
-cmake --build build --config Release --parallel 4
-ctest --test-dir build -C Release --output-on-failure
+ctest --test-dir build -C Debug --parallel --output-on-failure
+cmake --build build --config Release --parallel
+ctest --test-dir build -C Release --parallel --output-on-failure
 pwsh -File tools/auto_verify.ps1
 ```
 

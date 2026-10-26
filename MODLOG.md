@@ -1,5 +1,19 @@
 # DSVR current handoff
 
+### Test-loop efficiency pass, 26 October 2026
+
+Full suite now ~3 s per config (was ~27 s): `/MP` added to root MSVC flags
+(TU-level compile parallelism; no PCH/Gm/import conflicts), `ctest --parallel`
+(bare flag = all 16 cores; every temp-output test verified PID-unique —
+`test_config.cpp` fixed from shared `DSVR-test-config.toml` to PID-suffixed),
+package.py AV-lock retry sleep 2 s -> 0.25 s (saves ~10 s in the `package`
+lock-contention case), `auto_verify.ps1` uses bare `--parallel` for both
+build and ctest. Verified: Release + Debug builds exit 0, both suites 100/100
+in ~3.0 s. Commands updated in AGENTS.md / TESTING.md / execution-guide
+section 6 / auto_verify.ps1. One transient note: the first Release rebuild
+after the test_config edit exited 1 on a stale locked artifact; clean rebuild
+exit 0, no code issue. No game launch/install/headset; offline only.
+
 Current checkpoint (26 Oct): twenty-one offline slices landed and verified —
 AtkParam 0x73 named (kMapHitType/NativeMapHitType, cache transcription only),
 launcher theme test registered (setup_theme), untargeted reach refused by

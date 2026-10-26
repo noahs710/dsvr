@@ -42,10 +42,15 @@ Run from the repository root. Inspect existing CMake cache/toolchain before conf
 Development PowerShell scripts and their CTest entry points require PowerShell 7 (`pwsh`). Windows PowerShell 5.1 is not a supported development runtime. The portable product installer remains compatible with PowerShell 5.1 where it uses PowerShell.
 
 ```powershell
-cmake --build build --config Debug --parallel 4
-ctest --test-dir build -C Debug --output-on-failure
-cmake --build build --config Release --parallel 4
-ctest --test-dir build -C Release --output-on-failure
+# --parallel without a number uses every logical core (this box: 16).
+# /MP (root CMakeLists) parallelizes TUs inside each target on top of this.
+# Bare --parallel on ctest is safe: every temp-output test is PID-unique
+# (test_config.cpp was fixed to match); the combat_capture_transaction
+# SelfTest stays serialized by its own fixture design, not by a shared file.
+cmake --build build --config Debug --parallel
+ctest --test-dir build -C Debug --parallel --output-on-failure
+cmake --build build --config Release --parallel
+ctest --test-dir build -C Release --parallel --output-on-failure
 pwsh -File tools/auto_verify.ps1
 ```
 
