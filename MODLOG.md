@@ -1,5 +1,13 @@
 # DSVR current handoff
 
+### 26 Oct selection loop recovered: prompt/LOS owner placed
+
+140314E30 enumerates ObjAct rows, rejects state 3/4, tests eligibility
+(14203FAB4), picks first valid, branches on +0x24: LOS test (1420BEFB7)
+decides prompt (14071BD30) vs activation (140313470). Predicate bodies
+unrecovered — named entries, not semantics. Full note in
+docs/NATIVE_INTERACTION_CONTRACT.md. No invocation; DB unsaved.
+
 ### 26 Oct H1 evidence: 3 native activations decoded with row owners
 
 Fog/door activations from the capture decoded (index, row handle

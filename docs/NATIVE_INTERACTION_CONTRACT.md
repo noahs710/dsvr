@@ -29,6 +29,37 @@ hand-reach gate follows. Selected-row handle + PARAM range + accepted
 result are observed; dummy position, prompt/LOS/reach owner and
 generation remain open. H1 stays partially evidenced.
 
+### 26 Oct selection loop recovered: prompt/LOS owner placed
+
+Two bulk calls, read-only, no invocation:
+
+- `FUN_140314E30` is the ObjAct selection loop. It enumerates rows
+  (`index * 0xf0 + base`), rejects state 3/4 (`*(row+0x20) != 3/4`),
+  tests per-row eligibility via `thunk_14203FAB4(row, actor)`, collects
+  the valid set, and picks `*piVar11` (first valid). It reads the
+  selected row's prompt text via `[row+0x48]+0x80`, then branches on
+  `*(param_1+0x24)`: nonzero tests LOS/reach via
+  `thunk_1420BEFB7(row, actor)` -- failure shows the prompt
+  (`14071BD30`), success activates via `140313470(group, index,
+  actor+8)`. Zero takes the direct activation path instead.
+- `FUN_1403162C0` is a bounds-checked wrapper: validates index
+  against `*(param_1+0x28)`, then forwards to 140313470 on a
+  `param+0x30` sub-array (stride 0x58, not 0xf0) -- a second group
+  layout, owner unclassified.
+- `FUN_140313470` (the detour target) marks the row
+  (`+0x30 = 0x101, +0x32 = 1`), reads actor fields via
+  `[row+0x48]` virtuals (+0x30/+0x18/+0x10/+0x20), and completes
+  through `1403138E0`. Its two indexed callers are the selection
+  loop and the sub-array wrapper only.
+- The ELIGIBILITY predicate (`14203FAB4`) and LOS predicate
+  (`1420BEFB7`) bodies are unrecovered -- named entry points, not
+  semantics. But the fail-closed reach gate now has a native
+  counterpart location: whatever 1420BEFB7 computes is the prompt/
+  activation criterion our observer's 3 accepted rows passed.
+- No prompt text, dummy position, generation or reach-distance
+  attribution claimed. H1 advances on selection mechanics; LOS/reach
+  owner named but unrecovered.
+
 ## Installed ObjActParam rows, 26 October 2026
 
 Read-only installed `param/GameParam/GameParam.parambnd.dcx`: 498,505 bytes,
