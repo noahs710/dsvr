@@ -701,36 +701,59 @@ bool Hook(std::uintptr_t rva, const unsigned char* bytes, std::size_t size,
 }
 
 void RecordBatch(const VrTraceEvent* events, std::size_t count) {
-  if(g_hook_domain.load(std::memory_order_relaxed)==1 &&
-     std::strncmp(events[0].event,"native_combat_",14)!=0 &&
-     std::strcmp(events[0].event,"native_interaction_activation")!=0 &&
-     std::strcmp(events[0].event,"native_step_dispatch")!=0) return;
+  // Cheap admission first: atomics and pointer compares only, no syscalls.
+  // Every producer assigns one of this TU's own string literals, and MSVC
+  // pools identical literals, so identity covers the known events; anything
+  // unrecognized falls through to strncmp, preserving old admit behavior.
+  static const char* const kCommitted[] = {
+      "native_combat_contact", "native_combat_identity",
+      "native_combat_motion", "native_combat_diagnostics",
+      "native_combat_context", "native_combat_limit",
+      "native_combat_excluded", "native_combat_self_excluded",
+  };
+  const char* name = events[0].event;
+  bool admitted = true;
+  if (g_hook_domain.load(std::memory_order_relaxed) == 1) {
+    admitted = (name == "native_interaction_activation" ||
+                name == "native_step_dispatch");
+    if (!admitted) {
+      for (const char* known : kCommitted)
+        if (name == known) { admitted = true; break; }
+    }
+    if (!admitted &&
+        std::strncmp(name, "native_combat_", 14) == 0) admitted = true;
+    if (!admitted &&
+        (std::strcmp(name, "native_interaction_activation") == 0 ||
+         std::strcmp(name, "native_step_dispatch") == 0)) admitted = true;
+    if (!admitted) return;
+  }
   const auto capture = events[0].capture_id ? events[0].capture_id : g_capture_id.load();
-  if (!VrTraceActive()) return;
-  // Closing can defer its acknowledgement until admitted producers finish.
-  // This never waits on a hook thread, including on queue contention.
-  struct Recorder {
-    Recorder() { g_recorders.fetch_add(1); }
-    ~Recorder() { g_recorders.fetch_sub(1); }
-  } recorder;
   const auto until = g_until_ms.load(std::memory_order_relaxed);
   if (!until || GetTickCount64() >= until ||
       g_state.load() != TraceCaptureState::Recording ||
       g_capture_id.load() != capture) return;
-  const auto qpc = VrTraceClock();
-  const auto thread = GetCurrentThreadId();
+  // Contended drops skip the clock/thread syscalls and the guard scope:
+  // the recorder only counts producers that actually hold admitted data.
   std::unique_lock<std::mutex> lock(g_mutex, std::try_to_lock);
   if (!lock.owns_lock()) {
     g_dropped.fetch_add(static_cast<unsigned long>(count), std::memory_order_relaxed);
     g_contended.fetch_add(static_cast<unsigned long>(count), std::memory_order_relaxed);
     return;
   }
+  // Closing can defer its acknowledgement until admitted producers finish.
+  // This never waits on a hook thread, including on queue contention.
+  struct Recorder {
+    Recorder() { g_recorders.fetch_add(1); }
+    ~Recorder() { g_recorders.fetch_sub(1); }
+  } recorder;
   if (g_state.load() != TraceCaptureState::Recording ||
       g_capture_id.load() != capture) return;
   if (count > g_events.size()-g_count) {
     g_dropped.fetch_add(static_cast<unsigned long>(count), std::memory_order_relaxed);
     return;
   }
+  const auto qpc = VrTraceClock();
+  const auto thread = GetCurrentThreadId();
   for(std::size_t i=0;i<count;++i) {
     auto event=events[i];
     event.qpc=qpc;
