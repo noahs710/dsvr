@@ -123,6 +123,30 @@ to end (entry per hop, bodies at the leaves):
   geometry. `142D9E6E9` (distance consumer) unrecovered -- one hop.
   No distance threshold value, prompt text, or LOS term claimed.
 
+### 26 Oct prompt assembly walked to the dispatch mesh
+
+Five bulk calls, read-only. Distance consumer chain from 142D9E6E9:
+
+- `142D9E6E9` (normalize via divps, call `140FA9704(f, mask)`) ->
+  `140FA9704` (stub: `1421C0DEC(f, ~mask & 0x7fc00000)`) ->
+  `1421C0DEC` (7 ins: ORPS/SHUFPS/MULPS lane work, JMP 1426A5101) ->
+  `1426A5101` (SSE matrix-vector accumulation through basis matrices
+  + constant 1414B6A90, JMP 14030D577) -> `14030D577` (stub:
+  `14030C320` row-string lookup, then `142CCDD82`) -> `142CCDD82`
+  (8 ins: NULL-check RAX, forged RET selecting 14030D8FD vs
+  14292C96A) -> `1422D3EA2` (forged-RET mesh entries, counter
+  decrement at [RBP+0x44], JGE/JMP computed branches).
+- Reading: the normalized proximity vector is transformed through
+  basis matrices, the row's display string is resolved (14030C320,
+  same loader used in 1403138E0), and the prompt enters the standard
+  forged-return dispatch mesh. Computed dispatch past this point --
+  static stops here, same boundary as melee's jumptable.
+- H1 static chain complete: selection -> predicates -> 2D distance ->
+  string resolve -> prompt mesh. Remaining: dispatch destinations,
+  threshold value, LOS term, dummy position -- all need live
+  correlation or deeper computed-dispatch recovery. No claims beyond
+  shape.
+
 ## Installed ObjActParam rows, 26 October 2026
 
 Read-only installed `param/GameParam/GameParam.parambnd.dcx`: 498,505 bytes,
