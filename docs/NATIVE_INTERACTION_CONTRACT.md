@@ -1,9 +1,33 @@
 # Native interaction evidence
 
 Status: H1 partially evidenced; the ObjAct group selection/activation chain is
-recovered statically. Eligibility/LOS, generation and physical reach remain
+recovered statically. Native capture 26 Oct supplies 3 labelled activations
+with row handles + validDist + accepted results (below). Eligibility/LOS,
+dummy position, prompt receiver, generation and physical reach remain
 unqualified. Evidence contract under the existing conversion plan, not a
 playable interaction claim.
+
+## Native activations, 26 Oct session (PID 40312, receipt rev 19 Restored)
+
+Detour layout (vr_trace.cpp:212-256): values[0..1]=index,
+[2..3]=actor handle, [4..5]=row handle, [6..7]=row state before,
+[8..9]=row state after, [10..11]=dispatcher result, [14]=raw
+ObjActParam validDist. Flags 15 = before + after + identity-stable +
+validDist read, all three events.
+
+| T+ | index | row handle | state before/after | result | validDist | operator label |
+|---|---|---:|---|---|---:|---|
+| 42.0s | 1 | 111 | 0x2100 / 3 | 1 accepted | 70 | fog gate, went through |
+| 347.0s | 27 | 110 | 0x2100 / 3 | 1 accepted | 60 | key-unlocked door opened |
+| 382.2s | 23 | 109 | 0x2100 / 3 | 1 accepted | 60 | already-unlocked door opened |
+
+All on group d654240, actor 0x10044000. Row handles decrease 111/110/109
+with progression; state 0x2100 -> 3 across dispatch with result 1.
+validDist 70/60/60 matches no lever row in the installed table below
+(90/110/60 lever rows) -- consistent with doors, not levers; no generic
+hand-reach gate follows. Selected-row handle + PARAM range + accepted
+result are observed; dummy position, prompt/LOS/reach owner and
+generation remain open. H1 stays partially evidenced.
 
 ## Installed ObjActParam rows, 26 October 2026
 

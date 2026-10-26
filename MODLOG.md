@@ -1,5 +1,13 @@
 # DSVR current handoff
 
+### 26 Oct H1 evidence: 3 native activations decoded with row owners
+
+Fog/door activations from the capture decoded (index, row handle
+111/110/109, state 0x2100->3, result 1, validDist 70/60/60; flags 15).
+Selected-row + PARAM range + acceptance observed; dummy/LOS/prompt
+still open. Full table in docs/NATIVE_INTERACTION_CONTRACT.md.
+Inner loop green. B/C/H open.
+
 ### 26 Oct submission-entry probe: bounded negative, static chain complete
 
 140371200/360/BD0 are generic lookups (146-173 callers each) — cannot
