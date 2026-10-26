@@ -4,12 +4,14 @@
 # Recovered from build/desktop-observer-session.ps1; do not use its old observer
 # deployment (duplicate observer_only and regular, non-LAB core).
 param(
-  [ValidateSet('Check','Run','Restore','SelfTest')][string]$Mode='Check',
+  [ValidateSet('Check','Launch','Run','Finish','Restore','SelfTest')][string]$Mode='Check',
   [string]$Receipt,
   [string]$CandidateReceipt='build\verification\combat-observability-20261024\candidate-final-receipt.json',
   # Setup is part of the fixed session deadline. The operator-approved longer
   # retry needs 30 minutes; retain the 15-minute default and a finite upper bound.
   [ValidateRange(1,30)][int]$WindowMinutes=15,
+  [ValidateRange(1,30)][int]$CloseWaitMinutes=5,
+  [ValidateRange(1,120)][int]$FooterWaitSeconds=30,
   [string]$Cases,
   [string]$SeedVault=(Join-Path $env:USERPROFILE '.dsvr-backups\desktop-observer-20261023-140650')
 )
@@ -53,6 +55,32 @@ function WriteNewReceiptJson($path,$value) {
   finally { $stream.Dispose() }
   # Publish only complete files. Neither destination nor prior versions are replaced.
   [IO.File]::Move($temporary,$path)
+}
+function QuoteWindowsArgument([string]$value) {
+  # CommandLineToArgvW-compatible quoting for Start-Process, which joins its
+  # ArgumentList before CreateProcess. Double backslashes only where required.
+  $builder=[Text.StringBuilder]::new()
+  [void]$builder.Append('"')
+  $slashes=0
+  foreach($character in $value.ToCharArray()) {
+    if($character -eq [char]92) { ++$slashes; continue }
+    if($character -eq [char]34) {
+      for($i=0;$i -lt (2*$slashes+1);++$i) { [void]$builder.Append([char]92) }
+      [void]$builder.Append([char]34); $slashes=0; continue
+    }
+    for($i=0;$i -lt $slashes;++$i) { [void]$builder.Append([char]92) }
+    $slashes=0; [void]$builder.Append($character)
+  }
+  for($i=0;$i -lt (2*$slashes);++$i) { [void]$builder.Append([char]92) }
+  [void]$builder.Append('"')
+  return $builder.ToString()
+}
+function StartDetachedPowerShell($arguments,$stdoutPath,$stderrPath,$workingDirectory) {
+  $pwsh=Get-Command pwsh -ErrorAction Stop
+  $argumentLine=(@($arguments | ForEach-Object { QuoteWindowsArgument ([string]$_) }) -join ' ')
+  return Start-Process -FilePath $pwsh.Source -ArgumentList $argumentLine `
+    -WorkingDirectory $workingDirectory -RedirectStandardOutput $stdoutPath `
+    -RedirectStandardError $stderrPath -WindowStyle Hidden -PassThru
 }
 function ReadReceipt {
   $latest=Get-Content -LiteralPath $Receipt -Raw | ConvertFrom-Json
@@ -311,21 +339,122 @@ function TraceInventory {
   $spans=@()
   foreach($trace in @(Get-ChildItem -LiteralPath $game -Filter 'DSVR-trace-*.jsonl' |
                         Where-Object { $_.Name -notin $r.traces_before })) {
-    $start=$null;$end=$null
+    $start=$null;$end=$null;$capturePid=$null;$footer=$null
     try {
       $lines=[IO.File]::ReadAllLines($trace.FullName)
       if($lines.Length) {
         $head=$lines[0]|ConvertFrom-Json
-        if($head.event -eq 'header') { $start=[long]$head.qpc }
+        if($head.event -eq 'header') {
+          $start=[long]$head.qpc
+          if($head.pid) { $capturePid=[int]$head.pid }
+        }
         $last=$lines[$lines.Length-1]|ConvertFrom-Json
-        if($last.event -eq 'footer') { $end=[long]$last.qpc }
+        if($last.event -eq 'footer') {
+          $end=[long]$last.qpc
+          $footer=[pscustomobject]@{interrupted=[bool]$last.interrupted;
+            io_error=[bool]$last.io_error;dropped=[long]$last.dropped;events=[long]$last.events}
+        }
       }
     } catch { }
-    $spans+=,[pscustomobject]@{name=$trace.Name;start=$start;end=$end;closed=$null -ne $end}
+    $spans+=,[pscustomobject]@{name=$trace.Name;start=$start;end=$end;pid=$capturePid;
+      closed=$null -ne $end;footer=$footer}
   }
   # Plain array output: the comma form would hand back the array as one object and
   # every caller's .Count would read 1 however many captures exist.
   return $spans
+}
+function TraceStopRequestPath([int]$processId) {
+  return Join-Path $game ("DSVR-trace-stop-{0}.request" -f $processId)
+}
+function RemoveOwnedTraceStopRequests {
+  foreach($processId in @($r.trace_stop_pids)) {
+    $request=TraceStopRequestPath ([int]$processId)
+    if(Test-Path -LiteralPath $request) {
+      $expected="stop-v1:${processId}:$($r.trace_stop_token)`n"
+      if([IO.File]::ReadAllText($request) -cne $expected) {
+        throw "Trace-stop marker ownership mismatch for PID $processId; marker retained."
+      }
+      Remove-Item -LiteralPath $request -Force
+    }
+  }
+}
+function RequestTraceStop {
+  $open=@(TraceInventory | Where-Object { -not $_.closed })
+  if(-not $open.Count) { return }
+  $live=@(Games)
+  foreach($span in $open) {
+    if($null -eq $span.pid) {
+      Write-Warning "TRACE $($span.name): no valid PID in header; cannot request orderly close."
+      continue
+    }
+    $tracked=@($r.pids | Where-Object { [int]$_.id -eq [int]$span.pid })
+    $process=@($live | Where-Object { [int]$_.Id -eq [int]$span.pid })
+    if($tracked.Count -ne 1 -or $process.Count -ne 1 -or
+       $process[0].Path -ine $tracked[0].path -or
+       $process[0].StartTime.Ticks -ne ([datetime]$tracked[0].start).Ticks) {
+      Write-Warning "TRACE $($span.name): its PID is not a currently tracked process generation; no stop signal sent."
+      continue
+    }
+    $request=TraceStopRequestPath $span.pid
+    $alreadyRecorded=@($r.trace_stop_pids | Where-Object { [int]$_ -eq [int]$span.pid }).Count -gt 0
+    if($alreadyRecorded -and (Test-Path -LiteralPath $request)) {
+      $expected="stop-v1:$($span.pid):$($r.trace_stop_token)`n"
+      if([IO.File]::ReadAllText($request) -cne $expected) {
+        throw "Trace-stop marker ownership mismatch for PID $($span.pid); marker retained."
+      }
+      continue
+    }
+    if(-not $alreadyRecorded) {
+      $r.trace_stop_pids+=@([int]$span.pid); SaveReceipt
+    }
+    $stream=$null
+    try {
+      $stream=[IO.File]::Open($request,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+      $bytes=[Text.Encoding]::ASCII.GetBytes("stop-v1:$($span.pid):$($r.trace_stop_token)`n")
+      $stream.Write($bytes,0,$bytes.Length); $stream.Flush($true)
+    } catch {
+      throw "Could not create unique trace-stop request for PID $($span.pid): $($_.Exception.Message)"
+    } finally { if($stream) { $stream.Dispose() } }
+    Write-Output "TRACE $($span.name): requested orderly writer close for PID $($span.pid)."
+  }
+}
+function WaitForTraceFooters {
+  $limit=(Get-Date).AddSeconds($FooterWaitSeconds)
+  do {
+    $spans=@(TraceInventory)
+    $open=@($spans | Where-Object { -not $_.closed })
+    if(-not $open.Count) { break }
+    if(-not @(Games).Count) { break }
+    Start-Sleep -Milliseconds 250
+  } while((Get-Date) -lt $limit)
+  foreach($span in @(TraceInventory)) {
+    if(-not $span.closed) {
+      Write-Warning "TRACE $($span.name) has no closing footer; it is incomplete evidence."
+      continue
+    }
+    $quality=if($span.footer.io_error) { 'io-error' }
+      elseif($span.footer.dropped -gt 0) { "dropped=$($span.footer.dropped)" }
+      elseif($span.footer.interrupted) { 'interrupted' } else { 'complete' }
+    Write-Output "TRACE $($span.name): footer observed ($quality, events=$($span.footer.events))."
+  }
+}
+function WaitForNormalGameExit {
+  Write-Output "Trace closure requested. Close Dark Souls Remastered normally within $CloseWaitMinutes minute(s); the runner will not terminate it."
+  $limit=(Get-Date).AddMinutes($CloseWaitMinutes)
+  while((Get-Date) -lt $limit) {
+    TrackGames
+    if(-not @(Games).Count) { return }
+    Start-Sleep -Milliseconds 500
+  }
+  if(@(Games).Count) {
+    throw "Game remains live after $CloseWaitMinutes minute(s). Recovery is blocked; close it normally, then rerun -Mode Restore -Receipt '$Receipt'."
+  }
+}
+function CloseTraceAndWaitForGame {
+  RequestTraceStop
+  WaitForTraceFooters
+  ReportCaseCoverage
+  WaitForNormalGameExit
 }
 function SaveCases {
   if(-not $CasesPath) { return }
@@ -350,8 +479,8 @@ function RunCasePlan($plan,$tick) {
     $script:casePlan.cases=@($script:casePlan.cases)+@($row)
     SaveCases
     Write-Output ("CASE $($entry.label): perform it now for $($entry.seconds) seconds. " +
-      'An F9 capture holds 20 s, so open one at the start of the action and, for a longer ' +
-      'window, again before it ends - a window no capture overlaps has no evidence at all.')
+      'The observer capture starts automatically after the local player appears. ' +
+      'A case outside a closed trace interval has no evidence.')
     $stop=(Get-Date).AddSeconds($entry.seconds)
     while((Get-Date) -lt $stop -and -not (FinishRequested)) {
       if($tick) { & $tick }
@@ -391,15 +520,10 @@ function ReportCaseCoverage {
 }
 function RestoreTransaction {
   ValidateReceipt
-  foreach($tracked in $r.pids) {
-    $process=Get-Process -Id $tracked.id -ErrorAction SilentlyContinue
-    if($process -and $process.Path -ieq $tracked.path -and $process.StartTime.Ticks -eq ([datetime]$tracked.start).Ticks) {
-      Stop-Process -Id $process.Id
-      Wait-Process -Id $process.Id -Timeout 10 -ErrorAction SilentlyContinue
-    }
-  }
-  # Force array shape so a one-process result blocks restoration.
-  if(@(Games).Count) { throw 'Untracked game process exists; restoration paused.' }
+  # The observer writer must close normally before its trace is copied. Never
+  # kill even a tracked generation; restoration beneath any live game is unsafe.
+  if(@(Games).Count) { throw 'Game process is still live; close it normally before restoring. No files or save roots were changed.' }
+  RemoveOwnedTraceStopRequests
   AssertFiles $r.files; AssertRoots $r.roots
   foreach($trace in @(Get-ChildItem -LiteralPath $game -Filter 'DSVR-trace-*.jsonl')) {
     if($trace.Name -notin $r.traces_before) { Copy-Item -LiteralPath $trace.FullName -Destination $r.evidence }
@@ -427,16 +551,19 @@ function RestoreTransaction {
   Write-Output "Restored and hash-verified original save roots and install files. Receipt: $Receipt"
 }
 function CompleteTransaction {
-  # A tracking refusal must not skip stopping known generations or leave a
-  # receipt saying ObserverReady. RestoreTransaction still checks for ANY live
-  # game before touching roots/files; trying cleanup does not waive admission.
+  # Do not let a tracking refusal skip safe cleanup, but first request a footer
+  # and require normal process exit. RestoreTransaction independently refuses
+  # any live game before touching roots/files.
   $trackingFailure=$null
   try { TrackGames } catch {
     $trackingFailure=$_
     SetReceiptValue 'tracking_error' $_.Exception.Message
   }
   try {
-    if($r.roots.Count -eq 2 -and $r.files.Count -eq 3) { RestoreTransaction }
+    if($r.roots.Count -eq 2 -and $r.files.Count -eq 3) {
+      CloseTraceAndWaitForGame
+      RestoreTransaction
+    }
     else { $r.state='PreparationFailedBeforeStaging'; SaveReceipt; Write-Warning 'Preparation failed before staging; no roots/files were replaced.' }
   } catch {
     $r.state='RecoveryBlocked'
@@ -513,32 +640,25 @@ if($Mode -eq 'SelfTest') {
     $base=[datetime]'2026-10-25T12:00:00Z'
     $path=Join-Path $game 'DarkSoulsRemastered.exe'
     $r=[pscustomobject]@{state='ObserverReady';roots=@(1,2);files=@(1,2,3);
-      pids=@([pscustomobject]@{id=10;start=$base.ToString('o');path=$path})}
+      pids=@([pscustomobject]@{id=10;start=$base.ToString('o');path=$path});trace_stop_pids=@()}
     $script:fixtureRestoreAttempted=$false; $script:fixtureReceiptSaved=$false
-    $script:fixtureFilesTouched=$false; $script:fixtureKills=@()
+    $script:fixtureFilesTouched=$false; $script:fixtureKills=@(); $script:fixtureCloseInvoked=$false
     function TrackGames { throw 'fixture unexpected process' }
     function ValidateReceipt { $script:fixtureRestoreAttempted=$true }
-    function Get-Process { [pscustomobject]@{Id=10;StartTime=$base;Path=$path} }
-    function Stop-Process { param($Id) $script:fixtureKills+=,$Id }
-    function Wait-Process { }
+    function CloseTraceAndWaitForGame { $script:fixtureCloseInvoked=$true }
     function Games { @([pscustomobject]@{Id=99}) }
     function AssertFiles { $script:fixtureFilesTouched=$true; throw 'Unsafe file access' }
     function SaveReceipt { $script:fixtureReceiptSaved=$true }
     try { CompleteTransaction } catch { }
-    if(-not $script:fixtureRestoreAttempted -or -not $script:fixtureReceiptSaved -or
+    if(-not $script:fixtureRestoreAttempted -or -not $script:fixtureReceiptSaved -or -not $script:fixtureCloseInvoked -or
        $r.state -ne 'RecoveryBlocked' -or $script:fixtureFilesTouched -or
        $r.tracking_error -ne 'fixture unexpected process' -or
-       $r.recovery_error -ne 'Untracked game process exists; restoration paused.' -or
-       $script:fixtureKills.Count -ne 1 -or $script:fixtureKills[0] -ne 10) {
+       $r.recovery_error -ne 'Game process is still live; close it normally before restoring. No files or save roots were changed.' -or
+       $script:fixtureKills.Count) {
       throw ('Tracking refusal skipped safe recoverable cleanup: '+($r | ConvertTo-Json -Depth 5 -Compress)+
-        ' kills='+($script:fixtureKills -join ',')+' attempted='+$script:fixtureRestoreAttempted+
-        ' saved='+$script:fixtureReceiptSaved+' files='+$script:fixtureFilesTouched)
+         ' kills='+($script:fixtureKills -join ',')+' attempted='+$script:fixtureRestoreAttempted+
+         ' saved='+$script:fixtureReceiptSaved+' files='+$script:fixtureFilesTouched)
     }
-    # The same numeric PID with another creation time must NOT be killed.
-    $script:fixtureKills=@()
-    function Get-Process { [pscustomobject]@{Id=10;StartTime=$base.AddSeconds(1);Path=$path} }
-    try { CompleteTransaction } catch { }
-    if($script:fixtureKills.Count -or $script:fixtureFilesTouched) { throw 'Cleanup killed a reused PID or touched active saves.' }
   }
   # Exercise startup settling without weakening steady-state process refusal.
   & {
@@ -612,6 +732,24 @@ if($Mode -eq 'SelfTest') {
   }
   $dir=Join-Path $env:LOCALAPPDATA ('Temp\opencode\combat-transaction-test-'+[guid]::NewGuid())
   [IO.Directory]::CreateDirectory($dir) | Out-Null
+  $childScript=Join-Path $dir 'detached-child.ps1'
+  $childStdout=Join-Path $dir 'detached.stdout.log'; $childStderr=Join-Path $dir 'detached.stderr.log'
+  $childSource=@'
+param([string]$Message)
+Start-Sleep -Milliseconds 250
+Write-Output $Message
+[Console]::Error.WriteLine('stderr-fixture')
+'@
+  [IO.File]::WriteAllText($childScript,$childSource,[Text.UTF8Encoding]::new($false))
+  $message='argument with spaces and "quotes"'
+  $childArgsFixture=@('-NoProfile','-NoLogo','-NonInteractive','-File',$childScript,'-Message',$message)
+  $detached=StartDetachedPowerShell $childArgsFixture $childStdout $childStderr $dir
+  if($detached.Id -le 0) { throw 'Detached launcher did not return a child process ID.' }
+  Wait-Process -Id $detached.Id -Timeout 10
+  if((Get-Content -LiteralPath $childStdout -Raw).Trim() -cne $message -or
+     (Get-Content -LiteralPath $childStderr -Raw) -notmatch 'stderr-fixture') {
+    throw 'Detached child argument quoting or redirected logs failed.'
+  }
   $Receipt=Join-Path $dir 'receipt.json'; $script:r=[ordered]@{state='Fixture'}
   SaveReceipt; $initialReceiptHash=Hash $Receipt
   $r.state='FixtureUpdated'; SaveReceipt
@@ -734,7 +872,51 @@ if($Mode -eq 'SelfTest') {
     $afterText=@(ReportCaseCoverage) -join ' / '
     if($afterText -notmatch 'COVERAGE hit: 1 capture\(s\) overlap, 1 cover it completely') {
     throw "Unclosed capture counted as coverage: $afterText" }
-   # A stop request landing mid-window must survive as a truncated window: the same
+    & {
+      $game=$dir; $fixturePid=98765; $fixtureStart=[datetime]'2026-10-26T12:00:00Z'
+      $fixturePath=Join-Path $game 'DarkSoulsRemastered.exe'
+      $r=[ordered]@{traces_before=@('DSVR-trace-selftest.jsonl','DSVR-trace-unclosed.jsonl');pids=@([pscustomobject]@{id=$fixturePid;
+        start=$fixtureStart.ToString('o');path=$fixturePath});trace_stop_pids=@();trace_stop_token='fixture-token'}
+      $fixtureTrace=Join-Path $game 'DSVR-trace-stop-fixture.jsonl'
+      $header=[ordered]@{event='header';qpc=100;pid=$fixturePid}
+      [IO.File]::WriteAllText($fixtureTrace,(ConvertTo-Json $header -Compress),[Text.UTF8Encoding]::new($false))
+      function Games { @([pscustomobject]@{Id=$fixturePid;Path=$fixturePath;StartTime=$fixtureStart}) }
+      function SaveReceipt { }
+      RequestTraceStop
+      $request=TraceStopRequestPath $fixturePid
+      if(-not (Test-Path -LiteralPath $request) -or $r.trace_stop_pids.Count -ne 1 -or
+         [IO.File]::ReadAllText($request) -ne "stop-v1:${fixturePid}:fixture-token`n") {
+        throw 'Process-scoped trace-stop request was not created and receipted.'
+      }
+      RequestTraceStop
+      if($r.trace_stop_pids.Count -ne 1) { throw 'Repeated close polling duplicated a stop request.' }
+      Remove-Item -LiteralPath $request -Force # Simulate a crash before marker consumption.
+      RequestTraceStop
+      if(-not (Test-Path -LiteralPath $request) -or $r.trace_stop_pids.Count -ne 1) {
+        throw 'Retry did not recreate a missing recorded stop marker.'
+      }
+      RemoveOwnedTraceStopRequests # Simulate cleanup after the diagnostics thread consumes it.
+      if(Test-Path -LiteralPath $request) { throw 'Owned stop marker was not cleaned after process exit.' }
+      $foreignRequest=TraceStopRequestPath 98766
+      [IO.File]::WriteAllText($foreignRequest,'stop-v1:98766:foreign-token`n',[Text.Encoding]::ASCII)
+      $r.trace_stop_pids=@(98766)
+      $refused=$false
+      try { RemoveOwnedTraceStopRequests } catch { $refused=$true }
+      if(-not $refused -or -not (Test-Path -LiteralPath $foreignRequest)) {
+        throw 'Foreign stop marker was deleted instead of refused.'
+      }
+      Remove-Item -LiteralPath $foreignRequest -Force
+      $r.trace_stop_pids=@($fixturePid)
+      $footer=[ordered]@{event='footer';qpc=200;interrupted=$false;io_error=$false;dropped=0;events=1}
+      [IO.File]::AppendAllText($fixtureTrace,"`n"+(ConvertTo-Json $footer -Compress),[Text.UTF8Encoding]::new($false))
+      WaitForTraceFooters
+      $span=@(TraceInventory | Where-Object { $_.name -eq 'DSVR-trace-stop-fixture.jsonl' })[0]
+      if(-not $span.closed -or $span.pid -ne $fixturePid -or $span.footer.events -ne 1 -or
+         $span.footer.io_error -or $span.footer.dropped) {
+        throw 'Footer polling did not preserve parsed PID/quality fields.'
+      }
+    }
+    # A stop request landing mid-window must survive as a truncated window: the same
    # QPC boundaries otherwise read as a case the operator had in full.
    $script:FinishPath=Join-Path $dir 'finish.request'
    [IO.File]::WriteAllText($script:FinishPath,'stop')
@@ -750,11 +932,56 @@ if($Mode -eq 'SelfTest') {
   exit 0
 }
 if(-not $Receipt) { throw 'Provide a unique -Receipt under build/verification.' }
-$script:FinishPath=$Receipt+'.finish'
 $Receipt=[IO.Path]::GetFullPath($Receipt)
 $evidence=Split-Path $Receipt -Parent
 $allowed=[IO.Path]::GetFullPath((Join-Path $repo 'build\verification'))+[IO.Path]::DirectorySeparatorChar
 if(-not $Receipt.StartsWith($allowed,[StringComparison]::OrdinalIgnoreCase)) { throw 'Receipt must be under build/verification.' }
+$script:FinishPath=$Receipt+'.finish'
+if($Mode -eq 'Launch') {
+  $launchPath=$Receipt+'.launch.json'; $stdoutPath=$Receipt+'.stdout.log'; $stderrPath=$Receipt+'.stderr.log'
+  foreach($path in @($Receipt,$launchPath,$stdoutPath,$stderrPath,$script:FinishPath)) {
+    if(Test-Path -LiteralPath $path) { throw "Launch artifact already exists: $path" }
+  }
+  [IO.Directory]::CreateDirectory($evidence) | Out-Null
+  $childArgs=@('-NoProfile','-NoLogo','-NonInteractive','-File',$PSCommandPath,
+    '-Mode','Run','-Receipt',$Receipt,'-CandidateReceipt',$CandidateReceipt,
+    '-WindowMinutes',"$WindowMinutes",'-CloseWaitMinutes',"$CloseWaitMinutes",
+    '-FooterWaitSeconds',"$FooterWaitSeconds",'-SeedVault',$SeedVault)
+  if($Cases) { $childArgs+=@('-Cases',$Cases) }
+  $child=StartDetachedPowerShell $childArgs $stdoutPath $stderrPath $repo
+  $launch=[ordered]@{schema=1;receipt=$Receipt;pid=$child.Id;started=(Get-Date).ToString('o');
+    stdout=$stdoutPath;stderr=$stderrPath;mode='Run'}
+  try { WriteNewReceiptJson $launchPath $launch }
+  catch { throw "Detached child PID $($child.Id) started but launch record could not be written. Logs: $stdoutPath ; $stderrPath. $($_.Exception.Message)" }
+  Write-Output "Detached protected runner PID $($child.Id). Logs: $stdoutPath ; $stderrPath. Finish with: pwsh -NoProfile -File `"$PSCommandPath`" -Mode Finish -Receipt `"$Receipt`". Close the game normally after the footer is reported."
+  exit 0
+}
+if($Mode -eq 'Finish') {
+  if(-not (Test-Path -LiteralPath $Receipt)) { throw 'Run receipt not found.' }
+  $script:r=ReadReceipt
+  if($r.state -in @('Restored','RecoveryBlocked')) { throw "Run is not finishable from receipt state '$($r.state)'. Use -Mode Restore after the game exits if recovery is blocked." }
+  $lockPath=Join-Path $transactionParent 'active-session.lock'
+  $lease=$null; $active=$false
+  try { $lease=[IO.File]::Open($lockPath,[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None) }
+  catch {
+    $nativeError=$_.Exception.HResult -band 0xffff
+    if($nativeError -in @(32,33)) { $active=$true } else { throw }
+  }
+  if($lease) { $lease.Dispose() }
+  if(-not $active) { throw 'No active capture runner owns the transaction lease.' }
+  if(Test-Path -LiteralPath $script:FinishPath) {
+    Write-Output "Finish was already requested for $Receipt."
+    exit 0
+  }
+  $stream=$null
+  try {
+    $stream=[IO.File]::Open($script:FinishPath,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+    $bytes=[Text.Encoding]::ASCII.GetBytes("finish-v1`n")
+    $stream.Write($bytes,0,$bytes.Length); $stream.Flush($true)
+  } finally { if($stream) { $stream.Dispose() } }
+  Write-Output "Finish requested. The runner will close the trace writer; close the game normally when prompted."
+  exit 0
+}
 if($Mode -eq 'Restore') {
   [IO.Directory]::CreateDirectory($transactionParent) | Out-Null
   $script:transactionLease=[IO.File]::Open((Join-Path $transactionParent 'active-session.lock'),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
@@ -764,6 +991,9 @@ if($Mode -eq 'Restore') {
 }
 # Entire preflight is read-only. Never infer safety from a prior run's receipt.
 if(@(Games).Count) { throw 'Game must be closed.' }
+if(Test-Path -LiteralPath $script:FinishPath) { throw 'Finish marker already exists for this receipt.' }
+$staleStopMarkers=@(Get-ChildItem -LiteralPath $game -Filter 'DSVR-trace-stop-*.request' -ErrorAction SilentlyContinue)
+if($staleStopMarkers.Count) { throw "Stale trace-stop request exists; reconcile its owning receipt before a new run: $($staleStopMarkers[0].Name)" }
 if((Get-ItemProperty 'HKCU:\Software\Valve\Steam\ActiveProcess').ActiveUser -ne $account) { throw 'Active Steam account changed.' }
 if(-not (Get-Process -Name steam -ErrorAction SilentlyContinue)) { throw 'Steam must already be running in Offline mode.' }
 $login=Get-Content -LiteralPath (Join-Path $steam 'config\loginusers.vdf') -Raw
@@ -809,7 +1039,7 @@ $script:transactionLease=[IO.File]::Open((Join-Path $transactionParent 'active-s
 $vault=Join-Path $transactionParent ('combat-observer-'+(Get-Date -Format 'yyyyMMdd-HHmmss')+'-'+[guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $vault | Out-Null
 $steamConfig=Join-Path $steam "userdata\$account\config\localconfig.vdf"
-$script:r=[ordered]@{state='Preparing';vault=$vault;started=(Get-Date).ToString('o');deadline=(Get-Date).AddMinutes($WindowMinutes).ToString('o');pids=@();roots=@();files=@();evidence=$evidence;steam_data=$steamData;steam_config=$steamConfig;steam_before=@();traces_before=@((Get-ChildItem -LiteralPath $game -Filter 'DSVR-trace-*.jsonl').Name);notes='Operator controls all gameplay. Observer-only LAB core; no XR/input/gameplay writes. Steam metadata snapshotted, live cache not overwritten. Keep Steam Offline. Cloud state is not independently proven; offline/exact-EXE blocking remain required.'}
+$script:r=[ordered]@{state='Preparing';vault=$vault;started=(Get-Date).ToString('o');deadline=(Get-Date).AddMinutes($WindowMinutes).ToString('o');pids=@();trace_stop_pids=@();trace_stop_token=[guid]::NewGuid().ToString('N');roots=@();files=@();evidence=$evidence;steam_data=$steamData;steam_config=$steamConfig;steam_before=@();traces_before=@((Get-ChildItem -LiteralPath $game -Filter 'DSVR-trace-*.jsonl').Name);notes='Operator controls all gameplay. Observer-only LAB core; no XR/input/gameplay writes. Steam metadata snapshotted, live cache not overwritten. Keep Steam Offline. Cloud state is not independently proven; offline/exact-EXE blocking remain required.'}
 SaveReceipt
 try {
   $r.candidate_receipt=$candidateReceiptPath
@@ -841,10 +1071,10 @@ try {
   # someone else's launch, so TrackGames must refuse it (see fixtures).
   $r.launch_requested=(Get-Date).ToString('o'); SaveReceipt
   Write-Output "Launching protected desktop observer; operator input only; deadline $($r.deadline). Combat recording starts automatically for ten minutes; no F9 required."
+  Write-Output "After the declared work, the runner will request a trace footer and wait for normal game exit. To finish early: pwsh -NoProfile -File `"$PSCommandPath`" -Mode Finish -Receipt `"$Receipt`"."
   Start-Process -FilePath (Join-Path $steam 'steam.exe') -ArgumentList '-applaunch','570940' | Out-Null
   WaitForSingleGameLaunch
   RunCasePlan $plan { TrackGames }
-  ReportCaseCoverage
   WaitForGameSession
 } finally {
   # Final exact-identity inventory before restoration; a launch this session

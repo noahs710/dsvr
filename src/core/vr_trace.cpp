@@ -843,6 +843,12 @@ void VrTraceRequestStop() {
     g_until_ms.store(0);
 }
 
+bool VrTraceConsumeStopRequest(const wchar_t* path) {
+  if (!path || !*path || !DeleteFileW(path)) return false;
+  VrTraceRequestStop();
+  return true;
+}
+
 bool VrTraceBegin(const wchar_t* explicit_path, unsigned duration_ms) {
   if (g_file) {
     DSVR_LOG("VrTrace: capture already active; marker retained in ordinary log");

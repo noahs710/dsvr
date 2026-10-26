@@ -37,6 +37,25 @@ unsigned long long g_save_after_ms = 0;
 std::string g_settings_status;
 std::deque<std::pair<std::string,std::function<bool()>>> g_commands;
 
+std::wstring TraceStopRequestPath() {
+  wchar_t executable[MAX_PATH]{};
+  const DWORD length=GetModuleFileNameW(nullptr,executable,MAX_PATH);
+  if (!length || length >= MAX_PATH) return {};
+  std::wstring path(executable,length);
+  const auto separator=path.find_last_of(L"\\/");
+  if (separator == std::wstring::npos) return {};
+  path.resize(separator+1);
+  path += L"DSVR-trace-stop-"+std::to_wstring(GetCurrentProcessId())+
+          L".request";
+  return path;
+}
+
+void PollTraceStopRequest() {
+  static const auto path=TraceStopRequestPath();
+  if (!path.empty() && VrTraceConsumeStopRequest(path.c_str()))
+    DSVR_LOG("Diagnostics: consumed process-scoped trace stop request");
+}
+
 void PumpMenuRequests(bool flush = false) {
   std::optional<Config> pending;
   bool save = false, export_logs = false;
@@ -285,6 +304,7 @@ DWORD WINAPI DiagnosticsThread(LPVOID /*param*/) {
       }
       next_combat_health=now+5000;
     }
+    if(cfg.observer_only && cfg.combat_trace_only) PollTraceStopRequest();
     if (cfg.hotkeys_enabled && GameIsForeground()) {
       bool m = cfg.log_marker_vk > 0 &&
                (GetAsyncKeyState(cfg.log_marker_vk) & 0x8000) != 0;

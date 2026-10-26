@@ -69,6 +69,9 @@ void VrTracePump();
 // Request/state are safe from any thread. Complete is published only AFTER
 // drain, checked flush and checked close. It does not certify gameplay/stereo.
 void VrTraceRequestStop();
+// Diagnostic-writer-only one-shot control. If path exists it is deleted and
+// the active bounded capture is asked to close; never call from a game hook.
+bool VrTraceConsumeStopRequest(const wchar_t* path);
 TraceCaptureState VrTraceState();
 // Process-local generation of the last successfully begun capture. A client
 // must compare ownership before interpreting state or stopping a capture.

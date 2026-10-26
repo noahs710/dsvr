@@ -1330,3 +1330,33 @@ selection -- one global read in two places, not one mechanism. The
 kind-assignment hop (1405290C0 tail / 140529670) is untouched by this
 subtree and remains the next probe. No submission binding claimed;
 B/C/H stay open.
+
+### 26 Oct selector continuation byte-trace correction
+
+Static trace against the installed executable (SHA-256
+`a45aaa36dd2f6cc151670a639ea5547043cf38ea79ff4178b963c6ed71f98d7b`),
+using Capstone on the shipped bytes and the Ghidra callsite context; no
+invocation:
+
+- `14284F926` compares dword `[R8+0x160]` to `0x1d`, then selects the
+  forged return target. Equal selects `140069F15`; non-equal selects
+  `1403589C0`.
+- `140069F15`: `xor al,al; lea rsp,[rsp+8]; jmp qword ptr [rsp-8]`.
+  The original caller is `14031D91F: call qword ptr [R10+0x490]`, so
+  the saved continuation is `14031D926`. It is `NOP; JMP 1421497F6`;
+  that block sets up values and jumps to `14031D939`, which calls
+  `1403CA1D0` and then jumps to `14295B2AC`.
+- `1403589C0` jumps to `142FFAE49`: `mov rax,[rcx]; movzx r8d,r9b;
+  push r10; pop rdx; push qword ptr [rax+0x480]; ret`. This is an
+  indirect transfer through `[[RCX]+0x480]`; the runtime target is not
+  present in the shipped bytes.
+- Therefore the equality arm resumes the `+0x490` caller's continuation;
+  the non-equality arm transfers through a runtime `+0x480` slot. The
+  historical claims that both arms invoke `+0x480`, or that equality
+  continues at `1403589A1`, are superseded. The two paths' eventual
+  destinations are not proven equal or unequal without runtime pointer/
+  stack values. No damage/outcome semantics are inferred.
+
+The ignored local probe `build/selector_probe.py` reports the EXE hash,
+selected arms and decoded bytes. This corrects the earlier static narrative;
+it does not establish that either branch executed in a live encounter.

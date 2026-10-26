@@ -40,6 +40,7 @@ bool VrTraceInstallCombat() { ++trace_calls;combat_install=true;return true; }
 bool VrTraceBegin(const wchar_t*, unsigned duration) { capture_duration=duration; ++captures; return true; }
 void VrTracePump() {}
 void VrTraceFinish(bool) {}
+bool VrTraceConsumeStopRequest(const wchar_t*) { return false; }
 TraceCaptureState VrTraceState() { return TraceCaptureState::Complete; }
 }
 

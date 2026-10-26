@@ -1,5 +1,45 @@
 # DSVR current handoff
 
+### Active task: selector correction + capture lifecycle
+
+Task ID: 26-Oct-capture-lifecycle. Baseline `e4fa2b6` (clean at task start).
+Prerequisites: user-approved design `docs/superpowers/specs/2026-10-26-combat-capture-lifecycle-design.md`;
+installed EXE SHA-256 is pinned below. Objective: record both selector paths
+without claiming convergence; add detached runner, process-scoped stop request,
+footer wait, and restore refusal while any game is live. Expected offline
+observations: stop request is consumed once and closes one active trace with a
+footer; detached mode returns with logs/child PID; restore never kills a process
+or touches staged roots while the game lives. No DSR/Steam launch. Task-owned
+files: MODLOG, native-melee contract, runner, diagnostics/trace boundary and
+tests. Recovery boundary: retain the receipt/backups/staged roots on any timeout
+or live-process refusal; restore only after normal process exit.
+
+Offline lifecycle review and validation complete 26 Oct: a recorded stop PID
+with a missing marker is retried; a marker bearing another receipt token is
+refused and retained. `pwsh -NoProfile -File tools/run_combat_capture.ps1
+-Mode SelfTest -WindowMinutes 30` PASS. `cmake --build build --config Debug
+--parallel` PASS; full Debug CTest PASS 100/100. Release build PASS (compiler
+warnings in existing xinput/trace/test code); full Release CTest PASS 100/100.
+Focused lifecycle tests previously passed 7/7. `git diff --check` reports no
+whitespace errors (only the repository's LF-to-CRLF notices). No game/Steam
+launch, no live capture, and no Ghidra database edits. Native melee outcomes
+remain unaccepted pending independent runtime evidence; lifecycle readiness is
+not permission to launch a session.
+
+Next probe: before any live capture, inspect the committed runner contract and
+have the operator explicitly choose a bounded case plan and normal-exit window.
+Do not infer capture coverage until each trace has a valid footer and the case
+interval is fully enclosed.
+
+Selector continuation result: `python build/selector_probe.py` against EXE SHA-256
+`a45aaa36dd2f6cc151670a639ea5547043cf38ea79ff4178b963c6ed71f98d7b` decodes
+both arms. Equality returns via the original callsite `14031D91F` to
+`14031D926 -> 1421497F6 -> 14031D939 -> 1403CA1D0 -> 14295B2AC`.
+Non-equality goes `1403589C0 -> 142FFAE49 -> [[RCX]+0x480]` (runtime pointer).
+This contradicts the historical “both invoke +0x480”/`1403589A1` account;
+the indirect target cannot be matched to the equality continuation from bytes
+alone. No invocation or game run.
+
 ### Evidence correction and next probe
 
 Several earlier conclusions below are **superseded**, not acceptance evidence.
@@ -20,16 +60,11 @@ Do not use `tools/classify_cases.py` HIT/BLOCK labels as ground truth: it does
 not validate capture integrity or actor-read flags. Preserve raw traces and
 restore receipts; avoid another operator run until capture lifecycle is fixed.
 Offline experiment: `python build/selector_probe.py` exited 0. It verified the
-installed EXE SHA-256 `a45aaa36dd2f6cc151670a639ea5547043cf38ea79ff4178b963c6ed71f98d7b`,
-decoded 55 bytes at `14284f926` with Capstone, and manually modeled its
-stack selector: equal -> `140069f15`; not equal -> `1403589c0`. This is a
-bounded symbolic model, not full CPU emulation or evidence that either path
-executed in game. The earlier claim that both branches reach `+0x480` is
-not proven by this model: trace the equal branch before asserting convergence.
-`build/selector_probe.py` is ignored local evidence, not a shipped tool.
-Next probe: independently decode the two selected continuations and compare
-them against their shipped bytes, preserving flags/registers; then prepare a
-protected operator capture only after fixing the runner timeout and trace footer.
+installed EXE SHA-256 above and decoded the selector plus both continuation
+chains using Capstone. This is a static byte trace, not evidence either arm
+executed in game. `build/selector_probe.py` is ignored local evidence, not a
+shipped tool. The next probe is offline runner/trace lifecycle verification;
+do not prepare another live capture until that work passes.
 
 ### 26 Oct prompt assembly to dispatch mesh, H1 static complete
 

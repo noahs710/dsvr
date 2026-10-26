@@ -72,8 +72,21 @@ int wmain(int argc, wchar_t* argv[]) {
   dsvr::VrTracePump();
   CHECK(std::filesystem::file_size(path) > 0);
   CHECK(dsvr::VrTraceState() == dsvr::TraceCaptureState::Recording);
-  std::thread stopper([] { dsvr::VrTraceRequestStop(); });
+  const auto stop_request=directory/(name+L"-stop.request");
+  CHECK(!dsvr::VrTraceConsumeStopRequest(stop_request.c_str()));
+  {
+    std::ofstream request(stop_request,std::ios::binary);
+    CHECK(request.good());
+    request << "stop-v1";
+  }
+  bool consumed=false;
+  std::thread stopper([&] {
+    consumed=dsvr::VrTraceConsumeStopRequest(stop_request.c_str());
+  });
   stopper.join();
+  CHECK(consumed);
+  CHECK(!std::filesystem::exists(stop_request));
+  CHECK(!dsvr::VrTraceConsumeStopRequest(stop_request.c_str()));
   CHECK(!dsvr::VrTraceActive());
   CHECK(dsvr::VrTraceState() == dsvr::TraceCaptureState::Closing);
   dsvr::VrTraceRecord(event);  // must not be accepted after stop
