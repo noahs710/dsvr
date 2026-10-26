@@ -40,7 +40,12 @@ before `-Mode Launch`. The observer records once for 600 seconds after local
 player load; keep planned windows inside that capture and count a case only if a
 valid footer encloses its full interval. The runbook's hit/miss/block/parry and
 interaction requirements remain open; no gameplay has been performed for this
-candidate.
+candidate. Final code review found one coverage caveat: `RunCasePlan` starts
+after the process stabilizes, but does not wait for the automatic trace header
+created after local-player load. The coverage report will expose an uncovered
+startup window rather than count it, but the first planned case could be wasted.
+Decide whether to add a bounded matching-header wait before selecting the live
+case plan.
 
 Selector continuation result: `python build/selector_probe.py` against EXE SHA-256
 `a45aaa36dd2f6cc151670a639ea5547043cf38ea79ff4178b963c6ed71f98d7b` decodes
