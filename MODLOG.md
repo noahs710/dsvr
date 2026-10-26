@@ -1,5 +1,36 @@
 # DSVR current handoff
 
+### Evidence correction and next probe
+
+Several earlier conclusions below are **superseded**, not acceptance evidence.
+The Asylum and earlier captures have no closing footer; case windows were
+interrupted, and an earlier assistant edited the Asylum case file after the
+fact. Neither establishes complete coverage or labels individual contacts.
+The v2 fields called `*_after` are actually read **before** `g_contact` in
+`src/core/vr_trace.cpp`; bit 16 does not prove a post-dispatch observation.
+Do not infer the source PARAM byte, a gate decision, or a selected hit volume
+from those fields alone. `+0x54` kind 2 and the `+0x160 == 0x1d` check are
+different fields: observing one does not prove or disprove the other.
+
+The previous claim that a 3D hand-distance gate is necessarily conservative
+relative to native geometry is unproven: endpoints, transforms and thresholds
+have not been established as identical. Likewise, firebomb bypass, individual
+event labels, predicate meanings and completed static chains remain unverified.
+Do not use `tools/classify_cases.py` HIT/BLOCK labels as ground truth: it does
+not validate capture integrity or actor-read flags. Preserve raw traces and
+restore receipts; avoid another operator run until capture lifecycle is fixed.
+Offline experiment: `python build/selector_probe.py` exited 0. It verified the
+installed EXE SHA-256 `a45aaa36dd2f6cc151670a639ea5547043cf38ea79ff4178b963c6ed71f98d7b`,
+decoded 55 bytes at `14284f926` with Capstone, and manually modeled its
+stack selector: equal -> `140069f15`; not equal -> `1403589c0`. This is a
+bounded symbolic model, not full CPU emulation or evidence that either path
+executed in game. The earlier claim that both branches reach `+0x480` is
+not proven by this model: trace the equal branch before asserting convergence.
+`build/selector_probe.py` is ignored local evidence, not a shipped tool.
+Next probe: independently decode the two selected continuations and compare
+them against their shipped bytes, preserving flags/registers; then prepare a
+protected operator capture only after fixing the runner timeout and trace footer.
+
 ### 26 Oct prompt assembly to dispatch mesh, H1 static complete
 
 Distance consumer walked to forged-RET prompt mesh (1422D3EA2):

@@ -4,6 +4,18 @@ Evidence reference only; execution order belongs to the [sole execution guide](s
 
 Status: **unresolved**. No native damage binding is verified by this note. Static paths below come from the pinned Ghidra project; the first bounded native observation is separately classified with its loss limitation.
 
+**Evidence correction (latest):** Several 26 October conclusions below
+overstate the evidence and are retained only as history. The v2 payload's
+weight/ID/tag fields are read before native dispatch despite their `after`
+names. Their values do not prove post-call state or the source PARAM byte.
+The first and Asylum captures lack footers; their apparent correlations are
+unqualified. Kind `record+0x54` and the separate `+0x160 == 0x1d` test are
+not interchangeable. No proof establishes firebomb dispatch bypass, that
+`1402FCD10` implements virtual `+0x150/+0x148`, or that either static chain
+is complete. The selector at `140529670` reads the pointer *stored at*
+`param_2+8`, then indexes that pointer at `+0x6a`; do not add 8 to the row
+offset or infer a specific attack until its provenance is independently pinned.
+
 ## 24 October continuation: selected rows and event identity reach the contact record
 
 Read-only live GhidraMCP against `DSRFull`, revision

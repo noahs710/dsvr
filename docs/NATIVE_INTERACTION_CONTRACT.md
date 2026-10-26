@@ -1,5 +1,13 @@
 # Native interaction evidence
 
+**Evidence correction (latest):** The prior claim that our 3D hand-distance
+gate is necessarily conservative relative to native 2D distance is unproven:
+the endpoints, thresholds and transforms have not been shown equivalent.
+The selection-loop branches, prompt/LOS labels and individual activation
+labels below are hypotheses, not qualified native verdicts. The capture has
+no footer and no reliable case windows. H1 remains open; do not enable reach
+from these observations.
+
 Status: H1 partially evidenced; the ObjAct group selection/activation chain is
 recovered statically. Native capture 26 Oct supplies 3 labelled activations
 with row handles + validDist + accepted results (below). Eligibility/LOS,
