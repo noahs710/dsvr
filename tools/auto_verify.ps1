@@ -3,7 +3,8 @@
 # Safe: never installs, never launches the game, never touches the game folder.
 # On a fully green run this always refreshes dist\DSVR-latest for testing.
 # Formal immutable releases additionally need: -Package -Version <new-version>
-param([switch]$Package, [string]$Version, [switch]$NoLatest)
+param([switch]$Package, [string]$Version, [switch]$NoLatest,
+  [switch]$SkipDoctor, [switch]$SkipPackage)
 $ErrorActionPreference = "Stop"
 if (($Package -and [string]::IsNullOrWhiteSpace($Version)) -or
     (!$Package -and ![string]::IsNullOrWhiteSpace($Version))) {
@@ -34,9 +35,14 @@ cmake --build build --config Release --parallel
 if ($LASTEXITCODE -ne 0) { exit 1 }
 ctest --test-dir build -C Release --parallel --output-on-failure 2>&1 | Tee-Object -FilePath build\latest-ctest.txt
 if ($LASTEXITCODE -ne 0) { exit 1 }
-& .\build\src\setup\Release\DSVR-Setup.exe --doctor
-if ($LASTEXITCODE -ne 0) { exit 1 }
-if (!$NoLatest) {
+# Code-only turns skip the game-closed/doctor + zip stages: the inner
+# ctest loop already proved the tree. Packaging stays the default so a
+# green run still refreshes dist/DSVR-latest for testing.
+if (!$SkipDoctor) {
+  & .\build\src\setup\Release\DSVR-Setup.exe --doctor
+  if ($LASTEXITCODE -ne 0) { exit 1 }
+}
+if (!$NoLatest -and !$SkipPackage) {
   # Mod version label for the dev package (single source: src/common/version.h).
   $label = "dev"
   $vh = Get-Content src\common\version.h -Raw

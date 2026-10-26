@@ -6,7 +6,9 @@ and current. The best shortcut is remembering which shortcut was already false.
 
 ## Start where the evidence stopped
 
-1. Read `MODLOG.md`, then the next unmet gate in
+1. Read `MODLOG.md` (live handoff only; the closed per-slice task block is
+   archived at `docs/history/2026-10-26-modlog-task-block.md`), then the next
+   unmet gate in
    `docs/superpowers/plans/2026-10-21-native-conversion-execution.md`.
 2. Inspect `git status --short` and the actual diff. This checkout contains
    valuable unfinished work: never reset it or stage everything indiscriminately.

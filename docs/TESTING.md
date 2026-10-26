@@ -63,7 +63,7 @@ is only the inner loop. Slow labels live beside each `add_test` in
 tests/CMakeLists.txt — label a new test `slow` if it waits on production
 timing rather than asserting instantly.
 
-tools/auto_verify.ps1 configures/builds Release, runs CTest and setup doctor, then refreshes dist/DSVR-latest and its ZIP/verification/CTest receipts on success. It does not install or launch, and does not replace Debug/native/headset qualification. Never reuse historical suite totals as current results. sources/tests define config defaults.
+tools/auto_verify.ps1 configures/builds Release, runs CTest and setup doctor, then refreshes dist/DSVR-latest and its ZIP/verification/CTest receipts on success. Code-only turns can pass `-SkipDoctor -SkipPackage` (build + full CTest only; the doctor/package stages stay default). It does not install or launch, and does not replace Debug/native/headset qualification. Never reuse historical suite totals as current results. sources/tests define config defaults.
 
 With DSR closed, setup supports `--doctor`, `--install [--game <folder>]` and `--uninstall`; inspect current implementation/help before use. `--yes` acknowledges setup prompts; it does not prove run preconditions. Setup deploys loader/core; an optional ReShade host/add-on requires its own pinned matched binaries and reversible manifest. Select one host at startup; restart for host/action/resource changes rather than assuming reload fully reinitializes XR.
 
