@@ -1,5 +1,16 @@
 # DSVR current handoff
 
+### 26 Oct: diverted path converges on +0x480 — guard selects how, not whether
+
+Bulk probes: 142ffae49 = MOV RAX,[RCX]; MOVZX R8D,R9B; PUSH R10/POP RDX;
+PUSH [RAX+0x480]/RET — the non-0x1D side re-enters target +0x480 via
+indirect tail-jump, so BOTH guard outcomes invoke +0x480. Correction to
+prior "separate continuation" label recorded in docs/NATIVE_MELEE_CONTRACT.md.
+Source tail: 142d805f9 NULL-checks RDX (JZ->140488694->jumptable 142d5f79f,
+unrecovered), else 1404f5ab2 selects jumptable vs 140c5fb52->1404885d3 on R8.
+140420a20 is a second caller of thunk_142134a3b (identity open). B/C/H
+unchanged: static shape, no submission binding. No invocation; DB unsaved.
+
 ### 26 Oct follow-up: +0x490 guard exact, tail flag write pinned
 
 14284f926 = CMP [R8+0x160],0x1d / CMOVNZ: 0x1D continues to +0x480

@@ -1082,6 +1082,41 @@ write or speculative binding was added. Coalescing the pair, handle and status
 reads makes room for the after-kind read; failed extended reads fall back to the
 established pair/context reads instead of erasing otherwise valid observations.
 
+### 26 October: diverted path converges back on +0x480 — correction
+
+Two bulk calls, read-only, no invocation. The prior note called the
+non-0x1D side a "separate 9C0 continuation" with deferred recovery.
+Its body is now recovered and the label was wrong:
+
+- `1403589C0` is a split-jump head into `FUN_142ffae49` (6
+  instructions): `MOV RAX,[RCX]` (object vtable), `MOVZX R8D,R9B`
+  (the source-side R9B=`(AL==0)` flag from `1428447D3`), `PUSH R10 /
+  POP RDX` (receiver register swap), then
+  `PUSH qword ptr [RAX+0x480] / RET` — an indirect tail-jump into
+  the receiver's `+0x480` slot. The `CMOVNZ` at `14284f951` chooses
+  only the *return-address context*: `0x1D` continues through
+  `1403589A1`, anything else re-enters `+0x480` via `142FFAE49`.
+  Both guard outcomes invoke target virtual `+0x480`; the guard
+  selects *how*, not *whether* `+0x480` runs.
+- `1404f5ab2` (reached from `142d805f9` when RDX != 0):
+  `TEST R8,R8; JZ -> 140488694; JMP 140c5fb52`. `140488694` is
+  `JMP 142d5f79f`, whose body is an unrecovered jumptable (computed
+  dispatch — execution unknown). `140c5fb52` forwards
+  `(param_3+0x10)` to `FUN_1404885d3` (unrecovered here).
+- `thunk_FUN_142134a3b` (`1404885a0`) has two indexed callers:
+  `FUN_14031d953` (the `+0x460` source-side tail) and
+  `FUN_140420a20` (second caller — identity and context unrecovered,
+  not assigned). Sole indexed callee: the jumptable `142d5f79f`.
+- Corrected chain: source-side `+0x460` completion
+  (`14031d953 -> 142134a3b -> 142d805f9`) NULL-checks RDX
+  (`JZ -> 140488694 -> jumptable`), else falls to `1404F5AB2` where
+  R8 selects jumptable vs `140c5fb52 -> 1404885d3`. Register roles
+  (R8/RDX provenance) remain open; no semantics assigned.
+- Still open: `DAT_141C7B1B0 == 0` tail selection, `+150/+148`
+  predicates, HP/stamina attribution, jumptable destination set.
+  B/C/H gates unchanged — convergence on `+0x480` is still static
+  shape, not a submission binding.
+
 ### 26 October follow-up: +0x490 guard semantics, tail flag write
 
 Same read-only session, two bulk calls, no invocation:
