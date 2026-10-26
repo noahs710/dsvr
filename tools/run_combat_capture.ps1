@@ -408,7 +408,7 @@ function RestoreTransaction {
   # moment it can be told apart from a finished one. Record which, never repair it.
   $unclosed=@(TraceInventory | Where-Object { -not $_.closed } | ForEach-Object { $_.name })
   if(@($unclosed).Count) {
-    $r.unclosed_traces=@($unclosed)
+    SetReceiptValue 'unclosed_traces' @($unclosed)
     foreach($name in @($unclosed)) { Write-Warning "TRACE $name has no closing footer; it is incomplete evidence." }
   }
   SaveReceipt
