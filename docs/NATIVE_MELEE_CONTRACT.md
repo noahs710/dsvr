@@ -1222,7 +1222,40 @@ Next: one bulk probe on 1404D0BB0/1404D0F20/14068BDCF contexts plus
 the 1405290C0 body past the 35-instruction head. No HP/stamina
 attribution or submission binding claimed; B/C/H stay open.
 
-### 26 Oct ObjDam correction: 141C7B1B0 gates the condition, not the dispatch
+### 26 Oct kind assignment RECOVERED: PARAM-driven vocabulary, gate identified
+
+Two bulk calls, read-only, no invocation. The +0x54 store is closed:
+
+- `FUN_140529670(param_1=record, param_2=table, param_3=index)`:
+  `if (3 < param_3) return;` -- index vocabulary is 0..3.
+  Reads `uVar5 = byte[base + index + 0x6a]`: 1 -> uVar4=1, 2 -> uVar4=2,
+  else 0. Reads `fVar8 = float[base + index*4]` (the weight/delta
+  array). The STORE is gated:
+  `if ((0.0 < fVar8) && ((-1 < iVar7) || (bVar6 != 0)))` where iVar7 =
+  short[+0x2c/+0x34 indexed] (event paired IDs, -1 = absent) and
+  bVar6 = record +200 & 0x10 (the flag 1405290C0 sets from param_5).
+  On pass: `+0x50 = fVar8; +0xac = iVar7; +0xb0 = iVar3;`
+  **`+0x54 = uVar4`**; `+0xb4 = byte[base+0x7c]`.
+- The table (`param_2+8`) is the row resolved by 140528910: a PARAM
+  table lookup -- `1405322D0(param+7, 0)` selects the table, then a
+  binary search matches row id. So the kind vocabulary (0/1/2 via the
+  +0x6a byte) and the weight (float array) are per-attack PARAM data,
+  consistent with the +0x73 message vocabulary (1 -> msg 24, 2 -> msg 25)
+  in 1403C72D0. 140528A30 is the sibling resolver (table param+12).
+- Why the session saw kind-0 only: every captured record had either
+  uVar5 == 0 (PARAM byte 0 for that attack) or fVar8 <= 0 (weight gate
+  failed, store skipped, field stays zero). The trap hits, Hollow
+  swings, block and riposte all resolved to kind-0 PARAM entries.
+  The +0x490 0x1D-guarded path requires a kind-2-creating attack whose
+  PARAM entry carries +0x6a == 2 -- likely heavier/enemy-specific
+  attacks, not the tutorial-Hollow exchanges captured.
+- Static chain now complete end to end: submission entries
+  (1404D0BB0/1404D0F20 ObjDam conditions + unknown 140490F40 callers)
+  -> 1403C9B50 pool -> 1403C93B0 payload -> 140528CE0/1405290C0 row
+  resolution -> 140529670 kind store -> 1403C72D0 message select ->
+  +0x480/+0x490 dispatch -> +0x460 completion. Only HP/stamina
+  attribution and live elicitation of kind-2 remain. B/C/H stay open
+  pending a targeted capture against a kind-2 PARAM attack.
 
 One bulk call, read-only, no invocation. 1404D0BB0 names itself in its
 own decompiled body: `*param_1 = NS_FRPG::FrpgEventConditionObjDam::vftable`

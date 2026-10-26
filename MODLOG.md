@@ -1,5 +1,16 @@
 # DSVR current handoff
 
+### 26 Oct kind assignment RECOVERED: PARAM vocabulary, gate identified
+
+140529670 writes +0x54 = uVar4 in {0,1,2} from PARAM-row byte +0x6a
+(1->1, 2->2, else 0), gated on weight float > 0 AND (paired event IDs
+valid OR record +200&0x10). Table resolved by 140528910 binary-search
+PARAM lookup. Session kind-0 explained: all captured attacks had +0x6a
+== 0 or failed weight gate; kind-2 needs a heavier/enemy PARAM attack.
+Full static chain complete end to end; only kind-2 elicitation + HP
+attribution remain. Full note in docs/NATIVE_MELEE_CONTRACT.md.
+No invocation; DB unsaved. B/C/H open pending targeted capture.
+
 ### 26 Oct ObjDam correction: 141C7B1B0 gates the condition, not the dispatch
 
 1404D0BB0 assigns NS_FRPG::FrpgEventConditionObjDam::vftable — an
