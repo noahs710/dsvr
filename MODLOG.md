@@ -1,5 +1,19 @@
 # DSVR current handoff
 
+### 26 Oct Asylum session: firebomb kill leaves no contact, demon hit kind-0
+
+Session 2 (PID 54260, 35,776 lines, rev 19 Restored): firebomb kill
+produced ZERO contact records -- bombs don't route through the contact
+dispatch at all. One HP event: demon hit 659->440 side1 flags 15 at
+T+74.7s, kind (0,0), v2 store (weight varies/see histogram). Store
+histogram observed: (0.7,ac8,b0-1,tag1)x1930, (0.6,ac10,-1,1)x822,
+(3.0,ac11,b0=12,tag0)x185, (0.6,ac11,-1,1)x39, (0.1,-1,-1,0)x10,
+(1.0,ac11,b0=12,tag0)x10. Kind-2 absent -- demon's attack PARAM also
+kind-0; the broadsword kill records remain the only kind-2 seen.
+Classifier fixed (store aggregation). Case windows truncated by runner
+kill at tool timeout -- single window retained, analysis unaffected.
+No narration needed from operator. B/C/H open.
+
 ### 26 Oct payload v2: 140529670 store fields captured (96f3bb7)
 
 Response payload v2: weight +0x50, paired IDs +0xac/+0xb0, tag +0xb4
