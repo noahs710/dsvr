@@ -1,5 +1,15 @@
 # DSVR current handoff
 
+### 26 Oct full gate green + package refreshed (evening)
+
+Release 100/100, Debug 100/100 (inner loop 0.58s throughout the day).
+auto_verify PASS, doctor pass, dist/DSVR-latest refreshed
+(0.16.0-render-host-preview, built 2026-10-26T21:33:49Z). Tree holds
+only the in-flight Codex efficiency work (unstaged) plus today's 8
+committed slices. Next operator step when wanted: targeted kind-2
+capture (heavier/enemy attack) or any gate; Steam/manual steps are
+theirs.
+
 ### 26 Oct continuations placed via raw bytes (bridge timeout worked around)
 
 get_functions timed out on 14238E1C6; used disassemble_bytes instead.
