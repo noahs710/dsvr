@@ -1,5 +1,17 @@
 # DSVR current handoff
 
+### 26 Oct bulk probe: +0x490 slot target named, 14031D958 tail placed
+
+Single bulk get_functions call (3 targets), read-only, no native calls.
+Contract result: PlayerIns +0x490 slot 1403589B0 = 5-byte thunk to
+FUN_14284f926 (body still unrecovered — one hop remains);
+14031D958 = interior of FUN_14031d953 (calls 142134a3b then 142ed722a);
+FUN_14003d493 (sole caller, itself called only by 14295b2ac) places the
+tail on the source-side completion path 14031D939->14295b2ac->14003d493
+->14031d953. DAT_141C7B1B0 branch, +150/+148 predicates, HP/stamina
+attribution still open. B/C/H gates unchanged. docs/NATIVE_MELEE_CONTRACT.md
+holds the full note. No game launch; DB unsaved.
+
 ### Quick loop: sub-second inner ring + configure skip, 26 October 2026
 
 Inner loop is now `ctest -C Release --parallel -LE slow`: 93/93 in 0.58 s.

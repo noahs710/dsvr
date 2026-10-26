@@ -1082,6 +1082,28 @@ write or speculative binding was added. Coalescing the pair, handle and status
 reads makes room for the after-kind read; failed extended reads fall back to the
 established pair/context reads instead of erasing otherwise valid observations.
 
+### 26 October bulk probe: +0x490 slot target named, 14031D958 tail placed
+
+Single bulk `get_functions` call (no repeats), read-only, no invocation:
+
+- PlayerIns `+0x490` slot `1403589B0` is a 5-byte thunk
+  (`thunk_FUN_14284f926`) forwarding to `FUN_14284f926`. The slot
+  target is now named; the body of `14284f926` (where the earlier
+  `+0x160 == 0x1D` guard and `+0x480` forward are expected to live)
+  is still unrecovered — one hop remains.
+- `14031D958` lies inside `FUN_14031d953` (entry `14031d953`, body
+  through `14031d991`). Decompiled body calls `thunk_FUN_142134a3b()`
+  then `FUN_142ed722a()`; indexed callees also include
+  `thunk_FUN_1402110f8` (`14031d913`).
+- `FUN_14003d493` (size 13, wrapper) is the sole indexed caller of
+  `FUN_14031d953`, forwarding `(param_1, unaff_RDI)`; its own sole
+  indexed caller is `FUN_14295b2ac`. This places the tail on the
+  source-side completion path: `14031D939 -> 14295b2ac -> 14003d493
+  -> 14031d953 -> {142134a3b, 142ed722a}`.
+- The `DAT_141C7B1B0 == 0` branch condition selecting this tail, the
+  `+150/+148` predicate meanings, and HP/stamina attribution remain
+  open. B/C/H gates unchanged: no damage submission binding exists.
+
 Diagnostic values (all exact 16-bit limbs/bytes): 0=read mask; 1..2=unsigned
 record +54 before; 3..4=unsigned +54 after; 5..6=+168/+169 before;
 7..8=+168/+169 after; 9..14=reserved zero; 15=payload version 1.
