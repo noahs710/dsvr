@@ -1,5 +1,14 @@
 # DSVR current handoff
 
+### 26 Oct submission-entry probe: bounded negative, static chain complete
+
+140371200/360/BD0 are generic lookups (146-173 callers each) — cannot
+identify 140490F40's callers; submission entry uses computed dispatch.
+Static chain declared complete except live-elicitation items (submitter
+identity, jumptable set, +150/+148, HP attribution). Next actionable
+work is a targeted kind-2 capture (needs operator) or unrelated gates.
+Full note in docs/NATIVE_MELEE_CONTRACT.md. No invocation; DB unsaved.
+
 ### 26 Oct kind assignment RECOVERED: PARAM vocabulary, gate identified
 
 140529670 writes +0x54 = uVar4 in {0,1,2} from PARAM-row byte +0x6a

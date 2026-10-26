@@ -1257,6 +1257,21 @@ Two bulk calls, read-only, no invocation. The +0x54 store is closed:
   attribution and live elicitation of kind-2 remain. B/C/H stay open
   pending a targeted capture against a kind-2 PARAM attack.
 
+### 26 Oct submission-entry probe: bounded negative, chain declared complete
+
+One bulk call, read-only. 140371200/140371360/140371BD0 (the actor
+resolvers inside 140490F40) are generic map/object lookup utilities
+with 146-173 indexed callers each (lists truncated by the bridge).
+They cannot identify 140490F40's callers -- the submission entry uses
+computed dispatch with zero indexed callers, and walking 150+ generic
+lookup callers is not a bounded probe. Declared end of the static
+chain: everything from submission-adjacent creation through kind
+store, message select, +0x480/+0x490 dispatch and +0x460 completion
+is now mapped except (a) who calls 140490F40, (b) the 142d5f79f
+jumptable destinations, (c) +150/+148 predicates, (d) HP/stamina
+attribution. (a) needs live elicitation, not more static walking;
+(b)-(d) need targeted native correlation. B/C/H stay open.
+
 One bulk call, read-only, no invocation. 1404D0BB0 names itself in its
 own decompiled body: `*param_1 = NS_FRPG::FrpgEventConditionObjDam::vftable`
 -- an event-CONDITION constructor (ObjDam), not a contact dispatcher.
