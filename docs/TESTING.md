@@ -55,6 +55,13 @@ pwsh -File tools/auto_verify.ps1
 ```
 
 Use `ctest --test-dir build -C Release -N` to discover actual test names before focused `-R` runs. Register necessary fixtures in tests/CMakeLists.txt. Test mutation/adapter boundaries, invalid state and lifecycle, not only helper self-consistency. Run broader suites once the integrated candidate is ready; repeat when changes/failures justify it.
+For the sub-second edit loop, skip the label-slow timing-honest tests (5x
+diagnostics debounce waits, combat SelfTest case windows, package zip I/O):
+`ctest --test-dir build -C Release --parallel -LE slow --output-on-failure`.
+The full suite (`ctest -C Release --parallel`) is still the gate; `-LE slow`
+is only the inner loop. Slow labels live beside each `add_test` in
+tests/CMakeLists.txt — label a new test `slow` if it waits on production
+timing rather than asserting instantly.
 
 tools/auto_verify.ps1 configures/builds Release, runs CTest and setup doctor, then refreshes dist/DSVR-latest and its ZIP/verification/CTest receipts on success. It does not install or launch, and does not replace Debug/native/headset qualification. Never reuse historical suite totals as current results. sources/tests define config defaults.
 

@@ -11,8 +11,22 @@ if (($Package -and [string]::IsNullOrWhiteSpace($Version)) -or
 }
 $root = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
 Set-Location $root
-cmake -S . -B build -G "Visual Studio 18 2026" -A x64 -DDSVR_ENABLE_LAB=OFF -DDSVR_BUILD_RESHADE_ADDON=ON
-if ($LASTEXITCODE -ne 0) { exit 1 }
+# Re-configuring a matching tree costs ~3.6 s and buys nothing: FetchContent
+# deps are already populated and options are pinned below. Only configure when
+# the cache is missing or disagrees on generator/platform/key options.
+$cache = Join-Path $root "build/CMakeCache.txt"
+$needConfigure = $true
+if (Test-Path -LiteralPath $cache) {
+  $text = Get-Content -LiteralPath $cache -Raw
+  $needConfigure = -not ($text -match 'CMAKE_GENERATOR:INTERNAL=Visual Studio 18 2026' -and
+    $text -match 'CMAKE_GENERATOR_PLATFORM:INTERNAL=x64' -and
+    $text -match 'DSVR_ENABLE_LAB:BOOL=OFF' -and
+    $text -match 'DSVR_BUILD_RESHADE_ADDON:BOOL=ON')
+}
+if ($needConfigure) {
+  cmake -S . -B build -G "Visual Studio 18 2026" -A x64 -DDSVR_ENABLE_LAB=OFF -DDSVR_BUILD_RESHADE_ADDON=ON
+  if ($LASTEXITCODE -ne 0) { exit 1 }
+}
 # --parallel without a number uses all logical cores (/MP handles TU-level
 # parallelism inside each target); -j/--parallel on the ctest below is safe:
 # every temp-output test is PID-unique.

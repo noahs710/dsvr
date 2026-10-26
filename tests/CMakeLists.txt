@@ -32,6 +32,8 @@ if(WIN32)
   find_program(DSVR_PWSH_EXECUTABLE NAMES pwsh REQUIRED)
   add_test(NAME combat_capture_transaction COMMAND ${DSVR_PWSH_EXECUTABLE}
     -NoProfile -File ${CMAKE_SOURCE_DIR}/tools/run_combat_capture.ps1 -Mode SelfTest -WindowMinutes 30)
+  # Slow by design: real 1 s case windows + pwsh/python startup, not trimmable fat.
+  set_tests_properties(combat_capture_transaction PROPERTIES LABELS slow)
 endif()
 add_executable(test_depth_probe test_depth_probe.cpp ../src/core/depth_probe.cpp)
 target_link_libraries(test_depth_probe PRIVATE d3d11 minhook)
@@ -100,6 +102,11 @@ add_test(NAME diagnostics_observer_refused COMMAND test_diagnostics_mode observe
 add_test(NAME diagnostics_vr COMMAND test_diagnostics_mode vr)
 add_test(NAME diagnostics_disabled COMMAND test_diagnostics_mode disabled)
 add_test(NAME diagnostics_combat COMMAND test_diagnostics_mode combat)
+# Slow by design: each waits on the real 350 ms settings debounce plus the
+# 40 ms worker pump, several times per test. Not trimmable without changing
+# production timing, so they are labeled out of the quick loop instead.
+set_tests_properties(diagnostics_observer diagnostics_observer_refused
+  diagnostics_vr diagnostics_disabled diagnostics_combat PROPERTIES LABELS slow)
 
 add_executable(test_memory test_memory.cpp)
 target_link_libraries(test_memory PRIVATE dsvr_common)
@@ -245,7 +252,7 @@ add_test(NAME camera_writes COMMAND test_camera_writes)
 if(Python3_FOUND)
   add_test(NAME package COMMAND ${Python3_EXECUTABLE} -B
     ${CMAKE_CURRENT_SOURCE_DIR}/test_package.py)
-  set_tests_properties(package PROPERTIES TIMEOUT 60)
+  set_tests_properties(package PROPERTIES TIMEOUT 60 LABELS slow)
   add_test(NAME native_stereo_contract COMMAND ${Python3_EXECUTABLE} -B
     ${CMAKE_CURRENT_SOURCE_DIR}/test_native_stereo.py)
   set_tests_properties(native_stereo_contract PROPERTIES TIMEOUT 30)
