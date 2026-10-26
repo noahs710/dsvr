@@ -1,5 +1,19 @@
 # DSVR current handoff
 
+### Quick loop: sub-second inner ring + configure skip, 26 October 2026
+
+Inner loop is now `ctest -C Release --parallel -LE slow`: 93/93 in 0.58 s.
+The 7 excluded tests are labeled `slow` in tests/CMakeLists.txt because they
+are timing-honest, not trimmable fat: 5x diagnostics waits on the real 350 ms
+settings debounce + 40 ms worker pump, combat SelfTest's real 1 s case
+windows + pwsh/python startup, package's real zip/hash I/O. TESTING.md records
+the gate discipline: `-LE slow` is the inner loop only, the unfiltered
+100/100 (~3 s) is still the gate. auto_verify.ps1 skips its 3.6 s
+re-configure when the cache already matches generator/platform/key options.
+Verified this pass: re-configure exit 0, Release build exit 0, quick 93/93
+(0.58 s), full 100/100 (~3.2 s), auto_verify + doctor + package refresh all
+green. No game launch/install/headset; offline only.
+
 ### Test-loop efficiency pass, 26 October 2026
 
 Full suite now ~3 s per config (was ~27 s): `/MP` added to root MSVC flags
