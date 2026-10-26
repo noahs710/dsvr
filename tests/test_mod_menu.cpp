@@ -23,6 +23,7 @@
 #define CHECK(x) do {if(!(x)){std::printf("FAIL %d: %s\n",__LINE__,#x);return 1;}}while(0)
 namespace {
 bool calibration=false;
+bool body_filter_available=false;
 dsvr::MenuPointerState pointer_state{};
 bool probe_pointer_click=false;
 bool pointer_button_clicked=false;
@@ -88,10 +89,24 @@ int CheckPanelRegistration() {
 
 namespace dsvr {
 NativeUiStatus NativeUiGetStatus() {return {};}
-bool capture_menu_text=false;
-BodyVisibilityStatus BodyVisibilityGetStatus() {
-  if (capture_menu_text) { ImGui::LogToFile(-1,"menu-label-capture.txt"); capture_menu_text=false; }
+bool capture_menu_text=false,pending_footer_capture=false;
+extern bool probe_disabled_item, item_was_disabled; // defined in mod_menu.cpp
+InputBindingSignature InputLiveBindingSignature() {
+  // No session attaches in this fixture: the frozen attached set is the
+  // Config defaults (all profiles on), so a live-only Apply stays absent
+  // from the restart line and a binding Apply shows it.
   return {};
+}
+BodyVisibilityStatus BodyVisibilityGetStatus() {
+  if (capture_menu_text) {
+    // Label captures log from here (inside the panel child); footer
+    // captures only set the pending flag, which CalibrationGetStatus turns
+    // into a whole-window log on the next frame.
+    if (pending_footer_capture) pending_footer_capture=false;
+    else ImGui::LogToFile(-1,"menu-label-capture.txt");
+    capture_menu_text=false;
+  }
+  BodyVisibilityStatus result{};result.installed=body_filter_available;return result;
 }
 // The panel asks for a fresh native parts command when a visibility row is
 // ticked. The status stub reports the filter as unavailable, so the row stays
@@ -102,6 +117,13 @@ MotionBlurStatus MotionBlurGetStatus() {return {};}
 CalibrationStatus CalibrationGetStatus() {
   if (ImGui::GetCurrentContext()) {
     menu_context=ImGui::GetCurrentContext();
+    if (pending_footer_capture) {
+      // Runs in ModMenuRenderTexture before DrawMenu: starting the log here
+      // binds it to no window, so LogFinish fires at the menu window's End()
+      // and the whole window (footer included) is captured.
+      pending_footer_capture=false;
+      ImGui::LogToFile(-1,"menu-label-capture.txt");
+    }
     if (inject_deferred_mouse) {
       ImGui::GetIO().ConfigDebugIgnoreFocusLoss=true;
       const int queued_before=GImGui->InputEventsQueue.Size;
@@ -116,6 +138,7 @@ CalibrationStatus CalibrationGetStatus() {
       deferred_mouse_observed=true;
       observe_deferred_mouse=false;
     }
+    // (probe_disabled_item is consumed inside SettingsPanel; nothing to do here.)
     if (probe_pointer_click) {
       pointer_mouse_down=ImGui::IsMouseClicked(0)||ImGui::IsMouseDown(0);
       navigation_select_down=ImGui::IsKeyDown(ImGuiKey_GamepadFaceDown);
@@ -220,33 +243,175 @@ int main(int argc,char** argv) {
     char menu_text[8192]{};
     const auto captured_size=fread(menu_text,1,sizeof(menu_text)-1,captured);
     fclose(captured);
-    CHECK(std::string(menu_text,captured_size).find("Hide face, headgear and hair")!=std::string::npos);
     // Drive the shipped controls through ImGui's navigation activation, not a
     // duplicate settings-state helper: edit -> Apply -> Save identical values.
+    // The grouping asserts below need the panel ID seed, so resolve it once
+    // here and re-resolve it after the Combat visit (the panel child
+    // rebinds across visits).
     CHECK(menu_context);ImGui::SetCurrentContext(menu_context);
-    ImGuiWindow* panel=nullptr;
+    ImGuiWindow* panel_early=nullptr;
     for(auto* candidate:GImGui->Windows)
-      if(std::string(candidate->Name).find("/Panel_")!=std::string::npos) panel=candidate;
-    CHECK(panel);
+      if(std::string(candidate->Name).find("/Panel_")!=std::string::npos) panel_early=candidate;
+    CHECK(panel_early);
+    ImGuiWindow* panel=panel_early;
+    CHECK(std::string(menu_text,captured_size).find("Hide face, headgear and hair")!=std::string::npos);
+    // Everyday/advanced separation: one labeled always-visible group inside
+    // Settings and one inside Combat. Same panels, same IDs/labels/behavior —
+    // grouping only. Asserted on the Settings route through the same one-shot
+    // label hook as the existing default-renders assertions (fired in
+    // BodyVisibilityGetStatus + the CalibrationGetStatus menu-context probe):
+    // the grouping label renders, the arm rows read under it, everyday rows
+    // above and binding rows below stay visible, and enabling arm swing
+    // reveals its threshold rows under the same grouping.
+    {
+      std::remove("menu-label-capture.txt");
+      capture_menu_text=true;
+      ModMenuRenderTexture(device.Get(),image.Get());
+      FILE* ac=nullptr;
+      CHECK(fopen_s(&ac,"menu-label-capture.txt","rb")==0 && ac);
+      char atext[16384]{};
+      const auto asize=fread(atext,1,sizeof(atext)-1,ac);
+      fclose(ac);
+      std::remove("menu-label-capture.txt");
+      const std::string astr(atext,asize);
+      CHECK(astr.find("Advanced tuning")!=std::string::npos);
+      CHECK(astr.find("Track native arms")!=std::string::npos);
+      // The whole Settings panel still renders: an everyday row above the
+      // group and the binding rows below it stay visible.
+      CHECK(astr.find("Snap turning")!=std::string::npos);
+      CHECK(astr.find("WMR motion controller")!=std::string::npos);
+      // Default-open shows the advanced controls: enabling the arm-swing
+      // toggle reveals its threshold sliders under the same grouping.
+      ImGui::ActivateItemByID(ImHashStr("Swinging the arms asks the game to run",0,panel->ID));
+      ModMenuRenderTexture(device.Get(),image.Get());
+      std::remove("menu-label-capture.txt");
+      capture_menu_text=true;
+      ModMenuRenderTexture(device.Get(),image.Get());
+      FILE* sw=nullptr;
+      CHECK(fopen_s(&sw,"menu-label-capture.txt","rb")==0 && sw);
+      char stext[16384]{};
+      const auto ssize=fread(stext,1,sizeof(stext)-1,sw);
+      fclose(sw);
+      std::remove("menu-label-capture.txt");
+      const std::string sstr(stext,ssize);
+      CHECK(sstr.find("Advanced tuning")!=std::string::npos);
+      CHECK(sstr.find("Stride hand speed (m/s)")!=std::string::npos);
+      // Restore the toggle so the draft matches the applied config again
+      // before the refresh/apply coverage below (which needs applies==1 on
+      // its first Apply).
+      ImGui::ActivateItemByID(ImHashStr("Swinging the arms asks the game to run",0,panel->ID));
+      ModMenuRenderTexture(device.Get(),image.Get());
+    }
+    // Same grouping treatment inside CombatPanel, asserted structurally (no
+    // new hook is added above the footer capture point there): navigation
+    // activation still reaches the advanced per-hand rows under the group
+    // with no ID/label/behavior change. The Combat panel is reached via the
+    // shipped next-panel edges (0 -> 3) without touching panel IDs/ordering.
+    {
+      for(int i=0;i<3;++i) {
+        ModMenuControllerInput(0,0,false,false,false,true);
+        ModMenuRenderTexture(device.Get(),image.Get());
+        ModMenuControllerInput(0,0,false,false,false,false);
+        ModMenuRenderTexture(device.Get(),image.Get());
+      }
+      ImGui::ActivateItemByID(ImHashStr("Raised shield hand guards, flick parries (preview)",0,panel->ID));
+      ModMenuRenderTexture(device.Get(),image.Get());
+      // Return to Settings via the shipped prev-panel edges (3 -> 0), then
+      // re-resolve the seed: the panel child rebinds across Combat visits.
+      for(int i=0;i<3;++i) {
+        ModMenuControllerInput(0,0,false,false,true,false);
+        ModMenuRenderTexture(device.Get(),image.Get());
+        ModMenuControllerInput(0,0,false,false,false,false);
+        ModMenuRenderTexture(device.Get(),image.Get());
+      }
+      for(auto* candidate:GImGui->Windows)
+        if(std::string(candidate->Name).find("/Panel_")!=std::string::npos) panel=candidate;
+      CHECK(panel);
+      // Back on the Settings route: the draft is unchanged by the Combat
+      // visit (activation only, no Apply), and the grouping still renders.
+      std::remove("menu-label-capture.txt");
+      capture_menu_text=true;
+      ModMenuRenderTexture(device.Get(),image.Get());
+      FILE* bk=nullptr;
+      CHECK(fopen_s(&bk,"menu-label-capture.txt","rb")==0 && bk);
+      char btext[8192]{};
+      const auto bsize=fread(btext,1,sizeof(btext)-1,bk);
+      fclose(bk);
+      std::remove("menu-label-capture.txt");
+      CHECK(std::string(btext,bsize).find("Advanced tuning")!=std::string::npos);
+    }
+    // Actual shipped controls apply AND save on the edit; no footer action.
+    const auto saves_before=saves;
     ImGui::ActivateItemByID(ImHashStr("Track native arms",0,panel->ID));
     ModMenuRenderTexture(device.Get(),image.Get());
-    // Profile refresh is reachable by navigation, not only by aiming. It asks
-    // the input thread to refresh the applied filter (never reattach actions),
-    // without touching draft config or being mistaken for an Apply press.
+    CHECK(live_config.arm_ik_enabled && saved_config.arm_ik_enabled);
+    CHECK(saves==saves_before+1 && applies==0);
+    body_filter_available=true;
+    ModMenuRenderTexture(device.Get(),image.Get());
+    for(bool hidden:{true,false}) {
+      ImGui::ActivateItemByID(ImHashStr("Hide torso and legs (arms and weapon stay)",0,panel->ID));
+      ModMenuRenderTexture(device.Get(),image.Get());
+      CHECK(live_config.hide_torso_and_legs==hidden && saved_config.hide_torso_and_legs==hidden);
+    }
+    CHECK(visibility_refresh_requests==0); // native model-update owner performs the refresh
     ImGui::ActivateItemByID(ImHashStr("Refresh profile filter now",0,panel->ID));
     ModMenuRenderTexture(device.Get(),image.Get());
-    CHECK(binding_reloads==1 && applies==0);
-    auto click=[&](float x) {
-      pointer_state={true,true,false,x,footer_y};
+    CHECK(binding_reloads==1 && saves==saves_before+3);
+    const auto read_footer=[&]() -> std::string {
+      std::remove("menu-label-capture.txt");
+      // Frame 1 sets pending_footer_capture in BodyVisibilityGetStatus;
+      // CalibrationGetStatus on frame 2 starts the log before DrawMenu, so
+      // it spans the whole "DSVR controls" window including the footer.
+      pending_footer_capture=true;
+      capture_menu_text=true;
       ModMenuRenderTexture(device.Get(),image.Get());
-      pointer_state.select=true;ModMenuRenderTexture(device.Get(),image.Get());
-      pointer_state.select=false;ModMenuRenderTexture(device.Get(),image.Get());
+      ModMenuRenderTexture(device.Get(),image.Get());
+      FILE* f=nullptr;
+      if(fopen_s(&f,"menu-label-capture.txt","rb")!=0 || !f) return "__missing__";
+      char text[65536]{};const auto n=fread(text,1,sizeof(text)-1,f);fclose(f);
+      std::remove("menu-label-capture.txt");return std::string(text,n);
     };
-    click(footer_x+55.f);
-    CHECK(applies==1 && live_config.arm_ik_enabled);
-    click(footer_x+110.f+12.f+77.5f);
-    CHECK(saves==1 && live_config.arm_ik_enabled);
-    pointer_state={};
+    const auto clean_footer=read_footer();
+    CHECK(clean_footer.find("Restart needed")==std::string::npos);
+    CHECK(clean_footer.find("Changes apply immediately and save automatically.")!=std::string::npos);
+    CHECK(clean_footer.find("Save settings")==std::string::npos);
+    CHECK(clean_footer.find("Revert edits")==std::string::npos);
+    ImGui::ActivateItemByID(ImHashStr("Hide alternate player model",0,panel->ID));
+    ModMenuRenderTexture(device.Get(),image.Get());
+    CHECK(live_config.hide_second_model==saved_config.hide_second_model);
+    CHECK(read_footer().find("Restart needed")==std::string::npos);
+    probe_disabled_item=true;ModMenuRenderTexture(device.Get(),image.Get());
+    CHECK(!item_was_disabled);
+    ImGui::ActivateItemByID(ImHashStr("Smooth turning",0,panel->ID));
+    ModMenuRenderTexture(device.Get(),image.Get());
+    probe_disabled_item=true;ModMenuRenderTexture(device.Get(),image.Get());
+    CHECK(item_was_disabled && !live_config.smooth_turn && !saved_config.smooth_turn);
+    ImGui::ActivateItemByID(ImHashStr("Smooth turning",0,panel->ID));
+    ModMenuRenderTexture(device.Get(),image.Get());
+    ImGui::ActivateItemByID(ImHashStr("Quest 3 / Touch",0,panel->ID));
+    ModMenuRenderTexture(device.Get(),image.Get());
+    CHECK(!live_config.bind_profile_quest3 && !saved_config.bind_profile_quest3);
+    CHECK(read_footer().find("Restart needed: bindings")!=std::string::npos);
+    ImGui::ActivateItemByID(ImHashStr("Quest 3 / Touch",0,panel->ID));
+    ModMenuRenderTexture(device.Get(),image.Get());
+    CHECK(read_footer().find("Restart needed")==std::string::npos);
+    const auto step_panel=[&](bool forward) {
+      ModMenuControllerInput(0,0,false,false,!forward,forward);
+      ModMenuRenderTexture(device.Get(),image.Get());
+      ModMenuControllerInput(0,0,false,false,false,false);
+      ModMenuRenderTexture(device.Get(),image.Get());
+      for(auto* candidate:GImGui->Windows)
+        if(std::string(candidate->Name).find("/Panel_")!=std::string::npos)panel=candidate;
+    };
+    step_panel(true);step_panel(true);
+    ImGui::ActivateItemByID(ImHashStr("Use ReShade D3D11 host (restart required)",0,panel->ID));
+    ModMenuRenderTexture(device.Get(),image.Get());
+    CHECK(read_footer().find("Restart needed: ReShade host")!=std::string::npos);
+    ImGui::ActivateItemByID(ImHashStr("Performance (70%)",0,panel->ID));
+    ModMenuRenderTexture(device.Get(),image.Get());
+    CHECK(live_config.render_scale_percent==70 && saved_config.render_scale_percent==70);
+    CHECK(read_footer().find("Restart needed: ReShade host, eye resolution")!=std::string::npos);
+    step_panel(false);step_panel(false);
   }
   inject_deferred_mouse=true;
   ModMenuRenderTexture(device.Get(),image.Get());

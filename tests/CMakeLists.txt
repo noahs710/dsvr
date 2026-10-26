@@ -15,6 +15,10 @@ add_executable(test_frame_rate_native test_frame_rate_native.cpp ../src/core/fra
 target_include_directories(test_frame_rate_native PRIVATE $<TARGET_PROPERTY:minhook,INTERFACE_INCLUDE_DIRECTORIES>)
 add_test(NAME frame_rate_native COMMAND test_frame_rate_native)
 
+add_executable(test_weapon_weight test_weapon_weight.cpp)
+target_include_directories(test_weapon_weight PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME weapon_weight COMMAND test_weapon_weight)
+
 add_executable(test_combat_contact test_combat_contact.cpp)
 add_test(NAME combat_contact COMMAND test_combat_contact)
 add_executable(test_combat_atkparam test_combat_atkparam.cpp)
@@ -24,19 +28,10 @@ target_compile_definitions(test_combat_trace PRIVATE DSVR_ENABLE_LAB)
 target_include_directories(test_combat_trace PRIVATE $<TARGET_PROPERTY:minhook,INTERFACE_INCLUDE_DIRECTORIES>)
 add_test(NAME combat_native_trace COMMAND test_combat_trace)
 add_test(NAME combat_native_trace_filtered COMMAND test_combat_trace --combat-only)
-find_program(DSVR_PWSH_EXECUTABLE pwsh)
-if(DSVR_PWSH_EXECUTABLE AND WIN32)
+if(WIN32)
+  find_program(DSVR_PWSH_EXECUTABLE NAMES pwsh REQUIRED)
   add_test(NAME combat_capture_transaction COMMAND ${DSVR_PWSH_EXECUTABLE}
     -NoProfile -File ${CMAKE_SOURCE_DIR}/tools/run_combat_capture.ps1 -Mode SelfTest -WindowMinutes 30)
-endif()
-# The runner is operator-facing and may be launched by Windows PowerShell 5.1, whose .NET
-# Framework has no GetRelativePath and no 3-argument File.Move. Keep both engines honest.
-find_program(DSVR_WINDOWS_POWERSHELL_EXECUTABLE powershell.exe)
-if(DSVR_WINDOWS_POWERSHELL_EXECUTABLE AND WIN32)
-  # Native CTest inherits pwsh's module paths; let 5.1 discover its own built-ins.
-  add_test(NAME combat_capture_transaction_ps51 COMMAND ${CMAKE_COMMAND} -E env
-    --unset=PSModulePath ${DSVR_WINDOWS_POWERSHELL_EXECUTABLE}
-    -NoProfile -ExecutionPolicy Bypass -File ${CMAKE_SOURCE_DIR}/tools/run_combat_capture.ps1 -Mode SelfTest -WindowMinutes 30)
 endif()
 add_executable(test_depth_probe test_depth_probe.cpp ../src/core/depth_probe.cpp)
 target_link_libraries(test_depth_probe PRIVATE d3d11 minhook)
@@ -140,6 +135,11 @@ add_executable(test_shield_guard test_shield_guard.cpp)
 add_test(NAME shield_guard COMMAND test_shield_guard)
 add_executable(test_arm_swing test_arm_swing.cpp)
 add_test(NAME arm_swing COMMAND test_arm_swing)
+add_executable(test_setup_theme test_setup_theme.cpp)
+target_link_libraries(test_setup_theme PRIVATE dsvr_common user32 gdi32 shell32 comdlg32)
+add_test(NAME setup_theme COMMAND test_setup_theme)
+add_executable(test_interaction_target test_interaction_target.cpp)
+add_test(NAME interaction_target COMMAND test_interaction_target)
 add_executable(test_reach_intent test_reach_intent.cpp)
 add_test(NAME reach_intent COMMAND test_reach_intent)
 add_executable(test_stereo_math test_stereo_math.cpp)

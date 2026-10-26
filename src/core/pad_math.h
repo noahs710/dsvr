@@ -32,11 +32,60 @@ struct VrPadHand {
   bool secondary = false;
   bool menu = false;
   bool stick_click = false;
-  // The controller's own D-pad component (Quest Touch x_axis/y_axis): one
-  // discrete -1/0/1 per axis. Profiles that expose no D-pad leave this at zero
-  // and the left stick keeps synthesising the same bits in menu_navigation.
+  // Logical D-pad axes, supplied by StickDpad for motion controllers.
+  // Native menu navigation also accepts the unmodified left stick.
   float dpad_x = 0.0f;
   float dpad_y = 0.0f;
+};
+// Hold left stick-click to select a native D-pad direction instead of walking.
+// Defer a neutral lone click until release, so selecting an item cannot jump.
+// After a direction is used, require centre before restoring locomotion.
+class StickDpad {
+ public:
+  void Reset() { *this = StickDpad{}; }
+  bool Apply(VrPadHand& hand, long long now_ms) {
+    if (now_ms < last_time_ms_) Reset();
+    last_time_ms_ = now_ms;
+    const float x = hand.stick_x, y = hand.stick_y;
+    const bool finite = std::isfinite(x) && std::isfinite(y);
+    const bool neutral = finite && std::hypot(x, y) <= 0.2f;
+    if (rearm_) {
+      const bool released = !hand.stick_click;
+      hand.stick_x = hand.stick_y = 0.0f;
+      hand.stick_click = false;
+      if (neutral && released) Reset();
+      return true;
+    }
+    if (hand.stick_click) {
+      click_until_ms_ = 0;
+      held_ = true;
+      const bool direction = finite && std::max(std::fabs(x), std::fabs(y)) >= 0.55f;
+      used_ = used_ || direction || !finite;
+      hand.stick_x = hand.stick_y = 0.0f;
+      hand.stick_click = false;
+      if (direction) {
+        hand.dpad_x = x;
+        hand.dpad_y = y;
+      }
+      return true;
+    }
+    if (!held_) {
+      hand.stick_click = now_ms < click_until_ms_;
+      return false;
+    }
+    hand.stick_click = !used_ && neutral;
+    if (hand.stick_click) click_until_ms_ = now_ms + 120;
+    hand.stick_x = hand.stick_y = 0.0f;
+    rearm_ = !neutral;
+    held_ = used_ = false;
+    return true;
+  }
+ private:
+  bool held_ = false;
+  bool used_ = false;
+  bool rearm_ = false;
+  long long click_until_ms_ = 0;
+  long long last_time_ms_ = 0;
 };
 
 struct VrPadInput {
@@ -65,10 +114,11 @@ struct VrPadInput {
   bool guard_block = false;
   bool guard_parry = false;
   // Reach-to-interact bridge (reach_intent_math.h): a forward thrust of the
-  // free hand taps the native interact button. No native prompt flag is bound,
-  // so the gesture alone decides when it is pressed -- reaching at a door or a
-  // face can interact. The caller owns the press window; this is one line held
-  // down for that window, not a damage or target claim.
+  // free hand requests the native interact button. Until an H1 target owner
+  // exists the input.cpp eligibility gate refuses untargeted gestures, so an
+  // enabled reach only logs the refusal instead of tapping A at a wall or a
+  // face. The caller owns the press window; this is one line held down for
+  // that window, not a damage or target claim.
   bool reach_interact = false;
   // IK arms on: weapon-hand squeeze/trigger must NOT fire RB/RT canned
   // attacks (the arm itself is the attack). Off-hand, buttons, sticks

@@ -7,13 +7,13 @@ namespace dsvr {
 
 // Reach-to-interact bridge.
 //
-// Thrusting one hand forward through the space in front of the head taps the
-// native interact button. No native prompt flag is bound, so the gesture alone
-// decides when the button is pressed -- that is the operator's chosen trade-off
-// and the reason this stays opt-in: reaching toward a fog gate, a door or an
-// enemy's face can interact. Nothing here opens a menu, picks up an item or
-// decides what the target was; it requests one ordinary native button tap and
-// the game's own interaction rules judge the rest.
+// Thrusting one hand forward through the space in front of the head feeds a
+// request the input.cpp eligibility gate currently refuses: no native
+// prompt/LOS owner exists yet, so untargeted gestures must not tap the
+// native interact button and are logged as refused instead. Nothing here opens a
+// menu, picks up an item or decides what the target was; a qualified tap
+// requests one ordinary native button press and the game's own interaction
+// rules judge the rest.
 //
 // What separates a deliberate reach from a hand that merely happens to be out
 // front: both hands rest first, the motion points forward rather than simply

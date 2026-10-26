@@ -87,9 +87,10 @@ struct Config {
   int arm_swing_alternations = 3;     // hand swaps before the run engages
   int arm_swing_hold_ms = 600;        // ms the run lingers after the last stride
   // Reach-to-interact: thrusting one hand forward through the reach envelope
-  // taps the native interact button. No native prompt flag is bound, so the
-  // gesture ALONE decides: reaching toward a fog gate, a door or an enemy's
-  // face can interact. Off by default until that trade-off is lived with.
+  // requests the native interact button. The eligibility gate in input.cpp
+  // refuses untargeted gestures until a native prompt/LOS owner exists, so
+  // enabling this today only logs the refusal. Off by default until a live
+  // target producer qualifies an actual interaction class.
   bool reach_interact = false;
   float reach_forward_min_m = 0.75f;  // m ahead of the head the hand must reach
   float reach_forward_max_m = 2.2f;   // m ahead of the head beyond which nothing counts
@@ -119,12 +120,8 @@ struct Config {
   bool bind_profile_index = true;
   bool bind_profile_wmr = true;
   bool bind_profile_simple = true;
-  // When edited bindings take effect. Off (default): the next session, with the
-  // current session's input untouched. On: the action set is rebuilt on the
-  // input thread the moment Apply is pressed, which costs a short input dropout
-  // and is refused by runtimes that will not attach a second action set
-  // mid-session -- a refused attach leaves this session without controller
-  // input, so it is opt-in until the headset proves the answer.
+  // Legacy preference retained for profile compatibility. Binding edits always
+  // require a restart: OpenXR permits only one action-set attach per session.
   bool binding_live_reattach = false;
 
   // [camera]
@@ -132,6 +129,7 @@ struct Config {
   // an implicit override. Only the in-game menu exposes this opt-in.
   bool eye_height_override = false;
   float eye_height = 1.65f;       // manual/fallback metres above player anchor
+  float seated_height_offset_m = .5f; // explicit view lift; never a stature/reach measurement
   float world_scale = 1.0f;       // 0.5..2.0 trim on automatic native-world/avatar fit
   // Avatar size trim (0.6..1.6): a second multiplier on the SAME applied camera
   // snapshot, so the head, hands, roomscale and the IK body all read one value
