@@ -41,6 +41,17 @@ Offline-only operation. Online play, game-asset redistribution, engine replaceme
 
 This is a development candidate, not a completed VR mod. Existing work includes XR mono, tracked camera/input, calibration, native pose adapters, equipment reads, contact math and menu/config tooling. Production stereo, native physical damage/defense, collision-resolved body follow and complete native/headset qualification remain open. See the execution ledger and handoff for qualified status; do not infer working features from settings or diagnostic proxies.
 
+## Development controller controls
+
+In gameplay, hold the **left stick click** and tilt that stick to select a native
+D-pad direction (items, spells or equipment) without walking. Release and centre
+the stick before walking again. A centred lone click still sends native L3 on
+release with a bounded 120 ms hold. Native and DSVR menus use the left stick directly, without a modifier.
+These routes have offline regression coverage; headset/native acceptance remains open.
+
+Controller-profile binding changes require a game restart. Existing controls stay
+active until then, including when an older config enables `binding_live_reattach`.
+
 ## Build and test
 
 ```powershell

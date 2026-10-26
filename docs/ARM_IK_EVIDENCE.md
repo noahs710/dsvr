@@ -98,6 +98,24 @@ Observed on this character/model only:
   **13,248 mapped floats** with maximum absolute error `5.21540641784668e-8`.
   Origins are copied unchanged; authored basis-column proportions must survive.
 
+### Per-variant transfer coverage matrix, 26 October 2026
+
+Docs-only: the verified-copy gate (`PoseCopyValid` + `PoseCopyMatches`) accepts
+any `Valid+Matches` layout, but only one resource has ever been captured. This
+matrix records the one CAPTURED row and marks every other state UNCAPTURED —
+a `Valid+Matches` accept on those rows is a shape check, not native
+qualification. Fresh captures follow the §"Natural transfer capture" procedure
+above (protected unmodded flatscreen run, no pose/root/code writes, no replay,
+correctly addressed assembly root at +0x20, both palettes, map/count/entries,
+resource + proportions + five inputs, before/after source pose, JSON + observer
++ receipt under `build/verification/<run-id>/`).
+
+| Variant / resource | Map count/entries/order | Header flag + records/values | Capture SHA / status |
+|---|---|---|---|
+| 23 Oct resource (unnamed character/equipment) | 69 entries, identity 0..68; 11 trailing rows uncopied | `+8&4` set, 5x `-0.5`, 13,248 floats max err `5.2e-8` | `e3b459e6…c1f194b66` CAPTURED |
+| Nude / any armor set / weapon+shield combo / model replacement / LOD with different counts | unknown | unknown | UNCAPTURED — fresh capture required; gate accept must not be read as qualified |
+| Any resource with different map ptr/count/entries, `resource_owner`/`resource`/`records` ptr, header flag, proportion records/values, nonidentity order, holes, duplicates, or nonuniform proportions | unknown | unknown | UNCAPTURED — fresh capture required; gate accept must not be read as qualified |
+
 Fresh read-only primary Ghidra queries and pinned instruction bytes establish:
 
 1. PlayerIns pose slot +0xA8 is `140357A20`. It calls `140320980` at
@@ -202,6 +220,29 @@ correctly mapped final-body owner. Equal counts/matrix values do not establish
 identity ordering; writing the source after copying is not a propagation fix.
 
 ## Current revalidation requirements
+
+### Committed-pose read lifetime, 25 October continuation
+
+An adapter regression reproduced a gap after the natural-copy check: losing
+focus before the next native/camera callback still let `ArmIkLatestHands`
+return the previous valid weapon poses (`post-publication reader 0 mutation 1
+returned stale poses`). This is separate from mutations during the copy.
+
+Both public readers now share tracking/focus/controller, timestamp, camera
+sequence/epoch, calibration revision, mode and input-capture validation.
+`ArmIkHands` carries its committed calibration revision. A failed read ends
+the receipt and clears diagnostic motion history; restoring external state
+cannot revive it, and the next verified natural copy starts at zero speed.
+Reads leave a provisional source snapshot intact while the native copy is
+still in progress, and never write native memory or call native updates.
+
+`CheckHandPublication` exercises 19 transitions independently through each
+reader, checks empty outputs/no native writes or calls, then checks refusal
+after external-state restoration and recovery through a fresh natural copy.
+A newer valid XR publication is accepted with the still-current camera-bound
+pose. Existing head-only, one-hand, duplicate-callback and proportion-copy
+regressions remain active. This is source evidence only: modified-candidate
+native propagation, armor/attachments and headset alignment remain open.
 
 ### Post-copy publication invalidation, 24 October 2026
 

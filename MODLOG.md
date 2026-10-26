@@ -1,13 +1,64 @@
 # DSVR current handoff
 
-Current checkpoint: physical-combat context recovery and regressions rebuilt;
-protected original-controls capture ACTIVE, PID11228, cutoff 24 October 2026
-21:36:07 Eastern. Receipt:
-`build/verification/physical-combat-20261024/native/transaction.json`.
-Native physical damage/defense binding and live IK qualification remain open.
+Current checkpoint (26 Oct): twenty-one offline slices landed and verified —
+AtkParam 0x73 named (kMapHitType/NativeMapHitType, cache transcription only),
+launcher theme test registered (setup_theme), untargeted reach refused by
+default (interaction eligibility gate + per-class range table with Lever at
+0.0/unverified), calibration floor note profile-aware (first launch says
+setup height until capture succeeds; hold-reset rule named) with shipped-WARP
+render coverage in both modes, restart-pending footer indicator
+(applied-vs-attached binding comparison via frozen attach-time signature;
+WARP asserts present after Apply, absent for live-only changes), launcher
+install-gate hardening (Install disabled on failed Verify in UpdateBrief +
+CTL_INSTALL refuse; DoInstall:522 untouched; fail/pass Verify test), and
+read-only B/D static writeups (14032F548 verdict + first-half probe;
+D-probe second window with RDI/R14 producers and renderer+10 store pinned,
+plus re-read addendum with ctor identity and outer caller seed, plus third
+window with Begin-payload borrow-appearing verdict and derived slot set,
+plus fourth window with queue/teardown shape and bracket scout), E locomotion
+owner table (docs-only, six UNKNOWN owners), E2 XInput poller probe (6 call sites, 2 per-frame candidates, mapper still open), F2 per-variant coverage matrix
+(docs-only, one CAPTURED row), and H1 lever-range cache search (no citable
+value: validDist 150 default conflicts cm-vs-metres, lever rows name-only;
+0.0 retained with search paths documented), B type-64 static probe
+(negative-only: 64 excluded from durability chain, zero ==0x40 consumers),
+and launcher chain-conflict messages carrying the full colliding path
+(message text only; test asserts stub mirror — production text reviewed in
+diff, suites green both configs), E2 follow-up (consumers unpinned,
+slots decoded as self-RVA pairs not vftables, candidate #3 unproven; sibling
+walk: trigger/event siblings only, no float reader, VA decode corrected; byte-pattern retry: axis getters pinned (idx5 reads by index, idx7 mirror setters, idx6 button bits), scaling consumer behind zero-xref computed dispatch), and
+package mid-refresh atomicity (comment corrected + mid-loop failure test,
+old zip/verification pinned), and B swing-producer xref probe (no swing
+caller in either xref set; builder has zero code xrefs; ObjDam wrapper
+excluded), and B record-stride decode (1417991F0/224 are PE unwind metadata,
+not dispatch records; exactly 3 DATA refs; no code owner; correction supersedes
+the earlier table gloss).
+Full Debug 101/101, Release 101/101, runner SelfTest both engines PASS, doctor PASS, dev
+package refreshed (DSVR.dll 3a136a39…, built 2026-10-26T01:25:42Z). Stale
+hardcoded hash prefixes removed from the runbook; verify_preflight compares
+live full hashes against the verification JSON. B-probe 14032F548 verdict:
+instruction candidate only (byte-pinned CALL [RAX+0x640] in .text1 split gap,
+zero xrefs, receiver unrecoverable; not a damage classification — see
+contract). +0x640 slot comparison closed 26 Oct: EnemyIns slot holds the
+negative-HP path, PlayerIns slot a self-stub, neither links to 548.
+C/D/E/F native gates unchanged and open; no game launch, install,
+or headset run. Inherited controller/weight work preserved.
 [Authority](README.md#authority-and-maintenance). Resume
 solely from the [execution guide](docs/superpowers/plans/2026-10-21-native-conversion-execution.md);
 this handoff records evidence/state, not a competing task order.
+
+### B slot-inhabitant comparison closed (second half, first part), 26 Oct 2026
+
+Read-only GhidraMCP: EnemyIns vftable +0x640 slot holds 0x14034BF70 (negative-HP min path), PlayerIns same slot holds the 140339600 self-stub; each DATA-xrefed from its own table only, zero xrefs to 14032F548. Closes "is +0x640 a damage slot" (class-divergent: negative-HP path vs no-op) without typing 548's receiver. Remaining open half is live hit/miss correlation under TESTING; never invoke 548. Contract holds bytes/arithmetic. No build/test/launch/commit.
+
+### Read-only 548-verdict verification pass, 26 Oct 2026
+
+Read-only GhidraMCP: EnemyIns vftable +0x640 slot holds 0x14034BF70 (negative-HP min path), PlayerIns same slot holds the 140339600 self-stub; each DATA-xrefed from its own table only, zero xrefs to 14032F548. Closes "is +0x640 a damage slot" (class-divergent: negative-HP path vs no-op) without typing 548's receiver. Remaining open half is live hit/miss correlation under TESTING; never invoke 548. Contract holds bytes/arithmetic. No build/test/launch/commit.
+
+Re-checked the dirty-tree 14032F548 verdict subsection against the live GUI (PID 17320, `DSRFull`, `/DarkSoulsRemastered.exe`): re-ran the tasked first half, `get_assembly_context` 12 each side at 142756FC5 / 1421B6015 / 14032F471 — all three match the recorded outcomes (CMOVNZ return-selector toward 14032F584/594; CMOVZ immediate 14032F54E; JMP-island before 14032F480). No contract edit needed: verdict, bytes/xrefs/split-gap/.text1/forged-JMP/forward-JMP+TEST-ESI/+0x638/+0x640-inhabitant evidence, limitations and exact next probe are all present, plus the +0x73 linkage with the 1403C72D0 read-verification caveat. Cache citations spot-checked (raw wiki line 55 mapHitType 0x73, ATK_PARAM_MAP_HIT 0..3; Paramdex DS1R Defs AtkParam.xml u8 mapHitType). Read-only; no repair/save/launch/commit.
+
+### Launcher install-gate hardening (Option A), 26 Oct 2026
+
+RED: rebuilt test_setup_theme, `ctest -C Debug -R setup_theme` exit 1 (FAIL line 117, Install button enabled after failed Verify). GREEN: `g_install` HWND stored at create plus reset in RunGui; UpdateBrief gates Install on path resolved plus verified exe match plus verified-ok; CTL_INSTALL refuses without verified build (DoInstall:522 untouched defense-in-depth). Test stubs VerifyExe fail-once plus DoInstall counter; fail-Verify disables Install and blocks DoInstall, pass-Verify re-enables and installs. Full `cmake --build`/ctest Debug plus Release 101/101. Files: src/setup/gui.cpp, tests/test_setup_theme.cpp. No game launch/install/headset; offline only. No commit.
 
 ## Current task and candidate
 
@@ -2659,6 +2710,486 @@ next probe is a recorded slow-versus-fast wrist rotation past a small static
 target: the arc test must report contact on the fast pass where the chord test
 did not, and neither may report contact when the blade stays clear.
 
+## 26 October read-only melee subagent: 14032F548 verdict + next-probe first half
+
+Task-owned files: `docs/NATIVE_MELEE_CONTRACT.md` (new 26 Oct verdict
+subsection at the end: verdict, evidence, limitations, exact next probe,
+probe outcome, +0x73 linkage), this handoff line. No game launch, repair,
+save, write, commit, or native call.
+
+Evidence added: `14032F548` recorded as instruction candidate only —
+byte-pinned `CALL [RAX+0x640]` in a `.text1` split gap (forged-JMP island),
+zero xrefs, RAX/receiver/args unrecovered; adjacent `140322910` has 27 CALL +
+3 DATA refs with `548` contributing none; forward JMP `1425C31F0` + TEST ESI
+sign branch, parallel `+0x638` slot lead, known `+0x640` inhabitants
+EnemyIns `1413234A8->14034BF70` vs PlayerIns `140339600` with no xref link to
+`548`.
+
+Probe outcome (read-only GhidraMCP, GUI reachable, `get_assembly_context` 12
+each side): `142756FC5` = `TEST AL,AL` in a thunk/return-pool island with a
+`CMOVNZ` return-address selector toward `14032F584/594` (not a producer);
+`1421B6015` = `MOV R14,RAX` with a `CMOVZ` selector taking `14032F54E`
+(`548`+6) as a conditional return immediate (no xref; producer still
+unrecovered); `1411B6015` = `MOV RCX,[R10+0x30]` negative control (split gap,
+no `548` link); `14032F471` = `JMP 0x142656c78` in garbage/forged island
+before `14032F480`, not a trustworthy linear producer. DB unsaved/unmutated.
+
++0x73 linkage appended as cache transcription only: `kMapHitType` /
+`NativeMapHitType` exist in code; contract notes `1403C72D0` 23/24/25 still
+needs DSR verification that it reads `0x73`.
+
+Exact next probe (second half still open): compare `+0x640` slot inhabitants
++ natural hit/miss correlation under TESTING; never invoke `548`.
+
 ## Historical evidence recovery
 
 The [history index](docs/history/README.md) retains the complete previous MODLOG and other replaced documents, including run IDs, crash observations, capture paths and restoration receipts. They are dated evidence only. Verify the candidate and underlying artifact before reusing any finding. Historical next actions and approval language are superseded.
+
+## D stereo read-only next probe, 26 October 2026
+
+Live-GUI `DSRFull` D-probe handoff (read-only; no game launch/repair/save/replay/write/commit): backward trace from `1411B4950`-class seeds in three bounded windows recovered the RDI/R14 producers at the `1411B46C0` ctor head (`RDI=RCX` at `46DF`, `R14=RDX` at `46DC`; span `[1411B47CE,1411B491A]` still uncovered); renderer+10's sole observed store is `1411B494E` (`140CC5B80` return with `"HighGraphics"` name arg, or `RSI` null-alloc fallback); `140CC5E60` (5B `MOV [RCX+0x18],RDX; RET`, 5 xrefs) and `140CC5EB0` (42B 11-insn body, 27 xrefs) byte-pinned by read; full windows, bytes, and limits in `docs/NATIVE_STEREO_CONTRACT.md` ("26 October D-probe, second window"). Exact next probe: Begin-payload retain/release + derived dispatcher vftable, then close `[1411B47CE,1411B491A]` and type the R14 source via `1411B46C0` callers; fallback is the main-scene bracket via `1411BEA27/1411C5049/1411C2F6C`. Dirty tree preserved; GHIDRA_MCP_ALLOW_SCRIPTS untouched; nothing saved or committed. D1/D2 still open.
+
+### E locomotion docs-only owner table, 26 October 2026
+
+Created `docs/NATIVE_LOCOMOTION_CONTRACT.md`: status UNRESOLVED, no native motor binding (orientation done, motor attribution open). Six owner rows all UNKNOWN with file:line evidence pointers (XInput poller, stick mapper, motor/collision resolver, authoritative root, forced-motion source, head/solid query); three refusals (mixed-input non-attribution, forced-motion no-credit, blocked-residual heuristic bound per ENGINEERING.md:29); next probe is the pinned XInput poll caller first per E2 order. Scope: only `docs/NATIVE_LOCOMOTION_CONTRACT.md` + `MODLOG.md`. No build (docs-only); `ctest -N` count unchanged (101). No game launch/install/headset; no commit.
+
+### D stereo re-read: RDI/R14 ctor-head producers re-confirmed + outer caller seed, 26 October 2026
+
+Read-only GhidraMCP (live GUI DSRFull; no launch/repair/save/replay/write/scripts/commit): re-recovered the three backward windows from `1411B4950`-class seeds (stop at `46DC/46DF` producers), confirmed sole renderer+10 store `1411B494E`, byte/xref re-pinned `140CC5E60` (5B, 5 xrefs) + `140CC5EB0` (42B 11 insns incl `CALL 140CCE4D0` + tail `JMP [RAX+0x20]`, 27 xrefs), added `FUN_1411b46c0` identity + outer caller seed `1411B3FA5` (`0x300` alloc renderer; R14-source = outer RCX, type open); deltas appended to `docs/NATIVE_STEREO_CONTRACT.md` as the 26 Oct D-probe addendum (existing second-window section left intact). Exact next probe: type outer RCX at `1411B3F79` upward, then Begin-payload retain/release + derived vftable; fallback main-scene bracket `1411BEA27/1411C5049/1411C2F6C`. Span `[1411B47CE,1411B491A]` still uncovered. D1/D2 still open.
+
+### Lever interact-range cache search: no citable value, 0.0 retained, 26 October 2026
+
+Searched `build/research/soulsmodding-20261024` for a citable lever interaction range. Found only a cross-class `validDist` field default (`u16 validDist = 150` in `primary/soulsmods__Paramdex/files/{DS1,DS1R}/Defs/ObjActParam.xml`, DisplayName `[cm]` = 1.5 m) versus the raw wiki boilerplate "In metres" (`raw/ds1-refmat__param__objactparam.wiki` line 7; `tables.tsv` row `ds1-refmat:param:objactparam` 7). Lever rows in `primary/soulsmods__Paramdex/files/DS1R/Names/ObjActParam.txt` (1200/1202/3011/3012/4560/6100/6101/7201/7202/16010) and object-list lever names are name-only; the cache holds defs + names, no per-row regulation.bin values. Unit conflict + no per-lever value = not citable: applied no number, kept the Lever row at 0.0/refuse, added a code comment naming the exact cache paths searched. Build/tests: `cmake --build build --config Debug --target test_interaction_target` + `ctest -C Debug -R interaction_target` GREEN; same in Release GREEN. Scope: only `src/core/interaction_target_math.h`, `tests/test_interaction_target.cpp` (unchanged, still pins 0.0), `MODLOG.md`. No game launch/install/headset; no commit.
+
+### D stereo third window: Begin-payload borrow-appearing + derived slot set pinned, 26 October 2026
+
+Read-only GhidraMCP (live GUI DSRFull; no launch/repair/save/replay/write/scripts/commit): poster `1411BE560` maps RDI=dispatcher, R14=ctor-R14, RBP=`&renderer+20`, RSI=`&renderer+28` into msg `+40/+48/+50` (vftable `141609970`, queued via `140CC5E90`, sync fallback `[RAX+0x10]`); pump `1411BF1F3 CALL [RAX+0x10]` passes msg+40/48/50 as RDX/R8/R9; handler `1411BEF10` renames them R14/RDI/RSI with RBP=dispatcher. Verdict: +48/+50 borrow-appearing (plain `MOV RCX,[RSI]` / `[RDI]` into dispatcher +0x20/+0x28 at `1411BF01E..030`, no interposed AddRef; `140CD3040` untyped so hidden retain unexcluded; reverse store `1411BEF66 [RDI],RAX` mutates the renderer field), +40 open (untyped `140CCF680/5A0/5C0` + virtual +0x10/+0x8, none typed retain/release). Derived vftable: overridden set {+0x28,+0x30,+0x40,+0x48} pinned (`2DB/2E3/2EB/2F3` with `CMP RAX,R15` / `JZ retire` skip-on-base; R15=`1416098B0` at `1411BF175`); +0x38 shared (no base check); base 96B decodes to 12 pinned slots incl +0x10 `1411BEF10`, +0x50 `1411BE560`; same compare idiom for all four slots in `1411BE100/1B0/340/3F0`; derived table address/targets OPEN (`get_xrefs_to 1416098B0` = 11 DATA refs, all base sites, no second table loaded). Limits: `1411BEF3A/BF00D/BF34B` no-instruction gaps (BF00D superseded by observed BF029/030), listing slices only, no prototypes/decompile, `ram:14011BF2FC` still unpinned. Exact next probe: queue completion/teardown (`140CC5E90`, `1411BF2AE/140CC5920`, tear-down `1411BF1AE`, `140CC5600/140CC5410`) + main-scene bracket `1411BEA27/1411C5049/1411C2F6C`, fallback bracket alone if blocked. Details in `docs/NATIVE_STEREO_CONTRACT.md` ("third window"). Scope: only `docs/NATIVE_STEREO_CONTRACT.md` + `MODLOG.md`. D1/D2 still open.
+
+### E2 XInput poller static probe: 6 call sites, 2 per-frame candidates, 26 October 2026
+
+Read-only GhidraMCP (live GUI DSRFull, `/DarkSoulsRemastered.exe`; no launch/repair/save/replay/write/scripts/commit): `XInputGetState` thunk `0x14082f790` = `JMP [0x142017ed4]` (import `Ordinal_2`); exactly 6 `UNCONDITIONAL_CALL` callers, all classified. Top per-frame candidates: `FUN_140e27aa0` (site `140e27ff6`, `ECX=[RDI+0x264]`, thumbs state `+8/+0xA` → `/65535.0*2` floats at `+0x26c/+0x270`, zero code callers) and its mirror `FUN_140e28430` (site `140e28986`, `ECX=[RDI+0x204]`, floats at `+0x20c/+0x210`). One-shots: `FUN_140c9f6c0` (connected flag only), `FUN_140e1c180/200` (4-pad bind enumerators), `FUN_140c9faa0` (remap layer with 7849/8689 deadzone, cadence unproven). Stopped at the poller→mapper edge: no velocity mapping in the same windows, motor/resolver unclaimed. Details in `docs/NATIVE_LOCOMOTION_CONTRACT.md` ("E2 static probe"); exact next probe: consumers of `+0x26c/+0x270` / `+0x20c/+0x210` = mapper→motor boundary, plus 8 DATA-ref slot resolution. Scope: only those two files. All six owners still UNKNOWN; no commit.
+
+### D stereo fourth window: queue/teardown shape + bracket scout, 26 October 2026
+
+Read-only GhidraMCP (live GUI DSRFull; no launch/repair/save/replay/write/scripts/commit): `140CC5E90` is a 5-insn enqueue tail-thunk (`ADD RCX,0x78; JMP 140CC55A0`), not a completion point; retire `1411BF2AE` calls `140CC5920` then BPL decides loop (`JNZ 1411BF180` → `140CC5600`) vs exit; `140CC5920` branches on msg+0x10 bit0 (free path OPEN); teardown `1411BF1AE` is pump-owned (+0xbb gate, virtual +0x18, BPL=0, retire); wait `140CC5600` calls `[queue]+0x30`-object virtual +0x10 (identity OPEN); type `140CC5410` is `MOV EAX,[RCX+0x14]; RET` with >7 retiring. Bracket: `FUN_1411c2f50` (49B, 5-arg forwarder, result halves) is the recommended live-observation bracket; `FUN_1411c4fa0` (222B) secondary for alloc lifetime (stack-local, unsupported past return); `ProcessDantelionRenderFrame` (1547B) explicitly not a bracket. Details in `docs/NATIVE_STEREO_CONTRACT.md` ("fourth window"). Scope: only those two files. D1/D2 still open.
+
+### Type-64 (parry-context) static probe: type-2 dispatch + gates, 26 October 2026
+
+Read-only live GhidraMCP against GUI `DSRFull` (PID 17320; token `1792646701740:fa2c6e65:3542`, unsaved true before/after; no save/repair/script/launch/write/commit): `1403C4210` (sole code caller `1403C4020`, +DATA `141d53e64`) routes kind 0 -> `1402F84F0` (notify `1403CA1D0` + effect chain `1403E6450`, return 1, no +34 read), kind 1 -> thunk `1402F8410`/`1429E5D7E` (forged-return selector on `[RDX+0x524]` bit to `140045643`/`1402F8494=JMP 142C58024`; meaning open, never step through), kind 2 -> `1402F84B0` (`target!=source && [record+0x34] < 0x40` then `1402FC360`, else 0 — attack_type 64 fails the gate). Type-3 consumers `140420A20`/`140420B30` share the `< 0x40` gate; `1402FC360`/`1403E6450` bodies have no +34 read. Producer re-read: `1405290C0` stores attack type at payload +34 and fills +30 via `1402DEB20` only when `+34==0x40`; which wrapper argument values pass 64 vs 0/2 is unrecovered (wrappers `140528CE0/140528E90/140528F70` pinned). Zero `== 0x40` consumers found: +34-xref not field-indexable (timeout-limited enumeration, not proof of absence). Details in `docs/NATIVE_MELEE_CONTRACT.md` ("26 October type-64 static probe"). Exact next probe: natural parry correlation under TESTING. Scope: only those two files. No binding proposed.
+
+
+### Launcher chain-DLL FAILs print full colliding path, 26 October 2026
+
+RED first in tests/test_setup_theme.cpp (stubbed chain-present/chain-move-fail conditions driven through CTL_INSTALL, log asserted for full game-dir path; RED confirmed as FAIL 154) then GREEN: src/setup/setup.cpp DoInstall chain-conflict message logs the full chain_dest path and the move-failure message logs dest_loader to chain_dest. DoInstall:522 and all behavior untouched, message text only. Verify: setup_theme PASS both configs; full ctest 101/101 Debug + 101/101 Release. No game launch/install/headset; no commit.
+
+### Package mid-refresh atomicity documented + tested, 26 Oct 2026
+
+K-audit follow-up (code+test, offline only): `tools/package.py` latest-mode comment corrected — the live `DSVR-latest/` refresh is intentionally non-atomic (per-file for Explorer locks; kill/lock mid-loop may leave a mixed stage) while the zip (replaced last) + verification.json (written after) stay on the old build, so a failed refresh never claims the new build. New `test_latest_mid_refresh_failure_keeps_old_zip_and_verification` locks a live destination mid-refresh, asserts nonzero exit and byte-identical old zip + verification. `test_package.py` 9/9 GREEN (unittest OK), `ctest -R package` PASS. Scope: tools/package.py, tests/test_package.py. No game/install/headset; no commit.
+
+Read-only GhidraMCP (live GUI DSRFull, `/DarkSoulsRemastered.exe`; no launch/repair/save/replay/write/scripts/commit): full decompiles confirm both candidates take the device struct as param_1/RCX (dynamic heap base, so no concrete field address exists to xref). `read_memory` 8B each decoded all 8 DATA-ref slots: per-candidate duplicate RVA pairs plus one VA+1 slot each -- not vftables, vftable claim refused. `FUN_140c9faa0` sole caller is `thunk_FUN_140c9faa0` (`140c9f800`), dispatched from table `14149dc40` (thunk at index 6); table owner unclaimed, candidate 3 cadence stays UNPROVEN. Consumer search (whole-program plus function-scoped `search_instructions`, bulk `get_xrefs_to`) timed out with 0/3 windows completed; no velocity-scaling reader recovered, mapper/motor UNKNOWN. Details in `docs/NATIVE_LOCOMOTION_CONTRACT.md` (E2 follow-up static probe). Exact next probe: retry the field-pattern search or walk sibling tables `1414dde70`/`1414ddd20`; type table `14149dc40`. Scope: only those two files. No commit.
+
+
+### E2 sibling-table walk: no float-field consumer, VA decode corrected, 26 October 2026
+
+Read-only GhidraMCP (live GUI DSRFull, `/DarkSoulsRemastered.exe`; no launch/repair/save/replay/write/scripts/commit): 2 entry windows + <300 B decompiles each table at index 0 (trigger reader: `140e26780` 181 B / mirror `140e26840` 181 B, neighbouring `+0x3dc/+0x3ec` / `+0x37c/+0x38c` fields) and index 3 (event dispatcher: `140e28dc0` 169 B / mirror `140e28e70` 169 B, rumble-ish/`0x219` branches, no float reads) -- bound hit, no sibling reads `+0x26c/+0x270` / `+0x20c/+0x210`, mapper/motor UNKNOWN. Correction: `1414dde90`/`1414ddd40` are full-VA poller slots (index 4 of each 8-slot table), not VA+1. Details in `docs/NATIVE_LOCOMOTION_CONTRACT.md` (E2 sibling-table walk). Exact next probe: idle-bridge field-access byte-pattern search for the scaling reader (mapper->motor boundary). Scope: only those two files. No commit.
+
+### B swing-time producer xref probe: constructor chain confirmed, no swing caller, 26 October 2026
+
+Read-only live GhidraMCP against GUI DSRFull (token 1792646701740:fa2c6e65:3542, unsaved true before/after; no launch/repair/save/replay/write/scripts/commit): get_xrefs_to 1403C9B50 -> exactly 2 refs (DATA 141D54398, CALL 1404910AD) and 1403C7460 -> exactly 3 DATA refs (141D5417C, 1417991F0, 141799224); zero new xrefs vs priors. 1404910AD = CALL in FUN_140490F40 (ObjDam condition wrapper: resolves two objects via 140371200/140371360/140371bd0, gates nonzero, calls 1403C9B50(manager, param_2, lVar3); no animation/weapon/swing argument). Its own refs: DATA 141D612F8 + JMP-island 1404B0EC7 (split, not swing). DATA holders return no-instruction; RVA-decode confirms address tables (003C9B50/003C7460); bulk xref-back on all four is empty, so no indirect code owner is indexed. Verdict: no swing-plausible producer in either xref set; builder has zero code xrefs. Details in docs/NATIVE_MELEE_CONTRACT.md (B swing-time producer probe). Exact next probe: decode the 1417991F0/224 record stride to name the builder's dispatch owner, else natural-swing correlation under TESTING. Scope: only those two files. No commit.
+
+### E2 byte-pattern retry: axis getters pinned, scaling consumer behind unindexed dispatch, 26 Oct 2026
+
+Read-only GhidraMCP (live GUI DSRFull; no launch/repair/save/replay/write/scripts/commit): masked MOVSS/dword byte-pattern search (patterns from candidates' own RDI stores) completed cheaply where instruction search timed out. Direct paired readers are other-struct copy-out/clamp/smoothing, not this device layout. Family sweep pinned indexed axis getters 140e269a0/140e269c0 (table idx 5, read +0x26c/+0x20c by index) and mirror setters idx 7; all 16 dispatch-table slots have zero code xrefs, so the velocity-scaling caller is behind computed dispatch. Mapper/motor UNKNOWN. Details in docs/NATIVE_LOCOMOTION_CONTRACT.md (E2 byte-pattern retry). Exact next probe: byte-pattern for table VAs as immediates to type the dispatch owner, or outer-RCX device-struct typing. Scope: only those two files. No commit.
+
+### B static probe: 1417991F0/224 are unwind metadata, no dispatch owner, 26 October 2026
+
+Read-only live GhidraMCP against GUI DSRFull (PID 17320; no launch/repair/save/replay/write/scripts/commit): read_memory 64B at 1417991F0/141799224/141D5417C + neighbours decodes a 12-byte RUNTIME_FUNCTION triad (Begin 0x1403C7460, End 0x1403C749D = 61B body, UnwindInfo 0x1417991D8); 1417991F0/224 are mid-UNWIND_INFO offsets in .rdata (header 01/17/06/00, codes, handler RVA 0x00020521 + chained 0x000A6405 = the prior 'small-int fields'), not dispatch records -- the 12-/16B dispatch-record premise is refuted. get_xrefs_to (cap 20) on the three tables + +/-0x10/stride neighbours: only .pdata DATA self-refs, zero code indexed dispatch; 1403C7460 keeps exactly its 3 DATA refs. No dispatch owner found, no indirect invocation recorded, no swing producer claimed. Details in docs/NATIVE_MELEE_CONTRACT.md (B static probe subsection). Exact next probe: walk 14024F6B0 -> 1403C8DD0 -> 1403C6030/1403C6850/1403C7D30 -> 1403C7520 backward to find which first references the 1403C7460 fragment range and name its outer caller; else natural-swing correlation under TESTING. Scope: only those two files. No commit.
+
+### Mod-menu gate consistency: restart footer extended + stay-editable sliders gated, 26 Oct 2026
+
+Prior audit's described footer restart block / ModMenuCaptureTextArmed hook did not exist in this tree (verified by grep; the applied-vs-attached binding comparison lived only in input.cpp's frozen InputLiveBindingSignature). Implemented: DrawMenu footer now prints "Restart needed: <parts> (restart the game to apply)." comparing applied bindings vs InputLiveBindingSignature plus applied reshade_host/render_scale_percent vs a first-draw baseline snapshot in mod_menu.cpp (render fields have no attach-time freeze; baseline frozen on first DrawMenu, honest session-start reference, not a production attach snapshot). Gated with BeginDisabled following the controller-hand pattern: Snap angle on snap_turn, Turn speed on smooth_turn, Vignette strength on comfort_vignette, sparring distance on proving ground, swing speeds/cooldown on physical_attacks+motion_attacks, contact speed/re-hit on haptics, support offset/rotation on Enable support grip; correctly-conditional groups (arm-swing/reach/defence) untouched, no label/ID removed. RED first: new WARP asserts failed at the disabled-slider check (FAIL item_was_disabled) before gating; footer asserts then drove the capture-seam fix (footer hook must start before DrawMenu — armed via pending flag in BodyVisibilityGetStatus + started in CalibrationGetStatus, since a log binds at LogToFile time and LogFinish fires at the panel child's End). Test seams: fixture stubs InputLiveBindingSignature to the Config defaults and mod_menu exposes probe_disabled_item/item_was_disabled (never armed in production). GREEN: ctest -R mod_menu_render PASS Debug+Release; full suites 101/101 Debug + 101/101 Release. Files: src/core/mod_menu.cpp, tests/test_mod_menu.cpp. No game launch/install/headset; no commit.
+
+### Mod-menu everyday/advanced separation: default-open Advanced tuning groups, 26 Oct 2026
+
+RED first: extended tests/test_mod_menu.cpp with a WARP assertion that an "Advanced tuning" grouping exists and default-open shows advanced controls (arm-swing sliders visible when enabled) — rebuilt test_mod_menu, confirmed RED (no grouping yet). GREEN: src/core/mod_menu.cpp adds one labeled always-visible "Advanced tuning" text row inside SettingsPanel (above the arm-IK rows) and one inside CombatPanel (above the per-hand rows; grip editor reads under the same label), plus a comment row cross-referencing them — same panels, same IDs/labels/behavior, grouping only; plain Text row (not SeparatorText/CollapsingHeader) so the label stays greppable in the LogToFile capture, no collapse so default renders show every advanced control, no new capture call above the footer capture point. Combat route asserted structurally via shipped next/prev-panel edges (0 -> 3 -> 0) with panel-ID re-resolve; no Combat-rows-in-capture assertion (one-shot hook has Settings-route-only stubs, shipped footer hook sits below the panel switch). Verify: cmake --build build --config Debug --target test_mod_menu + ctest -C Debug -R mod_menu_render PASS; same Release; full ctest 101/101 Debug + 101/101 Release. Files: src/core/mod_menu.cpp, tests/test_mod_menu.cpp, MODLOG.md (this entry). No game launch/install/headset; no commit.
+
+### 25 October continuation: F2/C2 committed-pose lifetime and B update-owner evidence
+
+Resumed the existing plan's later IK/physical-combat steering. HEAD
+`ca989d74ae388f1b41d33b14ecfea2833ed19b71`; all pre-existing dirty work
+preserved. Existing CMake cache: Visual Studio 18 2026/x64, LAB OFF,
+ReShade addon ON. Graph/source-harness tools are unavailable in this chat,
+so targeted direct source reads followed tool discovery. No delegation.
+
+Reproduced a source defect after successful native-copy verification:
+`cmake --build build --config Debug --target test_arm_pose_native --parallel 4`,
+then `ctest --test-dir build -C Debug -R '^arm_pose_native$' --output-on-failure`
+failed with `post-publication reader 0 mutation 1 returned stale poses`.
+Losing focus between native callbacks still exposed the old valid hands.
+`ArmIkHands` now stamps its committed calibration revision, and both public
+readers share a lifetime check for focus/HMD/controller tracking, current
+tracking timestamps, camera sequence/epoch, calibration, modes and capture.
+Refusal ends the receipt and clears diagnostic motion history; restoring
+external state cannot reopen it. A fresh verified natural copy reprimes at
+zero speed. No new native call/write or hook was added.
+
+Regression: 19 transitions independently through each reader (38 cases),
+empty outputs, no native write/callback during reads, latched refusal,
+fresh-copy recovery, calibration stamp and acceptance of a newer valid XR
+packet with the same camera-bound native pose. The first shared-guard draft
+erased a provisional source publication; existing CheckCombatBench caught
+it before acceptance. An unverified-copy early return now preserves the
+pending snapshot. Head-only/one-hand and duplicate-callback tests remain
+active. This is adapter evidence, not modified-candidate native skinning.
+
+Native B investigation: the installed GhidraMCP bridge still reaches GUI
+DSRFull despite Empryo's current MCP config listing only REA. An inline SDK
+client listed advertised tools before read-only calls; no shim/headless
+wrapper or Ghidra script was created. Update owner `1402500D8` is named;
+`1403C8DD0` calls `6030` and `6850`, the latter reaches `7D30` and directly
+`7520`. Corrected the older `6030 -> 7520` claim. No indexed entry from those
+paths into `7460`, including its unwind fragments. Independent EXE comparison
+pins all 338 bytes of `1403C72D0` and `1403C7460`; `1403C733A` reads selected
+AtkParam +0x73 and chooses messages 23/24/25. Message meaning, damage,
+defenses, lifetime and thread correlation remain unresolved. Raw calls and
+primary-byte-verification.json are outside distributable sources at
+`C:\Tools\DarkSoulsRemaster_De\combat-evidence\physical-combat-20261025-update-owner\`.
+Executable SHA256 remains `a45aaa36dd2f6cc151670a639ea5547043cf38ea79ff4178b963c6ed71f98d7b`.
+
+Final full commands: `cmake --build build --config Debug --parallel 4`;
+`ctest --test-dir build -C Debug --output-on-failure`; matching Release pair.
+Both builds exit 0, **Debug 101/101 and Release 101/101**. Logs:
+`build/continue-20261025-final-{debug,release}-{build,tests}.log`.
+Focused red/green logs use `build/continue-20261025-publication-*`.
+
+The first `pwsh -NoProfile -File tools/auto_verify.ps1` passed its tests and
+doctor but packaging exited 1 on locked `dist/DSVR-latest/DSVR-Setup.exe`
+(PID 33496); log `build/continue-20261025-auto-verify.log`. The old ZIP and
+verification remain the old candidate; the live extracted directory may be
+mixed after the refused refresh. Do not call that directory a verified new
+package. Final `pwsh -NoProfile -File tools/auto_verify.ps1 -NoLatest` exits
+0: Release 101/101, doctor PASS; log
+`build/continue-20261025-final-auto-verify.log`.
+
+Separate development package completed after midnight on 26 October:
+`python -B tools/package.py --build build --out dist/continue-20261026-pose-lifetime --version 0.16.0-render-host-preview --latest --reshade-addon --ctest-log build/latest-ctest.txt --doctor pass`
+exits 0. Output `dist/continue-20261026-pose-lifetime/DSVR-latest-x64.zip`
+with its adjacent verification JSON, Release 101/101 and doctor PASS.
+Core DLL SHA256:
+`4c4e33c91adb82ebd240349b888da32ff360fc68425e7202278f476e6c135ab7`.
+The development package is refreshed once more to include this completed
+handoff; this is not a formal release, installation or native acceptance.
+
+After the user confirmed Setup was closed, verified no DSVR-Setup process
+remained and ran the same gated package command with `--out dist`.
+Standard `dist/DSVR-latest-x64.zip`, extracted files and verification JSON
+now contain the tested candidate. Log:
+`build/continue-20261026-latest-package.log`. The standard package is refreshed
+with this note and checked against its binary hashes; the earlier lock no
+longer blocks packaging. No game deployment was performed.
+
+Read-only preflight found an already-running, unowned game PID 24412 and
+active desktop use. Its installed DLL SHA256 is
+`3a136a395a55b7b3bd8678f05d0c47d80af7cd8916de3c7b5e8186211b52a880`,
+not this fix. No installation, game launch/stop/input, process-memory read,
+save/config/vault mutation, or restoration claim. Preflight log:
+`build/continue-20261025-preflight.log`. Native/body/headset acceptance and
+B/C stay open. Next experiment: after the active session closes, qualify
+the protected transaction, then test lost focus/controller tracking and
+recovery on the exact new candidate; observe source-to-body/armor propagation
+and separately labelled native selected-context hit/miss/block/parry-only
+outcomes. Do not substitute getter tests or the message field for damage proof.
+
+### 26 October resume: release-blocking combat/interaction evidence and interrupted source fixes
+
+User priority: finish physical native attack/block and interactions for the release.
+B/C/H are release blockers; no playable release or native acceptance is claimed.
+Existing dirty work retained; no commit, install, game launch/input, game-memory
+access, backup-vault/save/config mutation or restoration claim in this resume.
+
+The interrupted source candidate now builds and passes full Debug **101/101**
+and Release **101/101**. Commands: `cmake --build build --config Debug --parallel 4`
+then `ctest --test-dir build -C Debug --output-on-failure`, matching Release
+pair; final logs `build/resume2-current-{debug,release}-{build,tests}.log`.
+This validates the existing adjustable seated lift, immediate live menu apply /
+automatic background save and mono camera-bound source-pose/FOV correction.
+Headset smoothness, live body visibility and native combat are NOT established.
+
+Extended the actual WARP/OpenXR submission seam with both-eye center-pose checks
+and **13** independently mutated camera-source refusal/recovery cases: missing
+sequence, epoch mismatch, old/future capture time, missing/future prediction,
+focus/orientation/position invalidity, FOV boundaries, invalid aspect and a
+sequence-only diagnostic tag. Each refusal preserves fresh tracking and releases
+the XR frame/images; a fresh camera receipt recovers. Focused command:
+`ctest --test-dir build -C Debug -R "^xr_mono_recovery$" --output-on-failure`
+passes **1/1** (`build/resume2-mono-test.log`). This extends the earlier logged
+red/green pose-mismatch regression, not a new in-headset performance result.
+The syntax index cannot parse OpenXR calling-convention macros; real MSVC builds
+are authoritative. `project check` scoped to tests incorrectly sought tests/build;
+that harness error is retained, not reported as a source failure or bypassed test.
+
+Forced `cmake --build build --config Release --target dsvr_setup -- /t:Rebuild /m:4`
+before doctor (`build/resume2-setup-rebuild.log`, exit 0). Then
+`pwsh -NoProfile -File tools/auto_verify.ps1` exits 0, Release **101/101**,
+doctor PASS and refreshed the development ZIP; log `build/resume2-auto-verify.log`.
+Final documentation/package refresh also exits 0: Release **101/101**, doctor
+PASS, development ZIP 1,436,019 bytes at that refresh. Log
+`build/resume2-final-auto-verify.log`. A final docs-only package refresh includes
+this completion note; use its adjacent verification JSON for exact ZIP size/hash.
+
+Native B progress: GUI DSRFull PID 17320 remains reachable through advertised
+read-only tools of the installed inline MCP SDK client; no reusable shim or
+Ghidra script. REA 6.8.0 now reports Windows PE analysis available, but that is
+not a binding to the live primary .gpr. Corrected the false "atomic failure / no
+handler" interpretation: selector flags come from target +0x524 comparison.
+The type-1 accepted path reaches target virtual +0x480 then source +0x460;
+PlayerIns/EnemyIns differ. Independently compared **336 bytes** of DB observations
+with the pinned EXE. Native kind-2/0x40 state branches recovered but not classified
+as damage/block/parry. Actor generation, record lifetime, simulation owner and
+independent outcome still unknown. One interior-instruction walk is explicitly
+rejected in its receipt. See docs/NATIVE_MELEE_CONTRACT.md. Exact next static
+probe: successful PlayerIns +0x480 kind-2 branch from 140095D94, then +0x460
+notification/context owner; do not invoke a speculative function to test it.
+
+H1 progress: parsed the installed bounded DCX/BND3 ObjActParam declarations,
+not just Paramdex defaults. **49** real rows; selected cached lever/door rows
+have raw validDist **60/90/110**, not the schema default 150. Kept class-wide
+physical reach disabled: native selected-row/prompt/LOS, distance origin and
+object generation are still unbound. Carrier/member/schema/row hashes and raw
+observations live outside distributable sources; see
+`docs/NATIVE_INTERACTION_CONTRACT.md`. The bridge ObjAct function-name query
+returned "No complete response ... timed out"; subsequent string collection
+hit the bounded SDK client deadline. No identical query retry, DB repair or
+negative claim about missing interaction code.
+
+Observation readiness: old runner Check correctly refused changed config.cpp
+(`build/resume2-combat-check.log`). Rebuilt current LAB observer. Its inherited
+cache had DSVR_BUILD_TESTS=OFF: initial CTest registered **0 tests**, which is NOT
+qualification. Configured the same VS2026/x64 cache with LAB ON, tests ON and
+ReShade addon OFF; rebuilt and ran actual registered **99/99** Release tests,
+then source-stable recheck **99/99**. Commands and logs:
+`cmake -S . -B build/combat-lab -G "Visual Studio 18 2026" -A x64 -DDSVR_ENABLE_LAB=ON -DDSVR_BUILD_TESTS=ON -DDSVR_BUILD_RESHADE_ADDON=OFF`,
+`cmake --build build/combat-lab --config Release --parallel 4`,
+`ctest --test-dir build/combat-lab -C Release -N`, then full CTest.
+Logs `build/resume2-observer-{configure,qualified-build,registered,qualified-tests}.log`
+and `build/resume2-observer-recheck-{build,tests}.log`.
+
+Created a NEW immutable offline qualification receipt (did not rewrite old ones):
+`build/verification/combat-observer-20261026-resume/candidate.json`, binary hashes,
+226 sealed source/build/test/tool files, 209-file pre/post equality check, actual
+normal Debug/Release and LAB test-log hashes. Command
+`pwsh -NoProfile -File tools/run_combat_capture.ps1 -Mode Check -CandidateReceipt build/verification/combat-observer-20261026-resume/candidate.json -Receipt build/verification/resume2-combat-ready/receipt.json`
+exits 0: **CHECK PASS**, offline/disconnected Steam, exact-game block, qualified
+candidate/seeds/current roots. It is read-only readiness, not a transaction or
+native outcome. Log `build/resume2-combat-ready-check.log`. No Run was started.
+Next native evidence is separately labelled ordinary hit/miss/block/parry and
+selected-object/prompt activation under TESTING, with independent outcomes and
+current ownership/restoration receipts. The no-shield/passive-enemy historical
+comparison cannot supply defense acceptance. Plan and A/B/D/F/H cockpit evidence
+updated together; no native gate checked complete.
+
+### 26 October native qualification request: response observability fixed; gameplay not qualified
+
+Requested scope is native attacks, defense and interactions on this build. These
+are NOT merely missing signatures on a test receipt: combat_native still has no
+production physical-damage/shield-contact binding, and physical reach still has
+no native prompt/LOS/selected-object producer. Those gates remain BLOCKED.
+No native/gameplay PASS, release, game launch, input injection, direct game-memory
+write, vault change, receipt replacement or restoration is claimed.
+
+Advanced the pinned PlayerIns +480 kind-2 continuation. It performs a horizontal
+direction dot/Cosf comparison (observed degree multiplier and 120-degree constant)
+and a later accepted path writes native state 1006/1007, +31C bit 2 and actor+404
+1.0f. These are shipped-code observations, not an HP write or a block/parry label.
+Pinned 125 DB bytes across five windows against the EXE. External evidence:
+`C:\Tools\DarkSoulsRemaster_De\combat-evidence\physical-combat-20261026-qualify\`.
+For interactions, UTF-16 ObjActParam at 141372BE8 reaches name-list registration
+in 140531BC0; no selected-target owner follows from it. Four exact debug-string
+xref/RIP-LEA probes are bounded negatives, not proof that code is absent.
+See NATIVE_MELEE_CONTRACT and NATIVE_INTERACTION_CONTRACT.
+
+A concrete observation defect was reproduced at the REAL contact detour/writer:
+record+54 and +168/+169 changed during the natural callback, while diagnostics
+always serialized zeros. Command
+`cmake --build build --config Debug --target test_combat_trace --parallel 4`, then
+`ctest --test-dir build -C Debug -R "^combat_native_trace$" --output-on-failure`
+failed **0/1** with the missing response-payload assertion. Logs
+`build/qualify-response-red-{build.log,log}` (actual test log is
+`build/qualify-response-red.log`). The Python consumer independently failed with
+`raw native response fields rejected`; log
+`build/qualify-response-parser-red.log`.
+
+Source fix: retain exact raw before/after kind and status fields in the EXISTING
+five-event atomic diagnostics batch, with independent read bits and payload
+version 1. Coalesced pair/handle/status reads retain the authored **18-query cold
+permission budget**; no scope crosses the original native callback. Extra-field
+read failures preserve the previously valid actor/context fields through bounded
+fallbacks. No native function binding or gameplay write was added. The strict
+Python analyzer exposes raw native_response only, preserves legacy unknowns,
+rejects malformed/missing-read-bit payloads and NEVER turns it into native combat
+acceptance. Tests cover all **16** partial-read masks, full unsigned 32-bit values,
+failed optional reads, identity/capture transitions and whole-batch drops.
+Focused **3/3 PASS**: combat_native_trace, combat_native_trace_filtered and vr_trace
+(`build/qualify-response-partial.log`). This is synthetic seam evidence.
+
+Current full verification, observed this turn:
+- `cmake --build build --config Debug --parallel 4`, then
+  `ctest --test-dir build -C Debug --output-on-failure`: **101/101 PASS**;
+  `build/qualify-final-debug-{build,tests}.log`.
+- Matching Release pair: **101/101 PASS**;
+  `build/qualify-final-release-{build,tests}.log`.
+- Current LAB observer Release build + full CTest: **99/99 PASS**;
+  `build/qualify-observer-{build,tests}.log`.
+- `pwsh -NoProfile -File tools/auto_verify.ps1`: exit 0, Release **101/101**,
+  doctor PASS; development ZIP only (`build/qualify-auto-verify.log`).
+No shared struct/header changed in this turn (only vr_trace.cpp, vr_trace.py and
+their two tests), so no new setup-layout rebuild dependency was introduced.
+`project check` built successfully but its unconfigured CTest invocation lacked
+-C: **101 NOT RUN**, a harness failure, not 101 executed failing assertions.
+The configured runs above are the actual results; no threshold was relaxed.
+
+Fresh NEW immutable records:
+`build/verification/native-qualification-20261026-response/candidate.json` seals
+current source/binaries/test-log hashes. Adjacent qualification.json explicitly
+reports attacks, blocking, parrying and targeted interactions **BLOCKED**, with
+zero live observations. Old receipts remain unchanged. Command
+`pwsh -NoProfile -File tools/run_combat_capture.ps1 -Mode Check -CandidateReceipt build/verification/native-qualification-20261026-response/candidate.json -Receipt build/verification/native-qualification-20261026-response-run/receipt.json`
+exits 0; `build/qualify-native-check.log` says CHECK PASS, no changes yet.
+
+Native Run was not started: runner lines 724-725 create data inside the backup
+vault, and SaveReceipt replaces its active verification receipt. Both contradict
+the current hard limits. Actual mod/gameplay qualification also needs the native
+hooks/callbacks boundary and operator-provided gameplay (no input injection).
+Resolve that boundary with a fresh transaction OUTSIDE the vault and append-only
+receipts, then obtain labelled ordinary hit/miss/block/parry and prompt/activation
+observations before implementing/qualifying the missing production bindings.
+The plan ledger and A/B/C/H lane files were updated together; no checkbox closed.
+
+### PowerShell 7 development tooling, 26 October 2026
+
+All active PowerShell scripts are development/operator tools, not the product installer. Added `#requires -Version 7.0` to `tools/auto_verify.ps1`, `tools/verify_preflight.ps1` and `tools/run_combat_capture.ps1`; modernized the capture runner hashing/path handling and preflight list construction. CTest now requires and invokes `pwsh` on Windows and no longer registers a Windows PowerShell 5.1 path. `docs/TESTING.md` records the boundary. Product installer remains independent and portable.
+
+Verification: PowerShell 7.6.5 parser PASS for all three scripts; `pwsh -NoProfile -File tools/run_combat_capture.ps1 -Mode SelfTest -WindowMinutes 30` exit 0. Debug build exit 0; full Debug CTest **99/100**, with unrelated `combat_native_trace_filtered` failing at `unrelated_signatures==0` (test #9). Release build exit 0; full Release CTest **100/100**. `ctest --test-dir build -C Release -N` reports 100 registered tests and only the `pwsh` capture transaction entry.
+
+Next exact probe for the unrelated Debug-only red test: `ctest --test-dir build -C Debug -R '^combat_native_trace_filtered$' --output-on-failure`; if reproducible, inspect the modified fixture around `tests/test_combat_trace.cpp:159`. No installer/game/save transaction was run.
+
+### 26 October operator combat/interaction capture and automatic ten-minute observer
+
+Task: advance B/C/H using protected ordinary-controls comparisons; eliminate F9
+capture burden and investigate the operator's contact hitch. HEAD remains
+3c26ed95de5dd669925d704e6a7d01d3ad7ddb8c. Existing dirty work preserved, no
+staging/commit/reset/delegation. The parallel user-owned PowerShell chat's PS7
+changes are retained. Its removal of the PS5.1 CTest explains current 100/98
+counts; no gameplay assertion/threshold was relaxed.
+
+Source changes in this slice: vr_trace.cpp, diagnostics.cpp/core.cpp,
+run_combat_capture.ps1, test_combat_trace/test_diagnostics_mode,
+vr_trace.py/test_vr_trace.py. Cold synthetic permission-query budget tightened
+18 -> 10 (red then green). Permissions are reused only inside one pre/post
+snapshot; every scope ends before the natural original call. Positive local
+PlayerIns self contacts are counted separately and excluded from detailed actor
+reads, with original dispatch preserved. Short captures retain the 256 ceiling;
+long captures stream details to the bounded 4096-event queue. Footer counters
+explicitly account total = non_player + self + refused + detail. Analyzer validates
+that equation and bounds without promoting raw observations to native acceptance.
+
+The combat-only diagnostic thread now waits for the verified local player, then
+starts exactly one automatic 600000-ms capture per process. F9 is unnecessary
+and cannot restart this recorder. Title/bootstrap time does not consume it.
+Tests first failed on long duration and absent automatic start; now verify loaded
+player admission, one attempt, exact duration and no automatic restart. No XR,
+input injection, physical damage binding or direct gameplay write was enabled.
+
+A new LAB-only natural 140313470 interaction observer forwards original arguments
+once, preserves all return bits, and captures selected group/row/PARAM/handle/state
+before and after. Identity certification is callback-local only. Strict parser,
+changed-handle and combat-domain regressions pass; the domain regression was red
+until the new event was admitted. See NATIVE_INTERACTION_CONTRACT for pinned
+ObjAct owner chain, raw payload and native raw * float32(0.01) * 2 range helper.
+External native evidence is C:\Tools\DarkSoulsRemaster_De\combat-evidence\native-combat-20261026-finish.
+No decompiled source/game data entered distributable sources or primary DB edits.
+
+Protected transaction repairs: the first staging attempt failed inventory before
+launch; restoration succeeded. Replaced provider Move-Item root staging with
+atomic Directory.Move plus held inventory/source-absence/empty-root checks; later
+staging succeeded. This does not establish the provider failure's exact cause.
+The first automatic retry saw transient overlapping Steam bootstrap processes;
+strict steady-state ownership refused it. Both exited and explicit Restore
+succeeded. Startup now requires one exact PID/start-time/path generation stable
+for 1000 ms, within a 90-second/deadline bound. Steady-state multiple/foreign
+process refusal remains. SelfTest covers overlapping/empty/changing/stable startup
+and pre-existing-generation rejection. Fresh append-only journals remain outside
+original backup vaults; old receipts/candidates were not overwritten.
+
+Native run 1: build/verification/native-finish-20261026-live-retry1/receipt.json,
+PID30784, RESTORED and independently hash-checked. Three intact captures:
+- 270943343-1: mixed wall then enemy hilt hit, not two clean F9 cases. 146 detailed
+  contacts, zero loss/cap; seq24 stable EnemyIns HP44->31, weapon212000,
+  Atk2301000/table1, behavior102301000, kind2, statuses0/0.
+- 271445750-2: operator failed parry/hit, 256 details and 32 refused. Six incoming
+  contacts include HP557->546->524->502->491->480->458. No successful parry proof.
+- 271480312-3: operator successful block then other contact, 256 details and643
+  refused. First incoming target HP403->403/stamina84->76; later HP403->369.
+  The entire capture is not a clean block case. Both defense traces hit the old
+  detail ceiling. Operator reported 1-2-second hitches. Raw captures, reports and
+  operator notes are retained beside the receipt.
+
+Native automatic run: build/verification/native-finish-20261026-continuous-run2/receipt.json,
+PID48220, candidate ../native-finish-20261026-continuous/candidate-settled.json
+(SHA256 55861ecd97df9cc39d7d79884ced3756a0b0aebe9c1185c511d80265a9ae6fda).
+LAB DLL cafbca0862bb54c4cba9113f7498fdc79a8ae86d105a6ebd32c1b771b242bc87.
+Command: pwsh -NoProfile -File tools/run_combat_capture.ps1 -Mode Run
+-WindowMinutes 15 -CandidateReceipt build/verification/native-finish-20261026-continuous/candidate-settled.json
+-Receipt build/verification/native-finish-20261026-continuous-run2/receipt.json
+-SeedVault build/native-transactions/combat-observer-20261026-133218-f14e751b069b4f858471133e38547fc1.
+Automatic capture ran 14:06:02.798 through14:16:02.842 New York time, before the
+14:20:47 deadline. Operator returned normally to title; finish marker at14:16:32;
+runner exit0, journal revision19 state RESTORED. Independent check confirms both
+original roots (five files each) and three install/config hashes exactly equal.
+Evidence: independent-restoration-check.json, native-finish-auto2-live.log.
+No game remains running; Steam left Offline. Disposable progress is preserved
+in the transaction test roots, not merged into personal saves.
+
+DSVR-trace-48220-272695343-1.jsonl: 19,515,758 bytes, SHA256
+ff5856750948eac9e120f081b18bf39e9da251c6f0ebb82336d96a9b77eb7fe6.
+78023 events, zero dropped/contended, queue_peak105. 4681 callbacks =270 nonplayer
++3141 self +0 refused +1270 detailed; no detail cutoff. Capture and combat-integrity
+PASS; global VR verdict remains incomplete/UNVERIFIED, not a truncated capture.
+Operator: two swings missed enemy but HIT WALLS; block; two successful parries
+each followed by a separate ordinary non-riposte attack; then kill. Seq442/513
+are stable player->enemy type64/Atk4800450/shield1452000 with status[0,0]->[1,1],
+no HP/stamina change. Following ordinary Atk2301000/weapon202000 contacts at460/514
+reduce enemy HP69->12->0. Incoming contacts319/320/321 keep player HP659 while
+stamina changes -24/-8/-8. These are correlated mixed-sequence observations,
+not independently timed clean cases or proof that status bytes exclusively mean
+parry. NPC contact554 has HP1->0 and statuses[0,0]->[0,1].
+
+Operator also tried two locked doors, killed NPC, picked up its item and opened a
+keyed door, reporting expected behavior without noticeable FPS damage for those
+actions. One natural ObjAct callback at QPC2731792790240, thread43532, selected
+index27, actor handle268713984, object handle553648238, state0->3, return1,
+raw validDist60, flags15. This correlates with the sequence; it does not cover
+locked-door refusal, pickup ownership or physical reach/LOS for all classes.
+
+Performance remains FAIL/unresolved: operator still felt the hitch, including on
+a jump. Detailed read/assembly ELAPSED wall time median2.4618ms,p99 6.1289,max9.6132;
+native median.0042ms,p99.0866,max.2283. Smaller query budget did NOT solve it.
+Do not call QPC intervals pure CPU work: descheduling remains possible. Most
+rejected actor reads are unqualified types (1142), with11 stat-range failures.
+Raw Step samples are tiny dispatch calls, not full-frame/simulation timing.
+Next discriminating probe is CPU stacks or a labelled guarded-read-disabled
+comparison, not another speculative cache across native callbacks.
+
+Current exact-build checks all exit0:
+cmake --build build --config Debug --parallel4; configured full CTest100/100
+(build/native-finish-auto2-debug-{build,tests}.log); matching Release100/100
+(native-finish-auto2-release-*); LAB Release98/98(native-finish-auto2-lab-*).
+ctest -N owns these current counts. New 228-entry source manifest equal before/
+after those builds. Runner SelfTest PASS(native-finish-settle-selftest.log).
+pwsh -NoProfile -File tools/auto_verify.ps1 exit0, Release100/100 and doctorPASS,
+refreshes DEVELOPMENT latest ZIP only(native-finish-auto-verify.log).
+No formal release, upload or native physical-combat acceptance. B/C/H remain OPEN:
+production physical_damage_bound/shield_contact_bound still false, native context
+owner/generation/simulation phase and qualified target/geometry/LOS unresolved.
+Continue from correlated status setters and verified creation wrappers, with the
+saved exact raw traces available; do not repeat manual F9 captures.

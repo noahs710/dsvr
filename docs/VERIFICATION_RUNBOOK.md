@@ -26,6 +26,8 @@ Evidence folder: `build/verification/<run-id>/` with candidate identity, config,
 | Visibility/attachments | Native head/face/hair/helmet exclusion across supported models/armor/LOD without mesh collapse; rendered arms/equipment remain aligned during walking and grip changes. Unsupported forearm-only mode cannot claim success. |
 | Controller usability | Title, Home, calibration, settings save/restart, recenter, HUD/quick slots, inventory/equipment, dialogue/shop and native progression actions usable without keyboard. No input leak or hidden essential prompt. |
 | Quest capture/release regression | Close Home or finish calibration while holding one grip or navigation stick. Captured channels stay suppressed until their own release, but a newly pressed A and an unrelated fresh stick work on the next input sample. Repeat in theater/front-end and gameplay. In DSVR controls, A confirms focused items even when the ray/tracking snapshot is unavailable; the trigger selects only a valid ray target and never also activates keyboard/gamepad focus. Verify press, held, release, reacquisition and no-physical-gamepad cases. |
+| Quest D-pad modifier | In gameplay, hold left stick-click and tilt up/down/left/right to select native D-pad actions. No locomotion or native L3 during selection; no lunge/jump on modifier release before the stick centres. A centred lone click retains L3 on release. Verify all four directions, diagonal policy, grip tracking loss, menu close, calibration, both-click Home/recenter and left-click + double-A recalibration. Native menus and spatial UI navigate directly without a modifier. Record the active OpenXR profile and any suggested-binding rejection; no fabricated directional Touch paths. |
+| Binding edits preserve input | While A or locomotion is held, save a profile change and request reload, including with legacy binding_live_reattach=true. Current actions remain usable without teardown, dropout or a second attachment. Restart explicitly before expecting new profile suggestions. Repeat with an unchanged profile set and the legacy preference false. |
 | Interaction | Each supported pickup/door/lever/bonfire/chest/NPC/ladder/elevator class passes eligibility, line-of-sight/reach, one activation, release/cancel and load/death/target-reuse cases. Physical manipulation qualified per supported object class. |
 | Ranged/breadth | Native weapon-family support matrix and bow/crossbow/catalyst paths preserve projectile origin/aim, ammo/resources, timing, costs, defenses, swaps and handedness. Representative native encounters per declared family. |
 | Campaign | Distinct area/rendering/traversal/boss/special-action matrix plus longer progression session; rolls, grabs, ripostes, ladders, falling, cutscenes and transitions preserve gameplay with comfortable camera ownership. |
@@ -41,8 +43,10 @@ Preconditions, re-checked every time:
 1. `pwsh -File tools/verify_preflight.ps1` prints `HEADSET RUN: READY TO START THE RUNBOOK`
    and `BLOCKED=0`. A `STALE` line means the installed payload is not the packaged
    build and any headset number from it is worthless.
-2. Installed payload must equal the package: `DSVR.dll` SHA-256 prefix `1ce885b1`,
-   `dinput8.dll` prefix `44f90bd3` for the 26 Oct candidate. To fix a stale install
+2. Installed payload must equal the package: compare the installed
+   `DSVR.dll`/`dinput8.dll` full SHA-256 against
+   `dist/DSVR-latest-verification.json` (`binaries_sha256`) — never trust a
+   hardcoded prefix copied from an old candidate. To fix a stale install
    with the game closed, run `dist\DSVR-latest\DSVR-Setup.exe --install --game "<game folder>" --yes`.
    Do not install from `build\src\setup\Release\DSVR-Setup.exe`: that directory holds
    unrelated 18 October `DSVR.dll`/`dinput8.dll` copies that the build does not refresh,
@@ -155,3 +159,15 @@ At least one tested representative per declared stock melee family is required f
 For each case record: gate/case, candidate hashes, environment, predeclared threshold, procedure, actual result, evidence level/path, verdict, missing coverage, defect/next action and restoration status. Include operator verdict for scale, fusion, latency, clipping, combat predictability and fatigue. CPU matrices, video and synthetic tracking cannot replace headset feel.
 
 The final gate requires all required A–K ledger entries to pass on the packaged candidate. Optional features and declared supported-runtime variants must be identified before qualification. An unresolved core requirement stays open; the agent cannot remove it to declare completion.
+
+### Native response capture extension (26 October source checkpoint)
+
+New native_combat_diagnostics payload version 1 retains raw record +54 and
++168/+169 before/after the SAME natural dispatch. Pair it by existing
+thread/sequence/record identity and keep each independent read-validity bit.
+Require native actor/context/equipment continuity and labelled independent
+HP/stamina/reaction observations before attributing an outcome. A changed
+response byte, type 2/64, an HP delta or a case label alone is NOT a successful
+block/parry/hit. Old captures remain readable with response fields unknown.
+Decoder and writer fixtures are source evidence only; all native encounter
+and interaction acceptance rows above retain their original thresholds.

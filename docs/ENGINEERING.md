@@ -88,6 +88,23 @@ walking manufactures neither action.
 
 Interaction targeting uses tracked reach/aim, distance, line of sight and verified eligibility; per-action adapters invoke native actions. Explicit confirm controls are valid for scripted interactions and UI; gesture-triggered canned melee is not. Native UI may be hidden only when required replacement prompts/menus remain accessible. Do not claim simulation pause unless verified.
 
+OpenXR suggested bindings must use components admitted by each interaction
+profile. Touch has thumbstick axes/click/touch, not `thumb_up/down/left/right`
+paths; names in a separate controller SDK are not OpenXR component names.
+One invalid suggested path rejects the entire profile batch. Action sets become
+immutable on attachment, and OpenXR allows one attachment per session: profile
+edits require a game restart, never tearing down a working set to retry.
+The persisted `binding_live_reattach` preference remains readable but cannot
+opt into a forbidden second attachment.
+
+Gameplay D-pad routing uses left stick-click plus stick direction before
+locomotion orientation. It withholds movement and native L3 during selection,
+requires stick centre after release, and preserves a neutral lone L3 on release
+with a bounded 120 ms hold so slower native polls can observe it.
+Home/recenter and recalibration chords take precedence. Native menus and spatial
+UI retain direct stick navigation. This is a logical input route, not a fabricated
+hardware D-pad action or evidence of native controller acceptance.
+
 ## Lifecycle and tool limits
 
 One owner controls the XR frame lifecycle. Inactive frame work cannot block game loading/Present; preserve exclusive handoff and deferred safe teardown. Acquired images retain ownership through timeout/error until correctly waited/released. Restore only owned native/D3D/file state.

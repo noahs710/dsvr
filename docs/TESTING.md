@@ -39,6 +39,8 @@ Keep build/config/executable hashes, runtime/settings, commands/exit codes, raw 
 
 Run from the repository root. Inspect existing CMake cache/toolchain before configuring. The checked-in verifier selects Visual Studio 18 2026/x64.
 
+Development PowerShell scripts and their CTest entry points require PowerShell 7 (`pwsh`). Windows PowerShell 5.1 is not a supported development runtime. The portable product installer remains compatible with PowerShell 5.1 where it uses PowerShell.
+
 ```powershell
 cmake --build build --config Debug --parallel 4
 ctest --test-dir build -C Debug --output-on-failure

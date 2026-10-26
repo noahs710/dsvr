@@ -75,6 +75,13 @@ After three materially identical failures, record the failure signature and chan
 
 ## 5. Milestone order
 
+26 October release steering: native physical attack/defense and usable native
+interactions are release blockers and current priorities. The interrupted seated
+lift, live-save menu and mono camera-provenance fixes are source checkpoints,
+not a physical-combat or release qualification. Do not publish a playable release
+while B/C/H native gates remain open.
+
+
 24 October current user steering: finish IK and physical combat. Resume the
 existing F2/C2 source-to-body publication boundary alongside B/C native combat
 recovery; unrelated camera/stereo feature work stays paused. This supersedes
@@ -264,23 +271,26 @@ also mutates Win32 cursor state and skips four bodies unless the object has a
 **derived** dispatcher vftable, so a replay hook re-enters window-shaped
 dispatch — the fallback below is now the expected route, not a consolation.
 
-**New next probe (read-only, no game):** the pump is entered only as
-`CALL [dispatcher]` (its two xrefs are the vftable slot and its unwind record at
-`0x141E36D48`), so its thread owner is not one xref away. Constructor
-`0x1411BF380` has exactly three xrefs — the renderer's `UNCONDITIONAL_CALL` at
-`0x1411B498B`, its unwind record at `0x141E36D60`, and a DATA slot at
-`0x141A18B64` holding RVA `0x11BF380` with a `0xFFFFFFFF` sentinel before it and
-RVA `0x11BF3A0` (inside the constructor, not a function entry) after it. Decide
-which section contains `0x141A18B64`: if it is `.CRT`, a second module-scope
-dispatcher exists outside the renderer and its pump owner must be found before
-any per-view claim; otherwise walk the renderer `+0x68` consumers outward to the
-`CALL [dispatcher]` site. The string block at `0x1416029E0` holds
-`HGSystemThread` (pinned, loaded at `0x1411BEF36`), `HG_Worker` and
-`HGCommandDispatcher::Exec` — the last has zero xrefs, so it is a naming hint,
-not an edge. The jump table at `ram:0x14011BF2FC` is not readable through
-`read_memory` in this program view, so the type-index-to-body mapping is still
-unpinned — do not guess it. Every writer, retained resources and live
-main-scene coverage remain unresolved.
+**25 October discriminator result (read-only, no game):** `0x141A18B64` is
+in `.rdata`, not `.CRT`; its `FFFFFFFF` word follows the constructor RVA.
+The renderer installs dispatcher `+68` as the runnable at thread `+18` using
+`140CC5E60` on renderer `+10`, then starts/resumes that object via `140CC5EB0`.
+The shared `_beginthreadex` entry `140CCE280` obtains runnable `+18` and invokes
+virtual slot zero, whose pinned dispatcher target is `1411BF150`. Independent
+609-byte PE/Capstone verification and limitations are in the 25 October
+NATIVE_STEREO_CONTRACT continuation. This names the static runnable edge,
+not a live thread or safe replay seam.
+
+**Next probe (read-only, no game):** recover renderer `+10` concrete thread
+allocation/construction and return/destruction, then the renderer-field
+producers and retain/release behavior of Begin-message payload ownership.
+The poster on this path is now pinned: renderer `1411B49C5` -> dispatcher
+slot `+50` / `1411BE560`, carrying `&renderer+20/+28`; do not mistake those
+addresses for retained values. Preserve the derived-dispatcher,
+worker cancellation/counter, resource-lifetime, main-scene and GPU-readiness
+gates. No function contains `1411B498B` in this listing; use its bounded
+assembly/raw bytes without repairing the database. Never replay a thread
+entry, message pump or outer dispatcher to compensate for missing ownership.
 
 ```text
 mcp__GhidraMCP__get_xrefs_to(address="0x1411BF380")
@@ -487,14 +497,14 @@ Maintain this table here as gates change. Link evidence, candidate identity and 
 
 | Gate | Status at plan creation | Required evidence |
 |---|---|---|
-| A baseline | BLOCKED: Debug 98/98, Release 98/98, verifier/doctor PASS; native runner failed Steam handoff/ownership. Held original roots returned; fresh post-exit AppData inventory matches, Documents differs and newer state was preserved. Diagnostic package deployed only after game closure | repair and qualify process ownership/lifecycle before any new native launch; retain before/test-output/recovery evidence; do not claim full save restoration |
-| B melee contract | BLOCKED: prior hit/miss observations retained; complete contact ABI/ownership/defense/outcome contract remains unqualified. Current GhidraMCP unavailable; REA rejects Windows native authority even with pinned Ghidra/JDK located | reconnect supported read-only pinned DSRFull access; finish type-1/type-64 contact consumers and independent native hit/block/parry correlation; no guessed calls |
-| C physical sword | BLOCKED on B and verified weapon/target geometry; physical_damage_bound remains false. No implementation or native acceptance added in this investigation | native submission owner, actor/context lifetime and thread, actual geometry/obstruction and native costs/results; ten deliberate hits/misses after binding qualification |
-| D stereo | D1b entity/renderer/dispatcher/two-worker edges and known counter retirement recovered statically; the Begin handler's pump edge and worker error paths pinned 25 Oct (`1411BF150` slot `+0x00` -> slot `+0x10`); complete counter/resource ownership unresolved; D2 UNVERIFIED; production absent | stereo evidence note and pinned static receipts; pump thread owner, derived dispatcher vftable, cancellation/indirect counter paths, natural main-scene trace and conditional two-view decision still required; D3-D7 and headset fusion remain open |
-| E locomotion | orientation selection finished 23 Oct: always one live reference (Head default, or selected left/right/non-dominant hand with head fallback on hand loss), settable in DSVR-Setup and the mod menu, offline 88/88 both configs; follow unqualified | native motor attribution, path/collision/latency matrix, plus the rewritten reference-stability headset row |
-| F body/crouch | solver/root guards offline PASS; native distinct-palette transfer BLOCKED; fit/crouch open | qualified source->body transfer, rendered alignment, independent mesh-scale ownership, clearance and hurt geometry |
+| A baseline | Offline source qualification PASS: Debug 101/101, Release 101/101, LAB observer Release 99/99; verifier/doctor PASS and current candidate Check PASS (26 Oct response observer). Native Run BLOCKED: existing runner writes the backup vault and replaces its active verification receipt, contrary to current hard limits; no native transaction executed. | Resolve protected-run hard-limit conflict without changing existing backups/receipts; then operator-driven native observation and ownership qualification. |
+| B melee contract | OPEN: prior hit/miss observations retained; complete contact ABI/ownership/defense/outcome contract remains unqualified. Read-only GhidraMCP access to DSRFull restored; endpoint resource key/range lookup narrowed, unchecked 47-byte transform reader independently pinned (25 Oct autonomous continuation). 14032F548 verdict 26 Oct (see contract): byte-pinned CALL [RAX+0x640] in .text1 split gap, zero xrefs, RAX/ECX producer unrecovered after three cross-region assembly windows (return-address selectors, not producers); instruction candidate only, not a damage classification; +0x73 read and 23/24/25 selection independently byte-verified in the 25 Oct continuation (message meaning/outcome open); type-64 probe 26 Oct: type-2 dispatch mapped (kind0 notify+effect, kind1 forged-return selector, kind2 <0x40 gate excludes 64 from 1402FC360), zero ==0x40 consumers — negative-only discriminator; swing-producer probe 26 Oct: 1403C9B50 2 refs / 1403C7460 3 DATA refs, no swing caller, builder zero code xrefs; record-stride decode 26 Oct: 1417991F0/224 are PE unwind metadata (12B RUNTIME_FUNCTION triads), not dispatch records — no code owner 26 Oct resume corrects the atomic-failure/no-handler misclassification: type-1 accepted path reaches target +0x480 then source +0x460; PlayerIns/EnemyIns +0x480 implementations differ, 336 bytes independently pinned; outcome/lifetime/thread still open (NATIVE_MELEE_CONTRACT). 26 Oct qualification continuation: kind-2 planar dot/Cosf branch and target state writes pinned, not an HP/damage/defense classification. Raw +54/+168/+169 before/after observer payload now covered at the actual detour and strict consumer; native ownership/outcome acceptance remains BLOCKED. | finish resource bounds/sentinel/lifetime and type-1/type-64 contact consumers plus independent native hit/block/parry correlation; no guessed calls |
+| C physical sword | BLOCKED: physical_damage_bound and shield_contact_bound remain false; no production physical hit/defense submission binding, native lifetime/thread/geometry/outcome evidence still absent. The newly tested response observer is not a physical-hit implementation. | native submission owner, actor/context lifetime and thread, actual geometry/obstruction and native costs/results; ten deliberate hits/misses after binding qualification |
+| D stereo | D1b entity/renderer/dispatcher/two-worker edges and known counter retirement recovered statically; the Begin handler's pump edge and worker error paths pinned 25 Oct (`1411BF150` slot `+0x00` -> slot `+0x10`); 26 Oct D-probes: RDI/R14 producers at 1411B46C0 head re-confirmed, renderer+10 store pinned, 140CC5E60/5EB0 bytes+xrefs pinned, outer caller 1411B3FA5 seed found (fresh 0x300 alloc, R14-source = frame RCX, type open); Begin-payload +48/+50 borrow-appearing with no proven retain, derived override set {+0x28,+0x30,+0x40,+0x48}; fourth window: queue/teardown shape (enqueue tail-thunk, retire loop, teardown pump-owned, waiter/type-read open) + bracket scout (1411C2F50 recommended, render-frame rejected); complete counter/resource ownership unresolved; D2 UNVERIFIED; production absent Mono source checkpoint: submit the camera-bound pose/FOV, not the newer runtime prediction. Both-eye center-pose and 13 source-refusal/recovery cases pass in xr_mono_recovery; SteamVR/VDXR headset comparison still unverified; this is not stereo. | stereo evidence note and pinned static receipts; outer RCX typing, queue free-path/waker identity, derived table address/targets, type-index mapping, natural main-scene trace and conditional two-view decision still required; D3-D7 and headset fusion remain open |
+| E locomotion | orientation selection finished 23 Oct: always one live reference (Head default, or selected left/right/non-dominant hand with head fallback on hand loss), settable in DSVR-Setup and the mod menu, offline 88/88 both configs; follow unqualified. E-motor map 26 Oct: roomscale chain file-mapped (basis publish camhook/camera 584-649, sampler input 608-670, axes pad_math 141-159, follow camera 354-377) but attribution open — XInput consumer, motor/collision resolver, authoritative root, forced-motion source all UNKNOWN; follow clamp is heuristic, not proof; docs-only owner table proposed. E2 probe 26 Oct: 6 XInputGetState call sites classified, 2 per-frame candidates (140e27aa0/140e28430, no-deadzone normalized floats); follow-up: consumers unpinned (pattern search timed out bridge-side), slots decoded (self-RVA pairs + full-VA poller slots, not vftables), sibling walk negative (trigger/event only), byte-pattern retry: axis getters pinned idx5/7, scaling consumer behind zero-xref computed dispatch, candidate #3 cadence unproven; mapper/motor still open; next is table-VA immediate search / outer-RCX typing | native motor attribution, path/collision/latency matrix, plus the rewritten reference-stability headset row |
+| F body/crouch | solver/root guards offline PASS; 25 Oct committed-pose read gap fixed: calibration revision stamped, both public readers invalidate on tracking/mode/capture transitions and require a fresh natural copy (38 adapter cases); native distinct-palette transfer/armor/headset qualification still OPEN; fit/crouch open Seated mode retained with adjustable 0–1 m lift (0.5 m default), independent of anatomical reach/world fit; config/mapping regressions pass. Native body/armor/crouch acceptance remains open. | qualified source->body transfer, rendered alignment, independent mesh-scale ownership, clearance and hurt geometry |
 | G encounter | not accepted; G5 comfort mask implemented in mono with offline rendering checks | physical offense/defense, haptics, movement, native stereo composition and headset comfort |
-| H interactions/UI | SOURCE FIXED, native UNVERIFIED: captured controls now rearm independently; raw A confirms without a rendered ray snapshot; triggers stay ray-only. Actual input/WARP regressions failed before fixes and pass afterward. Full Debug 98/98, Release 98/98, verifier/doctor PASS; DLL a92b2a74...8df3c1 deployed. Earlier native FAIL remains recorded | tests/test_input.cpp, tests/test_mod_menu.cpp, tests/test_xinput_iat.cpp; repeat native controller-only matrix through a qualified process/save transaction; no H checkbox closed |
+| H interactions/UI | SOURCE FIXED, native UNVERIFIED: invalid Touch thumb-direction suggestions removed; click+left-stick D-pad with neutral rearm and bounded L3; profile edits defer to restart without destroying live actions. Reach path now refuses untargeted gestures (eligibility gate added 26 Oct, fails closed until H1 prompt/LOS owner exists). Restart-pending footer indicator added 26 Oct (applied-vs-attached comparison, WARP asserts present/absent). Strict runtime regressions reproduced both failures; focused input/pad_math/weapon_weight/reach_intent/interaction_target 5/5 PASS; full Debug 101/101, Release 101/101, runner SelfTest both engines PASS (26 Oct logs). Earlier capture/raw-A fixes retained; earlier native FAIL not superseded 26 Oct source checkpoint: menu edits apply immediately and auto-save through the background writer; live visibility requests no longer call a game-memory refresh from the menu. Installed ObjActParam rows now pin heterogeneous 60/90/110 raw lever/door ranges, not default 150; selected-row/prompt/LOS ownership still unbound (NATIVE_INTERACTION_CONTRACT). Qualification still BLOCKED: UTF-16 ObjActParam registration found, not a selected-object/prompt/LOS owner. Physical reach continues refusing unknown targets. No live interaction class accepted. | tests/test_input.cpp, tests/test_pad_math.cpp, tests/test_mod_menu.cpp, tests/test_xinput_iat.cpp, tests/test_interaction_target.cpp; repeat native controller-only matrix under TESTING with a qualified process/save transaction; no H checkbox closed |
 | I breadth/ranged | unqualified | equipment/action family matrix in native encounters |
 | J campaign | unqualified | traversal/boss/special-action and longer-session matrix |
 | K release | not qualified | exact final package, 90 Hz, recovery/install and all required gates |
