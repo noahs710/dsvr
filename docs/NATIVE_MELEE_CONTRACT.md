@@ -1082,6 +1082,35 @@ write or speculative binding was added. Coalescing the pair, handle and status
 reads makes room for the after-kind read; failed extended reads fall back to the
 established pair/context reads instead of erasing otherwise valid observations.
 
+### 26 October follow-up: +0x490 guard semantics, tail flag write
+
+Same read-only session, two bulk calls, no invocation:
+
+- `FUN_14284f926` (the `+0x490` slot body, 14 instructions):
+  `CMP dword ptr [R8+0x160],0x1d` then `CMOVNZ` selects the return
+  address: `0x1D` continues into `1403589A1` (the `+0x480` forward at
+  `14031D91F: CALL [R10+0x490]`-adjacent chain), anything else diverts
+  to `1403589C0` (head: `JMP 142FFAE49`). So the guard is exact —
+  record-field `+0x160 == 0x1D` admits the PlayerIns `+0x480`
+  continuation, all other values take a separate `9C0` continuation.
+  Neither continuation's gameplay meaning is classified; this is still
+  not a damage submission binding.
+- `1403589C0` head is `JMP 142FFAE49` (5 bytes), i.e. a split entry,
+  not inline code — further recovery deferred to a later bulk probe.
+- `FUN_142ed722a` (tail callee, 36 bytes decompiled): sets bit 12
+  (`| 0x1000`) on `*([*([RDI+0x68])+0x48]+0x1DC)`. If byte
+  `[RBX+0xB4] == 0` calls `FUN_140316af2`, else
+  `thunk_FUN_1402110f8`. `140316af2` is only `TEST R14B,R14B`
+  branching `JZ -> 14031d98f` vs `JMP 142d50195`.
+- `FUN_142134a3b` is register-save prologue (`RBX`/`RBP`/`RSI`
+  spills) then `JMP 142D805F9`; `142D805F9` spills RDI/R14, moves
+  R9->RBP, RDX->RDI, RCX->R14, NULL-checks RDX (`JZ -> 140488694`)
+  else `JMP 1404F5AB2`. Register roles at those two targets remain
+  open — no semantics assigned.
+- Still open: `DAT_141C7B1B0 == 0` tail-selection condition,
+  `+150/+148` predicates, HP/stamina attribution, and the `9C0`/other
+  continuations. B/C/H gates unchanged.
+
 ### 26 October bulk probe: +0x490 slot target named, 14031D958 tail placed
 
 Single bulk `get_functions` call (no repeats), read-only, no invocation:

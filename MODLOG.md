@@ -1,5 +1,15 @@
 # DSVR current handoff
 
+### 26 Oct follow-up: +0x490 guard exact, tail flag write pinned
+
+14284f926 = CMP [R8+0x160],0x1d / CMOVNZ: 0x1D continues to +0x480
+forward (1403589A1), else diverts to split entry 1403589C0
+(JMP 142FFAE49 — deferred). Tail 142ed722a sets bit12 |0x1000 on module
+field +0x1DC, branches on [RBX+0xB4] to 140316af2 vs thunk_1402110f8.
+142134a3b = reg-save prologue into 142d805f9 (R9->RBP,RDX->RDI,RCX->R14,
+NULL-check to 140488694 else 1404F5AB2; roles open). Full note in
+docs/NATIVE_MELEE_CONTRACT.md. B/C/H unchanged. No invocation; DB unsaved.
+
 ### 26 Oct bulk probe: +0x490 slot target named, 14031D958 tail placed
 
 Single bulk get_functions call (3 targets), read-only, no native calls.
