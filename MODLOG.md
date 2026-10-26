@@ -1,5 +1,17 @@
 # DSVR current handoff
 
+### 26 Oct kind-writer probe: creation chain placed, kind assignment one hop out
+
+Creation chain recovered (3 bulk calls, read-only): 140490F40 resolves
+two actor refs then 1403C9B50 -> 1403C93B0 builds payload locals ->
+140528CE0 AtkParam lookup -> 1405290C0 payload builder -> 140529670
+writes the event. 1403C6030 builds geometry only (never writes +0x54);
+140327AD0 is an eligibility gate. Exact +0x54 store sits in unrecovered
+1405290C0 past head / 140529670 / 142AC2A92 shim (one hop). 140490F40
+has zero indexed callers — attack-submission entry unknown; kind-2
+must be elicited via the submission entry, not play pattern. Full note
+in docs/NATIVE_MELEE_CONTRACT.md. No invocation; DB unsaved. B/C/H open.
+
 ### 26 Oct native capture: first labelled session, kind-0 only, B/C/H stay open
 
 Operator session under receipted transaction (run.json rev 19, Restored,

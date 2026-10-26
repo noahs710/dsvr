@@ -1184,3 +1184,40 @@ limbs/bytes/versions, optional-field read failure with actor/context preservatio
 exactly-once natural dispatch, unchanged capture generation and whole-batch drops.
 Synthetic seam success is not native attack/defense qualification. Full Debug,
 Release and observer results are recorded in the current MODLOG entry.
+
+### 26 Oct kind-writer probe: creation chain placed, kind assignment one hop out
+
+Three bulk get_functions calls plus one bulk disassembly, read-only, no
+invocation. The kind field (+0x54) is written at record *creation*, not
+in the contact/dispatch chain:
+
+- 1403C6030 builds only geometry (sqrtps/divps normalizations into
+  +0x130..+0x18c); nothing in it writes +0x54. The contact builder
+  consumes kind, never assigns it.
+- 140327AD0 is an eligibility gate (target-state/module-flag checks,
+  returns 1/0), called from 14042099B (stub: gate then
+  thunk_142e303c7), itself called from 14068BDCF. Gate, not writer.
+- Creation path: 140490F40 (top: resolves two actor refs via
+  140371200/140371360/140371bd0 against DAT_141c77e50, then 1403C9B50)
+  -> 1403C93B0 (builds attack-payload locals, calls 140528CE0) ->
+  140528CE0 (AtkParam lookup via 140528910, then 1405290C0 payload
+  builder if local_10 != 0) -> 140529670 writes the event. 1403C9B50
+  also validates the 0x230-slot pool and calls 1403C6DA0/1403C5C90
+  on failure.
+- The exact +0x54 store is inside the unrecovered split bodies
+  1405290C0 (head: standard prologue, AtkParam row fetch via
+  [RAX+0x28], then 140528A30/140528910 lookups), 140529670, or
+  142AC2A92 (8-instruction split-jump shim). One hop remains.
+- 140490F40 has zero indexed callers -- the native attack-submission
+  entry (who calls it: weapon swing dispatch vs spell vs trap) is
+  unrecovered. 1403C93B0 has two more indexed callers (1404D0BB0,
+  1404D0F20) whose contexts are unclassified.
+- Why the session saw kind-0 only: the captured records came through
+  the trap/block/parry-riposte exchanges, and the kind selector sits
+  below the still-unrecovered submission entries -- no defect in the
+  observer (mask 15 genuine). Deliberately eliciting kind-2 requires
+  the submission entry, not a different play pattern.
+
+Next: one bulk probe on 1404D0BB0/1404D0F20/14068BDCF contexts plus
+the 1405290C0 body past the 35-instruction head. No HP/stamina
+attribution or submission binding claimed; B/C/H stay open.
