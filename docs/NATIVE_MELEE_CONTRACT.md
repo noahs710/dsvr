@@ -1257,6 +1257,24 @@ Two bulk calls, read-only, no invocation. The +0x54 store is closed:
   attribution and live elicitation of kind-2 remain. B/C/H stay open
   pending a targeted capture against a kind-2 PARAM attack.
 
+### 26 Oct +150/+148 predicates resolved: flag-bit tests, not deep logic
+
+One bulk call, read-only. The source-side dispatch predicates:
+
+- `1402FCD10(record)`: if `record+0x45 & 2` return 1 (forced-true);
+  else `1402F9270(record+0x10)`.
+- `1402F9270(sub)`: if `sub+0x10 == 0` return 1 (null-linked =
+  pass-through); else return `byte[link+9] >> 5 & 1` (bit 5 test).
+- So the +0x460 notification fires unless explicitly vetoed: veto =
+  +0x45 bit clear AND linked bit-5 clear. Both default to 1 when
+  their structures are absent. The capture's all-pass behavior
+  (6,320/6,320 dispatched, R9B derived from AL==0) is consistent:
+  nothing vetoed because neither veto bit was set on kind-0 records.
+- Whether kind-2 records set these veto bits (i.e. whether the guard
+  path suppresses the +0x460 notification) is unknown without a
+  kind-2 capture. Static item (c) closed; the question moves to live
+  elicitation with the kind-2 PARAM attack.
+
 ### 26 Oct submission-entry probe: bounded negative, chain declared complete
 
 One bulk call, read-only. 140371200/140371360/140371BD0 (the actor

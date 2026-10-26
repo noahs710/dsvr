@@ -1,5 +1,12 @@
 # DSVR current handoff
 
+### 26 Oct +150/+148 resolved: veto-bit tests, default-pass
+
+1402FCD10 = +0x45 bit-2 forced-true else 1402F9270 = null-link pass
+else linked bit-5. +0x460 fires unless vetoed; capture's all-pass
+consistent. Kind-2 veto behavior needs live elicitation. Full note in
+docs/NATIVE_MELEE_CONTRACT.md. Inner loop green.
+
 ### 26 Oct post-analysis: block isolated, side-ordering corrected
 
 Side 0/1 = per-contact role order; persistent pair swaps sides; (0,0)
