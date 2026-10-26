@@ -86,6 +86,7 @@ bool g_dirty = false;      // controls differ from what is on disk
 bool g_suppress = false;   // a programmatic control update is in flight
 std::wstring g_read_notes;  // fields ReadControls could not apply
 HWND g_brief = nullptr, g_launch = nullptr, g_heading = nullptr;
+HWND g_install = nullptr;
 dsvr::Config g_disk_config{};
 bool g_path_resolved = false;
 std::wstring g_verified_exe;
@@ -232,6 +233,8 @@ void UpdateBrief() {
       L". Separate from motion attacks; manual combat remains available.";
   SetWindowTextW(g_brief, (state + L"\r\n" + switches + L"\r\n" + native).c_str());
   EnableWindow(g_launch, g_path_resolved && !st.partial());
+  const bool verified = g_path_resolved && g_verified_exe == g_exe && g_verified_ok;
+  if (g_install) EnableWindow(g_install, verified);
 }
 
 void PopulateControls(const dsvr::Config& c) {
@@ -780,7 +783,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       g_brief = Add(hwnd, L"STATIC", L"", SS_LEFT, 28, 160, 784, 68, kHintBase + g_hint_id++, 28);
       Add(hwnd, L"BUTTON", L"Verify build", BS_PUSHBUTTON, 28, 234, 108, 28, CTL_VERIFY);
       Add(hwnd, L"BUTTON", L"Doctor", BS_PUSHBUTTON, 144, 234, 84, 28, CTL_DOCTOR);
-      Add(hwnd, L"BUTTON", L"Install DSVR", BS_PUSHBUTTON, 236, 234, 120, 28, CTL_INSTALL);
+      g_install = Add(hwnd, L"BUTTON", L"Install DSVR", BS_PUSHBUTTON, 236, 234, 120, 28, CTL_INSTALL);
       Add(hwnd, L"BUTTON", L"Uninstall", BS_PUSHBUTTON, 364, 234, 100, 28, CTL_UNINSTALL);
       Add(hwnd, L"BUTTON", L"Open folder", BS_PUSHBUTTON, 472, 234, 110, 28, CTL_OPEN_FOLDER);
       g_del_cfg = Add(hwnd, L"BUTTON", L"Remove settings on uninstall", BS_AUTOCHECKBOX,
@@ -889,6 +892,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
       } else if (id == CTL_INSTALL) {
         if (RefreshGame(false)) {
+          if (!(g_verified_exe == g_exe && g_verified_ok)) {
+            GuiLog(L"Verify the build before installing -- Install is disabled until Verify passes.");
+            UpdateBrief();
+            return 0;
+          }
           setup::InstallOptions opts;
           opts.enable_vr_after = Checked(g_vr);
           if (!SaveSettings(true)) return 0;
@@ -1017,6 +1025,7 @@ int RunGui() {
   RecreateFonts();
   g_backdrop_brush = CreateSolidBrush(kBackdrop);
   g_field_brush = CreateSolidBrush(kField);
+  g_install = nullptr;
   WNDCLASSW wc{};
   wc.lpfnWndProc = WndProc;
   wc.hInstance = GetModuleHandleW(nullptr);

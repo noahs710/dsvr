@@ -1,3 +1,4 @@
+#requires -Version 7.0
 # DSVR offline auto-verify: configure + build + test + doctor + latest package.
 # Safe: never installs, never launches the game, never touches the game folder.
 # On a fully green run this always refreshes dist\DSVR-latest for testing.

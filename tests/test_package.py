@@ -149,6 +149,34 @@ class Package(unittest.TestCase):
                          before)
         self.assertTrue((self.out / 'DSVR-latest-x64.zip').is_file())
 
+    def test_latest_mid_refresh_failure_keeps_old_zip_and_verification(self):
+        # A lock/kill mid-loop may leave the live stage mixed (new+old files),
+        # but the zip + verification.json must stay on the old build: they are
+        # the only shippable identity until a refresh fully succeeds.
+        log = self.root / 'ctest.log'
+        log.write_bytes('100% tests passed out of 7\n'.encode('utf-16'))
+        self.assertEqual(self.run_latest('--ctest-log', str(log),
+                                         '--doctor', 'pass').returncode, 0)
+        old_zip = (self.out / 'DSVR-latest-x64.zip').read_bytes()
+        old_verification = (self.out / 'DSVR-latest-verification.json') \
+            .read_bytes()
+        # Change a payload file so the refresh has something new to copy,
+        # then lock one live destination so a mid-loop copy raises.
+        (self.build / 'src/core/Release/DSVR.dll') \
+            .write_bytes(b'test-only-placeholder-v2')
+        locked = (self.out / 'DSVR-latest' / 'DSVR.dll')
+        with open(locked, 'r+b') as guard:
+            if hasattr(__import__('msvcrt'), 'locking'):
+                import msvcrt
+                msvcrt.locking(guard.fileno(), msvcrt.LK_NBLCK, 1)
+            result = self.run_latest('--ctest-log', str(log),
+                                     '--doctor', 'pass')
+            self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((self.out / 'DSVR-latest-x64.zip').read_bytes(),
+                         old_zip)
+        self.assertEqual((self.out / 'DSVR-latest-verification.json')
+                         .read_bytes(), old_verification)
+
 
 if __name__ == '__main__':
     unittest.main()

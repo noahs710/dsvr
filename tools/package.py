@@ -141,8 +141,11 @@ def main() -> int:
     # Latest mode: the only overwritable identity. Build in a temp stage,
     # then refresh the live folder file-by-file: renaming the folder fails
     # whenever a user has it open (Explorer), while per-file replacement
-    # succeeds. The zip is replaced last and verification.json written
-    # after, so a failed refresh never claims the new build.
+    # succeeds. This refresh is intentionally NOT atomic: a kill or lock
+    # mid-loop (attempts below) may leave the live stage mixed (new+old
+    # files). The zip is replaced last and verification.json written after,
+    # so a failed refresh never claims the new build — the old zip and
+    # verification stay the only shippable identity until the next success.
     stage = out / "DSVR-latest"
     zip_path = out / "DSVR-latest-x64.zip"
     tmp = out / ".DSVR-latest.tmp"

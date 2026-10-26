@@ -549,12 +549,14 @@ int DoInstall(const std::wstring& exe, const InstallOptions& opts,
       }
       std::wstring chain_dest = JoinPath(game_dir, L"dinput8-chain.dll");
       if (PathExists(chain_dest)) {
-        log(L"FAIL: dinput8-chain.dll already exists. Resolve the conflict "
-            L"by hand, then run Install again. Nothing was changed.");
+        log(L"FAIL: " + chain_dest +
+            L" already exists. Resolve the conflict by hand, then run "
+            L"Install again. Nothing was changed.");
         return 1;
       }
       if (!MoveFileW(dest_loader.c_str(), chain_dest.c_str())) {
-        log(L"FAIL: could not move the other proxy. Nothing was changed.");
+        log(L"FAIL: could not move " + dest_loader + L" to " + chain_dest +
+            L". Nothing was changed.");
         return 1;
       }
       chain_name = "dinput8-chain.dll";

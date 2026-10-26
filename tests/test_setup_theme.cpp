@@ -25,6 +25,10 @@ namespace {
 dsvr::Config fixture{};
 setup::InstallState install_state{true, true};
 int saves = 0;
+bool verify_fail_next = false;
+int installs = 0;
+bool chain_conflict_next = false;
+bool chain_move_fail_next = false;
 const std::wstring fake_exe = L"C:\\DSVR-Theme-Test\\DarkSoulsRemastered.exe";
 }
 namespace dsvr {
@@ -42,10 +46,35 @@ std::wstring JoinPath(const std::wstring& dir, const std::wstring& file) { retur
 std::wstring DirNameOf(const std::wstring& path) { return path.substr(0, path.find_last_of(L"\\/")); }
 std::wstring FindGameExe(const std::wstring& value) { return value == L"invalid" ? L"" : fake_exe; }
 bool IsGameRunning() { return false; }
-bool VerifyExe(const std::wstring&, const LogFn&) { return true; }
+bool VerifyExe(const std::wstring&, const LogFn&) {
+  if (verify_fail_next) { verify_fail_next = false; return false; }
+  return true;
+}
 InstallState InstallStateOf(const std::wstring&) { return install_state; }
 std::vector<std::wstring> DoctorChecks(const std::wstring&, const LogFn&) { return {}; }
-int DoInstall(const std::wstring&, const InstallOptions&, const LogFn&, const ConfirmFn&) { return 0; }
+int DoInstall(const std::wstring& exe, const InstallOptions&, const LogFn& log, const ConfirmFn&) {
+  ++installs;
+  // Stubbed chain-conflict branch mirrors src/setup/setup.cpp's DoInstall
+  // foreign-proxy path (GREEN: both log the full colliding path).
+  const std::wstring dir = exe.substr(0, exe.find_last_of(L"\\/"));
+  if (chain_conflict_next) {
+    chain_conflict_next = false;
+    const std::wstring chain_dest = dir + L"\\dinput8-chain.dll";
+    log(L"FAIL: " + chain_dest +
+        L" already exists. Resolve the conflict by hand, then run "
+        L"Install again. Nothing was changed.");
+    return 1;
+  }
+  if (chain_move_fail_next) {
+    chain_move_fail_next = false;
+    const std::wstring dest_loader = dir + L"\\dinput8.dll";
+    const std::wstring chain_dest = dir + L"\\dinput8-chain.dll";
+    log(L"FAIL: could not move " + dest_loader + L" to " + chain_dest +
+        L". Nothing was changed.");
+    return 1;
+  }
+  return 0;
+}
 int DoUninstall(const std::wstring&, bool, bool, const LogFn&, const ConfirmFn&) { return 0; }
 }
 
@@ -105,6 +134,32 @@ int main(int argc, char** argv) {
   CHECK(GetText(g_brief).find(L"Partial install") != std::wstring::npos);
   install_state.has_core = true; UpdateBrief();
   CHECK(IsWindowEnabled(g_launch));
+  // Install gate: a failed Verify must disable Install and refuse install.
+  verify_fail_next = true;
+  SendMessageW(g_main, WM_COMMAND, MAKEWPARAM(CTL_VERIFY, BN_CLICKED), 0);
+  HWND install_btn = GetDlgItem(g_main, CTL_INSTALL);
+  CHECK(install_btn && !IsWindowEnabled(install_btn));
+  SendMessageW(g_main, WM_COMMAND, MAKEWPARAM(CTL_INSTALL, BN_CLICKED), 0);
+  CHECK(installs == 0);
+  SendMessageW(g_main, WM_COMMAND, MAKEWPARAM(CTL_VERIFY, BN_CLICKED), 0);
+  CHECK(IsWindowEnabled(install_btn));
+  SendMessageW(g_main, WM_COMMAND, MAKEWPARAM(CTL_INSTALL, BN_CLICKED), 0);
+  CHECK(installs == 1);
+  // Chain-conflict FAILs must name the full colliding path (RED: fails until
+  // the production messages carry the game-dir + exact filename).
+  chain_conflict_next = true;
+  const int conflict_base = installs;
+  SetText(g_log, L"");
+  SendMessageW(g_main, WM_COMMAND, MAKEWPARAM(CTL_INSTALL, BN_CLICKED), 0);
+  CHECK(installs == conflict_base + 1);
+  CHECK(GetText(g_log).find(L"dinput8-chain.dll") != std::wstring::npos);
+  CHECK(GetText(g_log).find(L"C:\\DSVR-Theme-Test\\dinput8-chain.dll") != std::wstring::npos);
+  chain_move_fail_next = true;
+  SetText(g_log, L"");
+  SendMessageW(g_main, WM_COMMAND, MAKEWPARAM(CTL_INSTALL, BN_CLICKED), 0);
+  CHECK(GetText(g_log).find(L"dinput8.dll") != std::wstring::npos);
+  CHECK(GetText(g_log).find(L"C:\\DSVR-Theme-Test\\dinput8.dll") != std::wstring::npos);
+  CHECK(GetText(g_log).find(L"C:\\DSVR-Theme-Test\\dinput8-chain.dll") != std::wstring::npos);
   // DPI refresh replaces fonts only after controls have released the old ones.
   RECT scaled{40, 40, 1340, 1240};
   SendMessageW(g_main, WM_DPICHANGED, MAKELONG(144, 144), (LPARAM)&scaled);

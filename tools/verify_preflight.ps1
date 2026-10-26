@@ -1,3 +1,4 @@
+#requires -Version 7.0
 # DSVR verification preflight: read-only readiness gate for a headset run.
 # Never installs, launches, focuses or kills anything. Writes only an
 # optional evidence text file under build\verification.
@@ -10,7 +11,7 @@ $ErrorActionPreference = "Continue"
 $root = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
 Set-Location $root
 $script:ok = 0; $script:warn = 0; $script:blocked = 0
-$script:lines = New-Object System.Collections.Generic.List[string]
+$script:lines = [System.Collections.Generic.List[string]]::new()
 function Say([string]$status, [string]$text) {
   if ($status -eq "OK") { $script:ok++ }
   elseif ($status -eq "WARN") { $script:warn++ }
