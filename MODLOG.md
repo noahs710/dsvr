@@ -1,5 +1,14 @@
 # DSVR current handoff
 
+### 26 Oct proximity shape: yaw-frame 2D distance, gate conservative
+
+Eligibility-accepted path walked to a planar sqrt distance
+(142F9D1FC): native tests yaw-projected 2D distance via world
+registry; our 3D hand-distance gate accepts a subset (conservative --
+cannot over-admit on distance). Threshold/LOS still open. Full chain
+in docs/NATIVE_INTERACTION_CONTRACT.md. No invocation; DB unsaved.
+Inner loop green.
+
 ### 26 Oct kind-0 creation story closed end to end
 
 195 paired (b0=12) records, all flags 0 / kind 0 (actor-unreadable

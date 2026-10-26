@@ -95,6 +95,34 @@ both continuations with cheap disassemble_bytes instead:
 - No distance formula, prompt text or dummy position in either head.
   H1 static work stops at the same boundary: named entries, open bodies.
 
+### 26 Oct proximity shape recovered: yaw-frame 2D distance, not 3D reach
+
+Six bulk calls, read-only. Eligibility-accepted continuation walked end
+to end (entry per hop, bodies at the leaves):
+
+- `14238E1C6` -> `14030D4A0` (stub: `140321B70` position read, then
+  `140EF6C54`) -> `14030D4AD` (stub: `140321F80` full-transform copy,
+  then `142ED2141`) -> `142ED2141` (wrapper: `14030D4D2(buf, 0x40490FDB)`
+  -- 0x40490FDB is float pi) -> `14030D4D2` (stub: `140195010` basis
+  build, then `1428030FA`) -> `140195010` (worker, 22 callers: builds
+  orthonormal yaw frame from the angle via `1401951E0`; X/Z from
+  sin/cos pair, Y=(0,1,0)) -> `1428030FA` (wrapper:
+  `142C0E4EB(world, [row+0x1c], 0)`) -> `142C0E4EB` (wrapper: squares
+  two components, calls `142F9D1FC`) -> `142F9D1FC` (7 instructions:
+  SHUFPS horizontal add, SQRTPS, CMPNEQPS NaN guard vs zero at
+  141608F90, JMP 142D9E6E9) -- a planar 2D distance.
+- So the native proximity test projects onto the yaw frame and measures
+  2D distance, gated by the row's +0x1c field through the world
+  registry 141C75DD8. Our fail-closed gate uses 3D hand-to-target
+  distance against validDist -- conservative relative to native (2D <=
+  3D always, so native accepts a superset of what we accept; refusing
+  by default cannot admit what native would reject on distance --
+  orientation/LOS terms still unrecovered).
+- `140321B70` (201 callers) and `140321F80` (33 callers) are shared
+  position/transform primitives, also used by the melee range
+  geometry. `142D9E6E9` (distance consumer) unrecovered -- one hop.
+  No distance threshold value, prompt text, or LOS term claimed.
+
 ## Installed ObjActParam rows, 26 October 2026
 
 Read-only installed `param/GameParam/GameParam.parambnd.dcx`: 498,505 bytes,
