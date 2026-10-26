@@ -1,5 +1,12 @@
 # DSVR current handoff
 
+### 26 Oct post-analysis: block isolated, side-ordering corrected
+
+Side 0/1 = per-contact role order; persistent pair swaps sides; (0,0)
+= post-kill record. ONE stamina-only event (T+231.8s, 91->83, HP
+static) = blocked strike; trap bypasses guarded path. Block-vs-hit
+observed; kind stayed 0, +0x490 never fired. Inner loop green.
+
 ### 26 Oct Codex efficiency work landed (4 verified slices)
 
 Audited + verified + committed in-flight work: shared test-support libs
@@ -121,6 +128,15 @@ quintuplets, 3 interaction activations, 8 self-excluded.
 - HP deltas coincide with your labels but attribution is NOT claimed:
   deltas alone don't identify the attack context or the `+0x480`
   dispatch owner. B/C/H remain open.
+- Post-analysis corrections (re-mined retained capture, no new game):
+  side 0/1 is per-contact ROLE order, not fixed actor -- the persistent
+  pair (16384,4100)/(9,4100) swaps sides; (0,0) at T+246.9s is the
+  post-kill record, not a new actor; record objects are per-event.
+  Exactly ONE stamina-only event in 6,320 contacts: T+231.8s side1
+  STAM 91->83, HP static 481, flags 15 = your blocked strike. Trap
+  damage (flags 10, no stamina change) bypasses the guarded path.
+  Block-vs-hit is an observed distinction; kind stayed 0 throughout,
+  +0x490 never fired even for the parry/riposte.
 
 Runner fix committed in this slice: `run_combat_capture.ps1:411`
 `$r.unclosed_traces=` threw on PSCustomObject restore shape (before
