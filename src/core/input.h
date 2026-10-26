@@ -117,11 +117,17 @@ bool InputLatestPad(VirtualPadState& out);
 float InputTakeTurnYaw();
 void InputApplyHaptic(bool left, float amplitude, int duration_ms);
 
-// Ask the input thread to rebuild its action set from the currently applied
-// config. Only honoured while binding_live_reattach is on. The thread already
-// rebuilds on its own when the applied profile set changes, so this is the
-// manual retry path (after a refused attach, or an edited DSVR.toml), not a
-// per-edit requirement. Costs one invalidated frame: nothing held stays down.
+// Request a restart notice for edited profile bindings. OpenXR action sets are
+// immutable after the one permitted session attachment; keep current input live
+// and apply saved profile changes on the next game launch.
 void InputRequestBindingReload();
+
+// The profile set the live action set was built with (what the session runs).
+// The menu footer compares the applied config against this to show a restart
+// notice only after a restart-gated binding change actually lands.
+struct InputBindingSignature {
+  bool quest3 = true, index = true, wmr = true, simple = true;
+};
+InputBindingSignature InputLiveBindingSignature();
 
 }  // namespace dsvr

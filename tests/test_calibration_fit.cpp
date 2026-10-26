@@ -28,7 +28,7 @@ int main() {
     CHECK(stature.valid && near(stature.eye_height/ stature.world_scale,height+kCalibrationHeightOffsetM));
     CHECK(near(stature.world_scale,fit.world_scale)); // height is not arm reach
     const auto seated=ResolveCalibrationMapping(p,1.65f,true,1.f,.54f,3);
-    CHECK(seated.valid && near(seated.eye_height,(height+kCalibrationHeightOffsetM)*.9f));
+    CHECK(seated.valid && near(seated.eye_height,(height+kCalibrationHeightOffsetM+.5f)*.9f));
   }
   p.eye_height_m=1.65f;
   const auto trim=ResolveCalibrationMapping(p,1.65f,false,1.5f,.54f,3);
@@ -80,7 +80,13 @@ int main() {
   CHECK(seated_head.fit==CalibrationFit::Arm && near(seated_head.world_scale,1.f));
   p.eye_height_m=1.1f;
   const auto sitting=ResolveCalibrationMapping(p,1.65f,true,1.f,.72f,4,head_native,shoulders_native);
-  CHECK(near(sitting.world_scale,1.f) && near(sitting.eye_height,1.1f+kCalibrationHeightOffsetM));
+  CHECK(sitting.eye_height/sitting.world_scale>=1.65f); // seated capture must not leave the standing avatar at chair height
+  CHECK(near(sitting.world_scale,1.f) && near(sitting.eye_height,1.1f+kCalibrationHeightOffsetM+.5f));
+  const auto higher=ResolveCalibrationMapping(p,1.65f,true,1.f,.72f,4,head_native,shoulders_native,true,false,1.f,.75f);
+  CHECK(near(higher.eye_height-sitting.eye_height,.25f));
+  CHECK(near(higher.world_scale,sitting.world_scale) && near(p.eye_height_m,1.1f));
+  CHECK(near(higher.seated_height_offset_m,.75f));
+  CHECK(!ResolveCalibrationMapping(p,1.65f,true,1.f,.72f,4,head_native,shoulders_native,true,false,1.f,NAN).valid);
   p.eye_height_m=1.65f;
   const auto manual=ResolveCalibrationMapping(p,1.9f,false,1.f,.72f,4,head_native,shoulders_native,true,true);
   CHECK(near(manual.world_scale,head_fit.world_scale));

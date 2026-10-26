@@ -155,7 +155,62 @@ int main() {
           "native menu navigation cannot consume a swing attack preview");
     check(menu.left_trigger == 0,
           "native menu navigation cannot consume a physical guard");
-    if (failures) return 1;
+  {
+    dsvr::StickDpad routing;
+    long long time_ms = 1000;
+    const auto feed = [&](float x, float y, bool click) {
+      dsvr::VrPadHand hand{};
+      hand.stick_x = x;
+      hand.stick_y = y;
+      hand.stick_click = click;
+      routing.Apply(hand, time_ms);
+      time_ms += 16;
+      dsvr::VrPadInput sample{};
+      sample.left = hand;
+      return dsvr::MapVrPad(sample);
+    };
+    for (const auto& direction : {dsvr::kPadDpadUp, dsvr::kPadDpadDown,
+                                  dsvr::kPadDpadLeft, dsvr::kPadDpadRight}) {
+      routing.Reset();
+      const float x = direction == dsvr::kPadDpadLeft ? -1.0f :
+                      direction == dsvr::kPadDpadRight ? 1.0f : 0.0f;
+      const float y = direction == dsvr::kPadDpadDown ? -1.0f :
+                      direction == dsvr::kPadDpadUp ? 1.0f : 0.0f;
+      const auto selected = feed(x, y, true);
+      check(selected.buttons == direction && selected.thumb_lx == 0 &&
+            selected.thumb_ly == 0, "all four modifier directions select without walking");
+      check(feed(x, y, false).buttons == 0,
+            "direction release cannot synthesize a native click");
+      const auto blocked = feed(x, y, false);
+      check(blocked.thumb_lx == 0 && blocked.thumb_ly == 0,
+            "persistent deflection cannot escape neutral rearm");
+      feed(0, 0, false);
+      const auto walking = feed(x, y, false);
+      check(walking.thumb_lx != 0 || walking.thumb_ly != 0,
+            "new stick motion resumes only after neutral");
+    }
+    routing.Reset();
+    check(feed(0, 0.54f, true).buttons == 0, "D-pad selection has a deadzone");
+    check(feed(0, 0.55f, true).buttons == dsvr::kPadDpadUp,
+          "D-pad enters at its explicit threshold");
+    check(feed(0.8f, 0.8f, true).buttons == dsvr::kPadDpadUp,
+          "diagonal selection resolves to one deterministic direction");
+    routing.Reset();
+    check(feed(0, 0, true).buttons == 0, "neutral click is deferred");
+    check(feed(0, 0, false).buttons == dsvr::kPadLeftThumb,
+          "neutral click preserves native L3 on release");
+    check(feed(0, 0, false).buttons == dsvr::kPadLeftThumb,
+          "L3 persists long enough for slower native input polls");
+    time_ms += 120;
+    check(feed(0, 0, false).buttons == 0, "L3 releases after its bounded hold");
+    routing.Reset();
+    check(feed(NAN, 1, true).buttons == 0, "invalid direction fails closed");
+    check(feed(0, 0, false).buttons == 0, "invalid selection cannot become L3");
+    feed(0, 0, true);
+    routing.Reset();
+    check(feed(0, 0, false).buttons == 0, "lifecycle reset discards deferred clicks");
+  }
+  if (failures) return 1;
   std::cout << "pad_math tests passed\n";
   return 0;
 }

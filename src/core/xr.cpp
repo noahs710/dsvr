@@ -88,6 +88,7 @@ TrackingFrames g_tracking_frames;
 std::mutex g_camera_tag_mutex;
 std::uint64_t g_camera_sequence = 0;
 DWORD g_camera_thread = 0;
+TrackingFrame g_camera_frame;
 long long g_last_period_ns = 0;
 // Optional, read-only physical refresh source. Only the render thread touches
 // this cache: initialize at session creation/begin, then consume FB events.
@@ -253,6 +254,7 @@ void InvalidateTracking(bool new_space = false) {
   std::lock_guard<std::mutex> lock(g_camera_tag_mutex);
   g_camera_sequence = 0;
   g_camera_thread = 0;
+  g_camera_frame = {};
 }
 
 bool Ok(XrResult r, const char* what) {
@@ -1153,10 +1155,12 @@ void XrSubmitMonoFrame(void* backbuffer_texture2d) {
   auto* backbuffer = (ID3D11Texture2D*)backbuffer_texture2d;
   std::uint64_t camera_sequence_at_entry = 0;
   DWORD camera_thread_at_entry = 0;
+  TrackingFrame camera_frame_at_entry;
   {
     std::lock_guard<std::mutex> lock(g_camera_tag_mutex);
     camera_sequence_at_entry = g_camera_sequence;
     camera_thread_at_entry = g_camera_thread;
+    camera_frame_at_entry = g_camera_frame;
   }
 
   XrFrameWaitInfo wait_info{XR_TYPE_FRAME_WAIT_INFO};
@@ -1301,9 +1305,12 @@ void XrSubmitMonoFrame(void* backbuffer_texture2d) {
           // could not fuse it ("2 overlapping images"). The game renders
           // a symmetric frustum (tangents +/-tanH, +/-tanV from the FOV
           // we drive), so map exactly those tangents into each eye.
-          const float immersive_vfov = g_vfov_rad * std::clamp(cfg.fov_scale, 0.7f, 1.3f);
+          const float immersive_vfov = camera_frame_at_entry.sequence
+              ? camera_frame_at_entry.vfov_rad
+              : g_vfov_rad * std::clamp(cfg.fov_scale, 0.7f, 1.3f);
           float tan_v = std::tan(immersive_vfov * 0.5f);
-          float tan_h_game = tan_v * g_fov_aspect;
+          float tan_h_game = tan_v * (camera_frame_at_entry.sequence
+              ? camera_frame_at_entry.fov_aspect : g_fov_aspect);
           for (int eye = 0; eye < 2; ++eye) {
             float tl = std::tan(views[eye].fov.angleLeft);
             float tr = std::tan(views[eye].fov.angleRight);
@@ -1417,6 +1424,24 @@ void XrSubmitMonoFrame(void* backbuffer_texture2d) {
         }
         (void)cfg;
       }
+      // The native scene predates this xrWaitFrame/LocateViews call. Submit
+      // its camera-bound center pose, while still publishing the NEW prediction
+      // for the next natural game update. Missing/stale provenance drops the
+      // image, never the fresh tracking packet needed to recover next frame.
+      metrics.target_tracking_sequence = published_sequence;
+      if (g_immersive) {
+        const auto& source = camera_frame_at_entry;
+        const auto now = GetTickCount64();
+        if (!source.sequence || source.sequence != camera_sequence_at_entry ||
+            source.space_epoch != g_tracking_frames.CurrentEpoch() ||
+            !source.focused || !source.orientation_valid || !source.position_valid ||
+            now < source.captured_ms || now - source.captured_ms > 100 ||
+            source.predicted_time_ns <= 0 || source.predicted_time_ns > state.predictedDisplayTime ||
+            !std::isfinite(source.vfov_rad) || source.vfov_rad <= .5f || source.vfov_rad >= 3.1f ||
+            !std::isfinite(source.fov_aspect) || source.fov_aspect <= 0)
+          render = false;
+        else metrics.source_tracking_sequence = source.sequence;
+      }
       // Snapshot the source once, before either eye can consume it. Both eye
       // draws sample this same frame, including format conversion/aspect fit.
       D3D11_TEXTURE2D_DESC src_desc{};
@@ -1483,6 +1508,14 @@ void XrSubmitMonoFrame(void* backbuffer_texture2d) {
 
         views_out[eye].type = XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW;
         views_out[eye].pose = views[eye].pose;
+        if (g_immersive) {
+          // Mono pixels originate at the center camera, including on canted
+          // displays: neither eye's newer orientation/IPD rendered this image.
+          const auto& source = camera_frame_at_entry;
+          views_out[eye].pose.orientation = {source.head_quat[0],source.head_quat[1],
+                                            source.head_quat[2],source.head_quat[3]};
+          views_out[eye].pose.position = {source.head_pos[0],source.head_pos[1],source.head_pos[2]};
+        }
         views_out[eye].fov = views[eye].fov;
         views_out[eye].subImage.swapchain = g_swapchain[eye];
         views_out[eye].subImage.imageRect.offset = {0, 0};
@@ -1656,6 +1689,14 @@ void XrRecordCameraSequence(std::uint64_t sequence) {
   std::lock_guard<std::mutex> lock(g_camera_tag_mutex);
   g_camera_sequence = sequence;
   g_camera_thread = sequence ? GetCurrentThreadId() : 0;
+  g_camera_frame = {}; // a diagnostic sequence alone cannot certify a source pose
+}
+void XrRecordCameraFrame(const TrackingFrame& frame,float rendered_vfov_rad) {
+  std::lock_guard<std::mutex> lock(g_camera_tag_mutex);
+  g_camera_sequence = frame.sequence;
+  g_camera_thread = frame.sequence ? GetCurrentThreadId() : 0;
+  g_camera_frame = frame;
+  g_camera_frame.vfov_rad = rendered_vfov_rad;
 }
 std::uint64_t XrAppliedCameraSequence() {
   std::lock_guard<std::mutex> lock(g_camera_tag_mutex);

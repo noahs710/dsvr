@@ -211,11 +211,20 @@ constexpr std::uint32_t kGuardAtkRate = 0x5a;
 constexpr std::uint32_t kGuardBreakRate = 0x5c;
 constexpr std::uint32_t kAtkSuperArmor = 0x5e;
 constexpr std::uint32_t kDmgLevel = 0x72;
+// 0x73 selects a map/world hit context for the attack (cache transcription:
+// ds1-refmat mapHitType with ATK_PARAM_MAP_HIT 0 Normal / 1 Precision /
+// 2 Not on the map / 3 Map, not an asset; not DSR-verified, and not a claim
+// about 1403C72D0's 23/24/25 message selection). 0x74 (guardCutCancelRate)
+// is deliberately left unnamed until its own transcription is checked.
+constexpr std::uint32_t kMapHitType = 0x73;
 constexpr std::uint32_t kAtkAttribute = 0x75;
 constexpr std::uint32_t kHitSourceType = 0x7c;
 constexpr std::uint32_t kFlags = 0x7e;  // bitfield byte, 0x7f is padding
 }  // namespace atk_param
 
+static_assert(atk_param::kDmgLevel + 1 == atk_param::kMapHitType &&
+                  atk_param::kMapHitType < atk_param::kAtkAttribute,
+              "0x73 sits between kDmgLevel and kAtkAttribute");
 static_assert(atk_param::kFlags + 2 == kAtkParamRowBytes,
               "AtkParam row layout transcribed wrong");
 static_assert(atk_param::kHitRadius[0] == 0x00 && atk_param::kHitRadius[3] == 0x0c,
@@ -228,6 +237,16 @@ enum class NativeHitType : std::uint8_t {
   Middle = 1,
   Root = 2,
   MapCollision = 3,
+};
+
+// AtkParam byte 0x73: which map/world context the attack hit selects.
+// Transcribed from the research cache (ds1-refmat mapHitType,
+// ATK_PARAM_MAP_HIT); not DSR-verified and not bound to any native call.
+enum class NativeMapHitType : std::uint8_t {
+  Normal = 0,
+  Precision = 1,
+  NotOnMap = 2,
+  MapNotAsset = 3,
 };
 
 enum class NativeAtkAttribute : std::uint8_t {

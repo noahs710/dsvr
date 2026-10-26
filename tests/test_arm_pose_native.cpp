@@ -324,6 +324,79 @@ int CheckMirroredGripRoll() {
   return 0;
 }
 
+int CheckHandPublication() {
+  using namespace dsvr;
+  const auto saved_tracking=latest;
+  const auto saved_cfg=cfg;
+  const auto saved_calibration=calibration;
+  cfg.combat_test_bench=true;cfg.motion_attacks=true;
+  const auto step=[] {
+    ++latest.sequence;latest.predicted_time_ns+=12000000;
+    Fresh();ArmIkTick(latest);callback(player.data());
+  };
+  // Loss can arrive after native copy verification, before another camera or
+  // native callback. Exercise EACH public reader first on its own receipt.
+  for(unsigned reader=0;reader<2;++reader)for(unsigned mutation=1;mutation<=19;++mutation) {
+    step();
+    ArmIkHands hands;
+    CombatBenchSnapshot bench;
+    CHECK(ArmIkLatestHands(hands) && hands.side[0].valid && hands.side[1].valid);
+    CHECK(hands.calibration_revision==calibration.revision);
+    CHECK(ArmIkCombatBench(bench) && bench.fresh);
+    const auto committed_tracking=latest;
+    const auto committed_cfg=cfg;
+    const auto before_writes=writes,before_originals=originals;
+    switch(mutation) {
+      case 1: latest.focused=false;break;
+      case 2: latest.orientation_valid=false;break;
+      case 3: latest.position_valid=false;break;
+      case 4: latest.arm[0].valid=false;break;
+      case 5: latest.arm[1].valid=false;break;
+      case 6: latest_ok=false;break;
+      case 7: cfg.vr_enabled=false;break;
+      case 8: cfg.arm_ik_enabled=false;break;
+      case 9: cfg.headlook_enabled=false;break;
+      case 10: cfg.arm_ik_log_only=true;break;
+      case 11: cfg.observer_only=true;break;
+      case 12: ++calibration.revision;break;
+      case 13: latest.captured_ms=GetTickCount64()+1000;break;
+      case 14: capture_input=true;break;
+      case 15: menu=true;break;
+      case 16: ++latest.space_epoch;break;
+      case 17: ++camera_sequence;break;
+      case 18: latest.captured_ms=GetTickCount64()-101;break;
+      case 19: latest.sequence=0;break;
+    }
+    const bool accepted=reader?ArmIkCombatBench(bench):ArmIkLatestHands(hands);
+    if(accepted) {
+      std::printf("post-publication reader %u mutation %u returned stale poses\n",reader,mutation);
+      return 1;
+    }
+    CHECK(reader?(!bench.fresh && bench.last_event==0):
+                 (!hands.sequence && !hands.side[0].valid && !hands.side[1].valid));
+    CHECK(writes==before_writes && originals==before_originals);
+    latest=committed_tracking;cfg=committed_cfg;calibration=saved_calibration;
+    latest_ok=true;capture_input=false;menu=false;camera_sequence=latest.sequence;
+    // Restoring external state cannot revive a receipt whose lifetime ended.
+    CHECK(!ArmIkLatestHands(hands) && !ArmIkCombatBench(bench));
+    step();
+    CHECK(ArmIkLatestHands(hands) && ArmIkCombatBench(bench));
+    CHECK(bench.tip_speed[0]==0 && bench.tip_speed[1]==0);
+  }
+  // A newer valid XR packet can coexist with the unchanged camera-bound
+  // native pose. Sequence advancement alone does not end that lifetime.
+  step();
+  ArmIkHands committed,newer;
+  CombatBenchSnapshot bench;
+  CHECK(ArmIkLatestHands(committed));
+  ++latest.sequence;Fresh();camera_sequence=committed.sequence;
+  CHECK(ArmIkLatestHands(newer) && newer.sequence==committed.sequence);
+  CHECK(ArmIkCombatBench(bench));
+  latest=saved_tracking;cfg=saved_cfg;calibration=saved_calibration;
+  Fresh();ArmIkTick(latest);callback(player.data());
+  return 0;
+}
+
 int CheckCombatBench() {
   using namespace dsvr;
   const auto saved=latest;
@@ -519,6 +592,7 @@ int main() {
   Fresh();ArmIkTick(latest);callback(player.data());
   CHECK(CheckMirroredGripRoll() == 0);
   CHECK(CheckCombatBench() == 0);
+  CHECK(CheckHandPublication() == 0);
   {
     for(unsigned mode:{1u,2u,3u,4u}) {
       output_root_mode=mode;

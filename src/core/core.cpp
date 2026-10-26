@@ -134,10 +134,12 @@ extern "C" __declspec(dllexport) unsigned long __stdcall DsvrCoreStart() {
   // host here: a late add-on callback or F7 must not acquire XR/gameplay rights.
   if (config.observer_only) {
     dsvr::DiagnosticsStart(config, cfg_path);
-    DSVR_LOG("Core: OBSERVER ONLY armed; F9 installs observation hooks after startup; "
+    DSVR_LOG("Core: OBSERVER ONLY armed; %s; "
               "no XR, gameplay writes, "
              "injected input or render host; restart required to change mode. "
-              "This does not isolate saves or enforce offline play.");
+              "This does not isolate saves or enforce offline play.",
+              config.combat_trace_only ? "automatic ten-minute combat recording after startup; no F9 required" :
+                                        "F9 installs observation hooks after startup");
     return 0;
   }
 

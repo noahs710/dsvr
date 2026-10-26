@@ -33,6 +33,7 @@
 #include "shield_guard_math.h"
 #include "arm_swing_math.h"
 #include "reach_intent_math.h"
+#include "interaction_target_math.h"
 
 namespace dsvr {
 // Calibration owns the coherent TrackingFrame sample in xr.cpp. Input only
@@ -53,9 +54,7 @@ XrAction g_primary = XR_NULL_HANDLE;
 XrAction g_secondary = XR_NULL_HANDLE;
 XrAction g_menu = XR_NULL_HANDLE;
 XrAction g_stick_click = XR_NULL_HANDLE;
-// The controller's own D-pad. Quest Touch exposes it as two vector2 components
-// (x_axis/y_axis) on the left hand; the same action carries either hand.
-XrAction g_dpad_dir[4] = {};  // up, down, left, right (booleans)
+StickDpad g_stick_dpad;
 XrAction g_haptic = XR_NULL_HANDLE;
 XrPath g_hand_path[2] = {XR_NULL_PATH, XR_NULL_PATH};  // 0 left, 1 right
 XrSpace g_grip_space[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
@@ -64,16 +63,19 @@ XrSpace g_view_space = XR_NULL_HANDLE;  // actual HMD orientation in the input f
 std::atomic<bool> g_attached{false};
 std::atomic<bool> g_failed{false};
 bool g_logged_unavailable = false;
-// A binding edit asked for the action set to be rebuilt. Set from the menu or a
-// config reload, consumed on the input thread that owns the handles.
+// A binding edit requests a restart notice on the input thread.
 std::atomic<bool> g_binding_reload{false};
-// The profile set the live action set was actually built with, so an edit that
-// did not change any binding does not cost the player an input dropout.
+// Last reported profile settings, so unchanged edits do not repeat the notice.
 struct BindingSignature {
   bool quest3 = true, index = true, wmr = true, simple = true;
 };
 BindingSignature g_binding_seen{};
 bool g_binding_seen_valid = false;
+// Profile set the live action set was built with, frozen at session attach.
+// g_binding_seen tracks the latest poll for the one-shot warn; this one never
+// moves after attach, so applied-vs-attached is a real restart comparison.
+BindingSignature g_binding_attached{};
+bool g_binding_attached_valid = false;
 
 BladeKinematics g_blade[2];  // per hand, continuous (combat_math.h)
 SwingAttackTrigger g_swing_attack[2];  // physical attack bridge, polling thread
@@ -84,6 +86,37 @@ ReachIntentTrigger g_reach[2];  // reach-to-interact bridge, polling thread
 // fires once and the button stays down for reach_press_ms. Measured on the same
 // predicted-display clock the trigger itself runs on.
 long long g_reach_hold_until_ms[2] = {0, 0};
+
+// A weapon swap, a stance change or a new player actor invalidates every
+// physical bridge: an armed swing from the previous weapon must not fire after
+// the swap, and a stale reach envelope must not tap the new one. The contact
+// bench in arm_ik.cpp already reprimes on the same identity tuple; this is the
+// matching reprime on the input side.
+CombatNativeStatus g_combat_seen{};
+bool g_combat_seen_valid = false;
+
+bool CombatIdentityChanged() {
+  const CombatNativeStatus now = CombatNativeGetStatus();
+  const bool changed =
+      !g_combat_seen_valid || now.equipment_bound != g_combat_seen.equipment_bound ||
+      now.equipment.player != g_combat_seen.equipment.player ||
+      now.equipment.weapon_id[0] != g_combat_seen.equipment.weapon_id[0] ||
+      now.equipment.weapon_id[1] != g_combat_seen.equipment.weapon_id[1] ||
+      now.equipment.native_stance != g_combat_seen.equipment.native_stance;
+  g_combat_seen = now;
+  g_combat_seen_valid = true;
+  return changed;
+}
+
+void ResetPhysicalBridges() {
+  for (int side = 0; side < 2; ++side) {
+    g_blade[side].Reset();
+    g_swing_attack[side].Reset();
+    g_shield_guard[side].Reset();
+    g_reach[side].Reset();
+    g_reach_hold_until_ms[side] = 0;
+  }
+}
 
 // A guard is "the shield hand is up", not a pose: the band is head-relative so
 // the block follows the player wherever they hold it, and its width covers an
@@ -277,19 +310,6 @@ void SuggestAll() {
         {g_menu, "/user/hand/left/input/menu/click"},
         {g_stick_click, "/user/hand/left/input/thumbstick/click"},
         {g_stick_click, "/user/hand/right/input/thumbstick/click"},
-          // Quest 3's Touch Plus controllers carry no physical D-pad; the
-        // Oculus profile's D-pad equivalent is the thumbstick's four
-        // discrete directions, published on both hands. The previous
-        // x_axis/y_axis rows named touchpad axes that this profile does
-        // not have, so the channel looked bound and never answered.
-        {g_dpad_dir[0], "/user/hand/left/input/thumb_up"},
-        {g_dpad_dir[0], "/user/hand/right/input/thumb_up"},
-        {g_dpad_dir[1], "/user/hand/left/input/thumb_down"},
-        {g_dpad_dir[1], "/user/hand/right/input/thumb_down"},
-        {g_dpad_dir[2], "/user/hand/left/input/thumb_left"},
-        {g_dpad_dir[2], "/user/hand/right/input/thumb_left"},
-        {g_dpad_dir[3], "/user/hand/left/input/thumb_right"},
-        {g_dpad_dir[3], "/user/hand/right/input/thumb_right"},
     };
     for (const auto& row : rows) {
       XrPath p = XR_NULL_PATH;
@@ -393,30 +413,6 @@ XrVector2f ReadStick(XrPath subpath, bool& active, bool* query_failed = nullptr)
     return {};
   active = state.isActive != XR_FALSE;
   return active ? state.currentState : XrVector2f{};
-}
-
-// The Quest 3 Touch Plus controllers have no physical D-pad. Meta's own
-// controller mapping reference publishes the thumbstick's four discrete
-// directions (Thumbstick Up/Down/Left/Right) on both hands, and those are the
-// Oculus profile's boolean D-pad paths. Four booleans rather than a vector2:
-// no Touch profile publishes a D-pad as axes, so a vector2 bound to paths the
-// profile does not carry sits inactive forever while looking like a bound
-// channel. A runtime whose profile carries none of these paths reports every
-// direction inactive, and the axes stay neutral instead of becoming a phantom
-// press. Opposite directions cancel to neutral, matching a real D-pad.
-XrVector2f ReadDpad(XrPath subpath, bool& active) {
-  active = false;
-  bool dir_active = false;
-  const bool up = ReadBool(g_dpad_dir[0], subpath, dir_active);
-  active = active || dir_active;
-  const bool down = ReadBool(g_dpad_dir[1], subpath, dir_active);
-  active = active || dir_active;
-  const bool left = ReadBool(g_dpad_dir[2], subpath, dir_active);
-  active = active || dir_active;
-  const bool right = ReadBool(g_dpad_dir[3], subpath, dir_active);
-  active = active || dir_active;
-  return {(right ? 1.0f : 0.0f) - (left ? 1.0f : 0.0f),
-          (up ? 1.0f : 0.0f) - (down ? 1.0f : 0.0f)};
 }
 
 bool ReadHeadOrientation(XrSpace base_space, XrTime time, float quat[4]) {
@@ -706,15 +702,7 @@ bool CreateActions() {
                   g_menu) ||
       !MakeAction(XR_ACTION_TYPE_BOOLEAN_INPUT, "stick_click", "Stick click",
                   true, g_stick_click) ||
-      !MakeAction(XR_ACTION_TYPE_BOOLEAN_INPUT, "dpad_up", "D-pad up",
-                  true, g_dpad_dir[0]) ||
-        !MakeAction(XR_ACTION_TYPE_BOOLEAN_INPUT, "dpad_down", "D-pad down",
-                  true, g_dpad_dir[1]) ||
-        !MakeAction(XR_ACTION_TYPE_BOOLEAN_INPUT, "dpad_left", "D-pad left",
-                  true, g_dpad_dir[2]) ||
-        !MakeAction(XR_ACTION_TYPE_BOOLEAN_INPUT, "dpad_right", "D-pad right",
-                  true, g_dpad_dir[3]) ||
-       !MakeAction(XR_ACTION_TYPE_VIBRATION_OUTPUT, "haptic", "Haptic", true,
+      !MakeAction(XR_ACTION_TYPE_VIBRATION_OUTPUT, "haptic", "Haptic", true,
                   g_haptic))
     return false;
   SuggestAll();
@@ -749,57 +737,17 @@ bool AttachActions() {
   return true;
 }
 
-// Tear the set down before a rebuild. The pose spaces are session-scoped and go
-// first; destroying an action set destroys the actions made from it. The OpenXR
-// header this build compiles against declares the create side of action spaces
-// only, so both destroy entry points are resolved through the instance. A
-// session refuses a second action whose name is already taken, which is why a
-// teardown that cannot free the old names reports failure instead of proceeding:
-// keeping a working set beats replacing it with a half-built one.
-bool DestroyActions() {
-  using DestroySpaceFn = XrResult(XRAPI_PTR *)(XrSpace);
-  using DestroySetFn = XrResult(XRAPI_PTR *)(XrActionSet);
-  DestroySpaceFn destroy_space = nullptr;
-  DestroySetFn destroy_set = nullptr;
-  if (g_instance == XR_NULL_HANDLE ||
-      XR_FAILED(xrGetInstanceProcAddr(g_instance, "xrDestroyActionSpace",
-                                      reinterpret_cast<PFN_xrVoidFunction *>(
-                                          &destroy_space))) ||
-      XR_FAILED(xrGetInstanceProcAddr(g_instance, "xrDestroyActionSet",
-                                      reinterpret_cast<PFN_xrVoidFunction *>(
-                                          &destroy_set))) ||
-      !destroy_space || !destroy_set) {
-    DSVR_WARN("Input: this runtime will not hand back xrDestroyActionSpace / "
-              "xrDestroyActionSet, so the action set cannot be rebuilt. The "
-              "bindings in use stay as they are; restart the game to pick up a "
-              "changed profile set.");
-    return false;
-  }
-  for (int side = 0; side < 2; ++side) {
-    if (g_grip_space[side] != XR_NULL_HANDLE) {
-      destroy_space(g_grip_space[side]);
-      g_grip_space[side] = XR_NULL_HANDLE;
-    }
-    if (g_aim_space[side] != XR_NULL_HANDLE) {
-      destroy_space(g_aim_space[side]);
-      g_aim_space[side] = XR_NULL_HANDLE;
-    }
-  }
-  if (g_action_set != XR_NULL_HANDLE) {
-    destroy_set(g_action_set);
-    g_action_set = XR_NULL_HANDLE;
-  }
-  g_attached = false;
-  return true;
-}
-
 }  // namespace
 
-// Ask for the suggested bindings to be rebuilt. With binding_live_reattach the
-// next input frame does it and the player feels one short dropout; without it
-// the request is logged and the next session picks the edit up.
+// Report the pending binding edit without mutating immutable attached actions.
 void InputRequestBindingReload() {
   g_binding_reload.store(true, std::memory_order_release);
+}
+
+// The profile set the live action set was built with.
+InputBindingSignature InputLiveBindingSignature() {
+  return {g_binding_attached.quest3, g_binding_attached.index,
+          g_binding_attached.wmr, g_binding_attached.simple};
 }
 
 void InputAttachSession(void* xr_instance, void* xr_session) {
@@ -831,6 +779,11 @@ void InputAttachSession(void* xr_instance, void* xr_session) {
   }
   SyncParams(cfg);
   InputInvalidateHeadDirectedLocomotion();
+  g_binding_seen = {cfg.bind_profile_quest3, cfg.bind_profile_index,
+                    cfg.bind_profile_wmr, cfg.bind_profile_simple};
+  g_binding_seen_valid = true;
+  g_binding_attached = g_binding_seen;
+  g_binding_attached_valid = true;
   g_attached = true;
   DSVR_LOG("Input: OpenXR actions attached (Touch/Index/WMR/simple "
            "bindings suggested). Continuous hands for IK arms; no swing "
@@ -850,6 +803,7 @@ void InputInvalidateFrame() {
   g_combos.Reset();
   g_sanctuary_chord.Reset();
   g_turn.Reset();
+  g_stick_dpad.Reset();
   g_blade[0].Reset();
   g_blade[1].Reset();
   g_last_time_ns = 0;
@@ -961,15 +915,8 @@ void InputPollFrame(void* base_space, const float head_pos[3],
   Config cfg = DiagnosticsCurrentConfig();
   SyncParams(cfg);
 
-  // A per-profile binding edit reaches this thread only through the applied
-  // config, so the profile set is compared against what the live action set was
-  // built with and the set is rebuilt here when it differs -- the input thread
-  // is the only reader of these handles once a session is live. The frame is
-  // invalidated first so nothing the player was holding stays down across the
-  // rebuild; that dropout is the accepted cost of the setting. A runtime that
-  // refuses to attach a second action set mid-session loses this session's
-  // controller input, which is why the path is opt-in until the headset proves
-  // the answer.
+  // OpenXR attaches action sets once per session. Never destroy a working set
+  // to apply an edit that the runtime must refuse on this same session.
   const bool profile_set_changed =
       cfg.bind_profile_quest3 != g_binding_seen.quest3 ||
       cfg.bind_profile_index != g_binding_seen.index ||
@@ -977,30 +924,10 @@ void InputPollFrame(void* base_space, const float head_pos[3],
       cfg.bind_profile_simple != g_binding_seen.simple;
   const bool reload_requested =
       g_binding_reload.exchange(false, std::memory_order_acq_rel);
-  if (g_attached && cfg.binding_live_reattach && g_binding_seen_valid &&
-      (profile_set_changed || reload_requested)) {
-    InputInvalidateFrame();
-    if (DestroyActions() && CreateActions() && AttachActions()) {
-      g_attached = true;
-      DSVR_LOG("Input: bindings re-attached live (Quest3=%d Index=%d WMR=%d "
-               "simple=%d); this frame's controller input was invalidated",
-               cfg.bind_profile_quest3 ? 1 : 0, cfg.bind_profile_index ? 1 : 0,
-               cfg.bind_profile_wmr ? 1 : 0, cfg.bind_profile_simple ? 1 : 0);
-    } else if (g_action_set == XR_NULL_HANDLE) {
-      // The old set is gone and the new one was refused: nothing can be polled.
-      g_failed = true;
-      DSVR_WARN("Input: live binding re-attach refused -- this runtime will not "
-                "attach a second action set mid-session. Controller input stays "
-                "down until the next session. Turn binding_live_reattach off to "
-                "keep one binding set for the whole session.");
-      return;
-    } else {
-      // DestroyActions declined to free the old names, so nothing was torn down
-      // and the bindings the player is using right now are still live.
-      DSVR_WARN("Input: binding rebuild stopped before the teardown; the "
-                "bindings in use are unchanged.");
-    }
-  }
+  if (g_binding_seen_valid && (profile_set_changed || reload_requested))
+    DSVR_WARN("Input: binding changes require a game restart; the attached "
+              "controller actions remain active. OpenXR permits only one "
+              "action-set attachment per session.");
   g_binding_seen = {cfg.bind_profile_quest3, cfg.bind_profile_index,
                    cfg.bind_profile_wmr, cfg.bind_profile_simple};
   g_binding_seen_valid = true;
@@ -1026,6 +953,7 @@ void InputPollFrame(void* base_space, const float head_pos[3],
   g_last_time_ns = predicted_display_time;
 
   const bool sanctuary = XrMenuPresentationActive();
+  if (CombatIdentityChanged()) ResetPhysicalBridges();
   const HandParams hand_params;
   // Head facing in the tracking frame. The reach envelope is measured along the
   // direction the player is actually looking, in the same space and at the same
@@ -1089,10 +1017,6 @@ void InputPollFrame(void* base_space, const float head_pos[3],
     pad_active = pad_active || action_active;
     pad_hand.stick_click = ReadBool(g_stick_click, g_hand_path[side], action_active);
     pad_active = pad_active || action_active;
-    const XrVector2f dpad = ReadDpad(g_hand_path[side], action_active);
-    pad_active = pad_active || action_active;
-    pad_hand.dpad_x = dpad.x;
-    pad_hand.dpad_y = dpad.y;
     HandSample& sample = hand_samples[side];
     sample.squeeze_held = squeeze_raw > 0.7f;
     sample.trigger_held = trigger_raw > 0.7f;
@@ -1329,21 +1253,11 @@ void InputPollFrame(void* base_space, const float head_pos[3],
   }
   const bool capture = ModMenuCapturesInput() || CalibrationCapturesInput();
   if (capture && !stick_menu_consumed && !recalibration_consumed) {
-    // A real D-pad component is the native menu's own navigation channel, so
-      // it drives the spatial menu directly; the left stick stays the fallback
-      // for profiles that expose no D-pad. X/Y (the left hand's face buttons)
-      // step the mod-menu panel list, which nothing else can reach in a
-      // headset with no keyboard.
-      float nav_x = pad_input.left.stick_x, nav_y = pad_input.left.stick_y;
-      if (std::fabs(pad_input.left.dpad_x) >= 0.5f ||
-          std::fabs(pad_input.left.dpad_y) >= 0.5f) {
-        nav_x = pad_input.left.dpad_x;
-        nav_y = pad_input.left.dpad_y;
-      }
-      ModMenuControllerInput(nav_x, nav_y,
+    // Stick navigation stays raw in spatial UI; X/Y step its panel list.
+    ModMenuControllerInput(pad_input.left.stick_x, pad_input.left.stick_y,
                            pad_input.right.primary, pad_input.right.secondary,
                            pad_input.left.primary, pad_input.left.secondary);
-    }
+  }
   const bool consuming_controls = capture || menu_chord || stick_menu_consumed ||
       recalibration_consumed;
   if (consuming_controls) {
@@ -1363,6 +1277,7 @@ void InputPollFrame(void* base_space, const float head_pos[3],
   }
   if (consuming_controls) {
     PublishPad({}, pad_active);
+    g_stick_dpad.Reset();
     g_turn.Reset();
     g_combos.Reset();
     g_sanctuary_chord.Reset();
@@ -1451,6 +1366,9 @@ void InputPollFrame(void* base_space, const float head_pos[3],
     // all, so it must never be fed a stick the locomotion gate already cleared.
     // Sanctuary and every non-gameplay state are menu navigation.
     const bool menu_navigation = sanctuary || !CameraGameplayReady();
+    bool stick_dpad_consumed = false;
+    if (menu_navigation) g_stick_dpad.Reset();
+    else stick_dpad_consumed = g_stick_dpad.Apply(pad_input.left, predicted_display_time / 1000000LL);
     if (!menu_navigation) {
     HeadDirectedLocomotion locomotion{};
     {
@@ -1556,7 +1474,7 @@ void InputPollFrame(void* base_space, const float head_pos[3],
       // the stick, so it composes rather than replaces. A player who also
       // holds the stick forward still gets the full native dash, and
       // acceleration, stamina, turning and the dash stay the game's.
-      if (cfg.arm_swing_sprint && CameraGameplayReady() && !cfg.observer_only) {
+      if (cfg.arm_swing_sprint && !stick_dpad_consumed && CameraGameplayReady() && !cfg.observer_only) {
         const auto gait = g_arm_swing.Feed(
             hand_samples[0].speed, hand_samples[1].speed,
             predicted_display_time / 1000000LL, ArmSwingParamsFromConfig(cfg));
@@ -1587,6 +1505,17 @@ void InputPollFrame(void* base_space, const float head_pos[3],
             reach_offset[side], reach_forward_speed[side], reach_speed[side],
             reach_ready[1 - side] ? reach_speed[1 - side] : 0.0f, reach_now_ms,
             reach_params);
+        // Eligibility gate (H2): the gesture alone must not decide once a
+        // native prompt/LOS owner exists. InteractionTargetEligibility still
+        // has no producer, so the default refuses everything and the reach
+        // path logs why instead of silently tapping A at a wall or a face.
+        if (intent.pressed && !SelectTargetEligible(InteractionTargetEligibility{})) {
+          g_reach_hold_until_ms[side] = 0;
+          DSVR_LOG("Interaction: reach %.2f m/s at %.2f m ahead refused "
+                   "(no eligible target: prompt/LOS/lifecycle unbound)",
+                   reach_forward_speed[side], reach_offset[side]);
+          continue;
+        }
         if (intent.pressed) {
           g_reach_hold_until_ms[side] = reach_now_ms + intent.press_ms;
           DSVR_LOG("Interaction: reach %.2f m/s at %.2f m ahead -> interact tap",

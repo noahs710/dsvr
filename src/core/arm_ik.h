@@ -42,11 +42,13 @@ struct ArmIkHand {
 };
 struct ArmIkHands {
   std::uint64_t sequence=0,epoch=0,captured_ms=0;
+  std::uint64_t calibration_revision=0;
   ArmPoseMatrix root{};
   ArmIkHand side[2];  // physical left/right, native model-space poses
 };
 // Published only after a guarded native pose commit. Root transforms model
-// points to world. Freshness/sequence/space/menu checks fail closed.
+// points to world. Tracking, calibration, mode and capture changes invalidate
+// the receipt until a fresh natural copy; getters never write native poses.
 bool ArmIkLatestHands(ArmIkHands& out);
 
 

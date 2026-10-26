@@ -116,7 +116,8 @@ void __fastcall FollowCamUpdateDetour(void* self, float dt, void* arg3,
     const auto mapping = ResolveCalibrationMapping(CalibrationCurrent(),
         cfg.eye_height, cfg.play_style == "seated", cfg.world_scale,
         native_reach, model_revision, native_head, native_shoulders,
-        cfg.embodiment_fit != "arm", cfg.eye_height_override, cfg.avatar_scale);
+        cfg.embodiment_fit != "arm", cfg.eye_height_override, cfg.avatar_scale,
+        cfg.seated_height_offset_m);
     if (!mapping.valid) {
       XrRecordCameraSequence(0);
       InputInvalidateHeadDirectedLocomotion();
@@ -161,7 +162,7 @@ void __fastcall FollowCamUpdateDetour(void* self, float dt, void* arg3,
     XrRecordCameraSequence(0);
     return;
   }
-  XrRecordCameraSequence(frame.sequence);
+  XrRecordCameraFrame(frame, comfort_vfov);
   CameraPublishHeadDirectedLocomotion(frame.space_epoch);
   if (VrTraceActive()) {
     trace.event = "camera_applied";

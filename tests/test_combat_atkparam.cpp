@@ -113,6 +113,15 @@ int main() {
 
   // --- AtkParam row layout: the offsets must stay inside one row -----------
   CHECK(kAtkParamRowBytes == 0x80);
+  // 0x73 (mapHitType) sits between the damage level and the attack
+  // attribute; the neighbouring 0x74 byte stays unnamed until checked.
+  CHECK(atk_param::kDmgLevel == 0x72);
+  CHECK(atk_param::kMapHitType == 0x73);
+  CHECK(atk_param::kAtkAttribute == 0x75);
+  CHECK(static_cast<std::uint8_t>(NativeMapHitType::Normal) == 0);
+  CHECK(static_cast<std::uint8_t>(NativeMapHitType::Precision) == 1);
+  CHECK(static_cast<std::uint8_t>(NativeMapHitType::NotOnMap) == 2);
+  CHECK(static_cast<std::uint8_t>(NativeMapHitType::MapNotAsset) == 3);
   for (int i = 0; i < kAtkParamHitSlots; ++i) {
     CHECK(atk_param::kHitRadius[i] + 4 <= kAtkParamRowBytes);
     CHECK(atk_param::kHitDummyTip[i] + 2 <= kAtkParamRowBytes);

@@ -649,6 +649,7 @@ void RetargetSourcePose(void* self) {
   ArmIkHands published;
   published.sequence=g_targets.sequence;published.epoch=g_targets.epoch;
   published.captured_ms=g_targets.captured_ms;published.root=root_before;
+  published.calibration_revision=g_targets.calibration.revision;
   bool solved=false;
   const unsigned primary=cfg.dominant_hand_left?0u:1u,offhand=1u-primary;
   bool support_attached=false;
@@ -1030,6 +1031,7 @@ bool VerifyNaturalCopy() {
       cfg.arm_ik_log_only || cfg.observer_only ||
       cfg.world_scale!=g_targets.mapping.world_trim ||
       cfg.avatar_scale!=g_targets.mapping.avatar_scale ||
+      (cfg.play_style=="seated"?cfg.seated_height_offset_m:0.f)!=g_targets.mapping.seated_height_offset_m ||
       XrMenuPresentationActive() || CalibrationCapturesInput() ||
       CalibrationCurrent().revision!=g_targets.calibration.revision ||
       !XrLatestTrackingFrame(fresh) || !fresh.focused || !fresh.orientation_valid ||
@@ -1127,6 +1129,32 @@ void __fastcall PoseUpdateDetour(void* self) {
   }
   g_pending_copy.ready=false;
 }
+
+// g_hands_mutex must be held. Tracking, calibration or modes can change between the
+// verified native copy and an input/panel read. Both consumers share this
+// lifetime check; once refused, restoring external state cannot revive it.
+bool PublishedHandsCurrent(const Config& cfg,const TrackingFrame& frame,bool have_frame) {
+  // A provisional source publication is deliberately invisible until the
+  // outer native copy returns. A read must not erase that pending snapshot.
+  if(!g_copy_verified.load(std::memory_order_acquire))return false;
+  const auto now=GetTickCount64();
+  bool current=cfg.vr_enabled && cfg.arm_ik_enabled && cfg.headlook_enabled &&
+      !cfg.arm_ik_log_only && !cfg.observer_only &&
+      !XrMenuPresentationActive() && !CalibrationCapturesInput() &&
+      have_frame && frame.focused && frame.orientation_valid && frame.position_valid &&
+      now>=frame.captured_ms && now-frame.captured_ms<=100 &&
+      g_hands.sequence && g_hands.sequence<=frame.sequence &&
+      g_hands.sequence==XrAppliedCameraSequence() && g_hands.epoch==frame.space_epoch &&
+      g_hands.calibration_revision==CalibrationCurrent().revision &&
+      now>=g_hands.captured_ms && now-g_hands.captured_ms<=100;
+  for(unsigned side=0;side<2 && current;++side)
+    if(g_hands.side[side].valid && !frame.arm[side].valid)current=false;
+  if(!current) {
+    g_copy_verified.store(false,std::memory_order_release);
+    g_hands={};g_bench={};
+  }
+  return current;
+}
 }  // namespace
 void ArmIkResetCalibration() {
   g_reset_grip.store(true);
@@ -1173,35 +1201,23 @@ bool ArmIkNativeStature(float& head_above_origin, float& shoulder_width,
 
 bool ArmIkLatestHands(ArmIkHands& out) {
   out={};
-  if (!g_copy_verified.load(std::memory_order_acquire) ||
-      XrMenuPresentationActive() || CalibrationCapturesInput()) return false;
+  const auto cfg=DiagnosticsCurrentConfig();
   TrackingFrame frame{};
-  if (!XrLatestTrackingFrame(frame)) return false;
+  const bool have_frame=XrLatestTrackingFrame(frame);
   std::lock_guard<std::mutex> lock(g_hands_mutex);
-  const auto now=GetTickCount64();
-  if (!g_copy_verified.load(std::memory_order_acquire) ||
-      !g_hands.sequence || g_hands.sequence>frame.sequence ||
-      g_hands.sequence!=XrAppliedCameraSequence() || g_hands.epoch!=frame.space_epoch ||
-      now<g_hands.captured_ms || now-g_hands.captured_ms>100) return false;
+  if (!PublishedHandsCurrent(cfg,frame,have_frame)) return false;
   out=g_hands;return true;
 }
 bool ArmIkCombatBench(CombatBenchSnapshot& out) {
   out = {};
   const auto cfg=DiagnosticsCurrentConfig();
   out.bench_on=cfg.combat_test_bench;
-  if (!g_copy_verified.load(std::memory_order_acquire) ||
-      !out.bench_on || !cfg.motion_attacks || cfg.observer_only ||
-      !cfg.vr_enabled || !cfg.arm_ik_enabled || cfg.arm_ik_log_only ||
-      XrMenuPresentationActive() || CalibrationCapturesInput()) return false;
+  if (!out.bench_on || !cfg.motion_attacks) return false;
   TrackingFrame frame{};
-  if (!XrLatestTrackingFrame(frame)) return false;
+  const bool have_frame=XrLatestTrackingFrame(frame);
   std::lock_guard<std::mutex> lock(g_hands_mutex);
-  const auto now = GetTickCount64();
-  if (!g_copy_verified.load(std::memory_order_acquire) ||
-      !frame.focused || !frame.orientation_valid || !frame.position_valid ||
-      !g_bench.sequence || g_bench.sequence > frame.sequence ||
-      g_bench.epoch != frame.space_epoch ||
-      now < g_bench.captured_ms || now - g_bench.captured_ms > 250)
+  if (!PublishedHandsCurrent(cfg,frame,have_frame) ||
+      g_bench.sequence!=g_hands.sequence || g_bench.epoch!=g_hands.epoch)
     return false;
   out.fresh = true;
   for (int i = 0; i < 2; ++i) {

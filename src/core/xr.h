@@ -59,6 +59,10 @@ MenuPointerState XrMenuPointerInput(unsigned display_width,
                                     unsigned display_height);
 // Diagnostic camera-application tag only; not a rendered-view provenance tag.
 void XrRecordCameraSequence(std::uint64_t sequence);
+// The exact physical packet applied by the natural camera hook, including the
+// actual symmetric game FOV. Mono composition uses its center-view pose rather
+// than relabelling an already-rendered image with the next runtime prediction.
+void XrRecordCameraFrame(const TrackingFrame& frame, float rendered_vfov_rad);
 // Packet bound by the most recent natural camera update. A newer XR render
 // publication does not replace that camera binding or prove a new native view.
 std::uint64_t XrAppliedCameraSequence();
@@ -78,6 +82,7 @@ bool XrEffectiveRate(EffectiveRate& out);
 // readback, flush or wait is performed to answer this snapshot query.
 struct RenderMetrics {
   std::uint64_t frame_sequence = 0, gpu_frame_sequence = 0;
+  std::uint64_t source_tracking_sequence = 0, target_tracking_sequence = 0;
   std::uint64_t image_timeouts = 0, held_image_skips = 0;
   double cpu_frame_ms = 0, xr_wait_ms = 0, image_wait_ms = 0;
   double source_copy_cpu_ms = 0, eye_blit_cpu_ms = 0, end_frame_cpu_ms = 0;

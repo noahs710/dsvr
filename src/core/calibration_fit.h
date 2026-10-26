@@ -24,6 +24,7 @@ struct CalibrationMapping {
   bool valid = false, fitted = false;
   float world_scale = 1.f;
   float eye_height = 1.65f;  // native units, already converted exactly once
+  float seated_height_offset_m = 0.f; // effective physical lift, zero outside seated mode
   float world_trim = 1.f;
   // Operator body trim, applied to the same one ratio as world_trim. Kept as a
   // separate field so the log and the IK guard can tell "the fit was trimmed"
@@ -82,12 +83,14 @@ inline CalibrationMapping ResolveCalibrationMapping(
     float world_trim, float native_arm_reach = 0.f,
     std::uint64_t model_revision = 0, float native_head_height = 0.f,
     float native_shoulder_width = 0.f, bool prefer_head_fit = true,
-    bool manual_eye_height = false, float avatar_scale = 1.f) {
+    bool manual_eye_height = false, float avatar_scale = 1.f,
+    float seated_height_offset_m = .5f) {
   CalibrationMapping out;
   if (!std::isfinite(fallback_eye_height_m) || fallback_eye_height_m < .5f ||
       fallback_eye_height_m > 2.5f || !std::isfinite(world_trim) ||
       world_trim < .5f || world_trim > 2.f ||
       !std::isfinite(avatar_scale) || avatar_scale < .5f || avatar_scale > 2.f ||
+      !std::isfinite(seated_height_offset_m) || seated_height_offset_m < 0.f || seated_height_offset_m > 1.f ||
       !std::isfinite(native_arm_reach) || native_arm_reach < 0.f ||
       !std::isfinite(native_head_height) || native_head_height < 0.f ||
       !std::isfinite(native_shoulder_width) || native_shoulder_width < 0.f ||
@@ -95,8 +98,8 @@ inline CalibrationMapping ResolveCalibrationMapping(
     return out;
   const float view_height_m =
       CalibrationViewHeight(profile, fallback_eye_height_m, seated, manual_eye_height) +
-      kCalibrationHeightOffsetM;
-  if (!(view_height_m > .5f) || view_height_m > 3.f) return out;
+      kCalibrationHeightOffsetM + (seated ? seated_height_offset_m : 0.f);
+  if (!(view_height_m > .5f) || view_height_m > 4.f) return out;
   const bool arm_available = profile.valid && native_arm_reach > 0.f;
   // A seated floor capture is posture, not standing stature. Use measured
   // reach for scale in that case; never grow/shrink anatomy from sitting.
@@ -141,6 +144,7 @@ inline CalibrationMapping ResolveCalibrationMapping(
   out.eye_height = view_height_m * out.world_scale;
   out.world_trim = world_trim;
   out.avatar_scale = avatar_scale;
+  out.seated_height_offset_m = seated ? seated_height_offset_m : 0.f;
   out.calibration_revision = profile.revision;
   out.valid = std::isfinite(out.world_scale) && out.world_scale > 0.f &&
               std::isfinite(out.eye_height) && out.eye_height > 0.f;

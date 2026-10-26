@@ -17,6 +17,8 @@
 namespace dsvr {
 bool g_camera_gameplay_ready = true;
 bool CameraGameplayReady() { return g_camera_gameplay_ready; }
+// Settable native equipment identity, so a test can swap weapons mid-swing.
+CombatNativeStatus g_combat_status{};
 }
 
 
@@ -25,8 +27,7 @@ const float kHead[3] = {0.0f, 1.6f, 0.0f};
 std::uintptr_t next_handle = 1;
 XrPath left_path = XR_NULL_PATH;
 XrAction stick_action = XR_NULL_HANDLE;
-XrAction dpad_up_action = XR_NULL_HANDLE, dpad_down_action = XR_NULL_HANDLE;
-XrAction dpad_left_action = XR_NULL_HANDLE, dpad_right_action = XR_NULL_HANDLE;
+
 XrAction aim_action = XR_NULL_HANDLE;
 XrAction squeeze_action = XR_NULL_HANDLE;
 XrAction trigger_action = XR_NULL_HANDLE;
@@ -76,7 +77,6 @@ int recenter_calls = 0;
 bool sanctuary = false;
 float left_stick_x = 0;
 float left_stick_y = 0;
-float left_dpad_x = 0, left_dpad_y = 0, right_dpad_x = 0, right_dpad_y = 0;
 std::map<std::string, XrPath> paths;
 std::map<XrPath, std::string> path_names;
 std::map<std::string, std::vector<XrActionSuggestedBinding>> suggested_bindings;
@@ -137,61 +137,50 @@ void ProfileBindings() {
         }
         Expect(squeezes == 2, "squeeze bindings use each profile's supported component");
         Expect(menu, "each full controller profile retains its menu binding");
-        // Quest 3's Touch Plus controllers have no physical D-pad: the Oculus
-        // profile's D-pad equivalent is the thumbstick's four discrete
-        // directions on each hand. A binding that names a path the profile
-         // does not carry looks bound and never answers, so it is a defect.
-         if (std::strcmp(profile,
-                 "/interaction_profiles/oculus/touch_controller") == 0) {
-             int dpad_dirs = 0, phantom = 0;
-             for (const auto& binding : bindings) {
-                 const auto& path = path_names[binding.binding];
-                 for (const char* hand : {"/user/hand/left", "/user/hand/right"})
-                     for (const char* dir :
-                          {"thumb_up", "thumb_down", "thumb_left", "thumb_right"})
-                        dpad_dirs += path ==
-                                     (std::string(hand) + "/input/" + dir);
-                phantom += path == "/user/hand/left/input/x_axis" ||
-                           path == "/user/hand/left/input/y_axis";
-            }
-            Expect(dpad_dirs == 8,
-                   "the Quest Touch set binds the D-pad directions it exposes");
-            Expect(phantom == 0,
-                   "no Quest binding names a Touch-profile path that is absent");
-        }
+        if (std::strcmp(profile, "/interaction_profiles/oculus/touch_controller") == 0)
+            Expect(bindings.size() == 19,
+                   "Touch accepts its entire supported profile without phantom directions");
     }
 }
 
-void LiveBindingReattach() {
-    const XrSpace base = reinterpret_cast<XrSpace>(100);
+void ResetRoomscaleTestControls();
+void DeferredBindingEdits() {
+    const auto base = reinterpret_cast<XrSpace>(100);
     const char* quest = "/interaction_profiles/oculus/touch_controller";
     const char* motion = "/interaction_profiles/microsoft/motion_controller";
     const int sets = destroyed_sets, spaces = destroyed_spaces;
     const int quest_before = suggestion_counts[quest];
     const int motion_before = suggestion_counts[motion];
     const auto saved = config;
+    ResetRoomscaleTestControls();
+    dsvr::InputPollFrame(base, kHead, 1, 3200000000LL);
+    right_primary = true;
+    dsvr::InputPollFrame(base, kHead, 1, 3210000000LL);
+    dsvr::VirtualPadState before{};
+    Expect(dsvr::InputLatestPad(before) && (before.buttons & dsvr::kPadA),
+           "the held A is already reaching the game before a binding edit");
     config.binding_live_reattach = true;
     config.bind_profile_wmr = false;
+    right_primary = true;
     dsvr::InputRequestBindingReload();
-    dsvr::InputPollFrame(base, kHead, 1, 3100000000LL);
-    Expect(destroyed_sets == sets + 1 && destroyed_spaces == spaces + 4,
-           "the old set and its pose spaces are freed before a new one is built");
-    Expect(suggestion_counts[quest] == quest_before + 1,
-           "the surviving profiles are suggested again by the rebuilt set");
-    Expect(suggestion_counts[motion] == motion_before,
-           "a profile switched off is never suggested again");
-    Expect(dsvr::InputAvailable(), "a rebuilt set keeps controller input live");
-    // An unchanged profile set costs the player nothing: no teardown, no blip.
-    dsvr::InputPollFrame(base, kHead, 1, 3110000000LL);
-    Expect(destroyed_sets == sets + 1,
-           "an edit that changed no binding cannot cost another input dropout");
-    // With re-apply off, a request must not tear down a working session.
-    config.bind_profile_wmr = true;
+    dsvr::InputPollFrame(base, kHead, 1, 3220000000LL);
+    dsvr::VirtualPadState pad{};
+    Expect(dsvr::InputAvailable() && dsvr::InputLatestPad(pad) &&
+           (pad.buttons & dsvr::kPadA),
+           "binding edits preserve the live controller and its current A press");
+    Expect(destroyed_sets == sets && destroyed_spaces == spaces,
+           "an immutable attached set and its spaces are never destroyed for reload");
+    Expect(suggestion_counts[quest] == quest_before &&
+           suggestion_counts[motion] == motion_before,
+           "profile edits are deferred instead of re-suggested or re-attached");
+    dsvr::InputPollFrame(base, kHead, 1, 3230000000LL);
+    Expect(dsvr::InputAvailable(), "deferred changes do not break subsequent input polls");
     config.binding_live_reattach = false;
     dsvr::InputRequestBindingReload();
-    dsvr::InputPollFrame(base, kHead, 1, 3120000000LL);
-    Expect(destroyed_sets == sets + 1 && dsvr::InputAvailable(),
-           "without live re-apply the session keeps the bindings it already has");
+    dsvr::InputPollFrame(base, kHead, 1, 3240000000LL);
+    Expect(destroyed_sets == sets && dsvr::InputAvailable(),
+           "both legacy reload preferences preserve the active session");
+    right_primary = false;
     config = saved;
 }
 
@@ -318,79 +307,98 @@ void ResetRoomscaleTestControls() {
     sanctuary = false;
     left_stick_x = 0;
     left_stick_y = 0;
-     left_dpad_x = left_dpad_y = right_dpad_x = right_dpad_y = 0;
+    left_stick_click = right_stick_click = false;
      left_primary = false;
 }
 void DigitalDpad() {
-    // The reported gap: the Quest 3 D-pad was never bound at all, so the game's
-    // item/spell/equip/map channel and the native menu's own navigation channel
-    // were both unreachable from the headset, and the mod menu's panel list was
-    // reachable only by aiming a ray at it.
-    const XrSpace base = reinterpret_cast<XrSpace>(100);
+    using namespace dsvr;
+    const auto base = reinterpret_cast<XrSpace>(100);
     ResetRoomscaleTestControls();
-    dsvr::InputPublishHeadDirectedLocomotion({0, 0, 1}, {0, 0, 1}, 1);
-    dsvr::VirtualPadState pad{};
-    left_dpad_y = 1.0f;
-    dsvr::InputInvalidateFrame();
-    dsvr::InputPollFrame(base, kHead, 1, 17000000000LL);
-    Expect(dsvr::InputLatestPad(pad) && (pad.buttons & dsvr::kPadDpadUp) &&
-           pad.thumb_lx == 0 && pad.thumb_ly == 0,
-           "the controller D-pad reaches the game's d-pad channel during gameplay");
-    left_dpad_y = 0.0f;
-    left_dpad_x = -1.0f;
-    dsvr::InputPollFrame(base, kHead, 1, 17001000000LL);
-    Expect(dsvr::InputLatestPad(pad) && (pad.buttons & dsvr::kPadDpadLeft) &&
-           !(pad.buttons & dsvr::kPadDpadUp),
-           "a D-pad press replaces the previous direction instead of stacking it");
-    // Menu navigation: the D-pad is the direct channel and wins; the left stick
-    // keeps synthesising the same bits for profiles that expose no D-pad.
-    dsvr::g_camera_gameplay_ready = false;
-    left_dpad_x = 0.0f;
-    left_dpad_y = -1.0f;
-    left_stick_x = 0.9f;  // this stick alone would synthesise a right press
-    dsvr::InputPollFrame(base, kHead, 1, 17002000000LL);
-    Expect(dsvr::InputLatestPad(pad) && (pad.buttons & dsvr::kPadDpadDown) &&
-           !(pad.buttons & dsvr::kPadDpadRight),
-           "a real D-pad wins over stick-synthesised menu navigation");
-    left_dpad_x = left_dpad_y = 0.0f;
-    dsvr::InputPollFrame(base, kHead, 1, 17003000000LL);
-    Expect(dsvr::InputLatestPad(pad) && (pad.buttons & dsvr::kPadDpadRight),
-           "the left stick still synthesises menu navigation with no D-pad held");
-    left_stick_x = left_stick_y = 0.0f;
-    dsvr::g_camera_gameplay_ready = true;
-    // The spatial menu receives the same D-pad as navigation, and the left
-    // hand's X/Y step its panel list: a headset has no Tab key.
+    InputInvalidateFrame();
+    long long time = 17000000000LL;
+    VirtualPadState pad{};
+    const auto poll = [&] {
+        InputPublishHeadDirectedLocomotion({0, 0, 1}, {0, 0, 1}, 1);
+        InputPollFrame(base, kHead, 1, time);
+        time += 10000000LL;
+        Expect(InputLatestPad(pad), "valid actions keep the virtual controller available");
+    };
+    left_stick_y = 0.9f;
+    poll();
+    Expect(pad.thumb_ly > 0 && !(pad.buttons & kPadDpadUp),
+           "ordinary stick movement walks without selecting equipment");
+    left_stick_click = true;
+    poll();
+    Expect((pad.buttons & kPadDpadUp) && pad.thumb_ly == 0 &&
+           !(pad.buttons & kPadLeftThumb),
+           "click plus stick selects without walking or a native jump");
+    left_stick_y = 0;
+    left_stick_x = -1;
+    poll();
+    Expect((pad.buttons & kPadDpadLeft) && !(pad.buttons & kPadDpadUp),
+           "changing direction replaces the previous D-pad press");
+    left_stick_click = false;
+    poll();
+    Expect(pad.buttons == 0 && pad.thumb_lx == 0,
+           "modifier release while deflected cannot lunge or jump");
+    poll();
+    Expect(pad.thumb_lx == 0, "movement stays disarmed until stick centre");
+    left_stick_x = 0;
+    poll();
+    left_stick_y = 0.9f;
+    poll();
+    Expect(pad.thumb_ly > 0, "fresh deflection walks after returning to centre");
+    left_stick_y = 0;
+    left_stick_click = true;
+    poll();
+    Expect(!(pad.buttons & kPadLeftThumb), "neutral click cannot jump early");
+    left_stick_click = false;
+    poll();
+    Expect(pad.buttons & kPadLeftThumb, "neutral lone click preserves L3 on release");
+    poll();
+    Expect(pad.buttons & kPadLeftThumb, "deferred L3 survives slower native polls");
+    time += 120000000LL;
+    poll();
+    Expect(!(pad.buttons & kPadLeftThumb), "deferred L3 releases after its bounded hold");
+    g_camera_gameplay_ready = false;
+    left_stick_x = 0.9f;
+    poll();
+    Expect((pad.buttons & kPadDpadRight) && pad.thumb_lx == 0,
+           "native menus navigate without a modifier");
+    g_camera_gameplay_ready = true;
     menu_capture = true;
-    left_dpad_x = 1.0f;
     left_primary = true;
-    dsvr::InputPollFrame(base, kHead, 1, 17004000000LL);
-    Expect(menu_x == 1.0f && menu_y == 0.0f && menu_prev && !menu_next,
-           "the D-pad navigates the spatial menu and X steps the panel list");
+    poll();
+    Expect(menu_x == 0.9f && menu_y == 0 && menu_prev && !menu_next,
+           "spatial menus keep stick navigation and X panel selection");
     left_primary = false;
-    left_dpad_x = 0.0f;
-    dsvr::InputPollFrame(base, kHead, 1, 17005000000LL);
-    Expect(menu_x == 0.0f && !menu_prev && !menu_next,
-           "a released D-pad and face button leave the menu idle");
     left_secondary = true;
-    dsvr::InputPollFrame(base, kHead, 1, 17006000000LL);
-    Expect(menu_next && !menu_prev, "Y steps the panel list forward");
+    poll();
+    Expect(menu_next && !menu_prev, "Y selects the next spatial panel");
     left_secondary = false;
-    // A D-pad held while the menu closes must not leak into the game.
-    left_dpad_y = -1.0f;
-    dsvr::InputPollFrame(base, kHead, 1, 17007000000LL);
-    Expect(menu_y == -1.0f, "the D-pad still navigates while the menu is open");
+    left_stick_click = true;
+    poll();
     menu_capture = false;
-    dsvr::InputPollFrame(base, kHead, 1, 17008000000LL);
-    Expect(dsvr::InputLatestPad(pad) && !(pad.buttons & dsvr::kPadDpadDown),
-           "a D-pad held when the menu closes cannot leak into the game");
-    left_dpad_y = 0.0f;
-    dsvr::InputPollFrame(base, kHead, 1, 17009000000LL);
-    left_dpad_y = -1.0f;
-    dsvr::InputPollFrame(base, kHead, 1, 17010000000LL);
-    Expect(dsvr::InputLatestPad(pad) && (pad.buttons & dsvr::kPadDpadDown),
-           "the D-pad works again once its capture latch is released");
-    left_dpad_y = 0.0f;
-    dsvr::InputInvalidateFrame();
+    poll();
+    Expect(pad.buttons == 0 && pad.thumb_lx == 0,
+           "held menu navigation and modifier cannot leak into gameplay");
+    left_stick_click = false;
+    left_stick_x = 0;
+    poll();
+    left_pose_valid = false;
+    left_stick_click = true;
+    left_stick_y = -1;
+    poll();
+    Expect((pad.buttons & kPadDpadDown) && pad.thumb_ly == 0,
+           "D-pad remains usable when grip tracking is lost");
+    InputInvalidateFrame();
+    left_pose_valid = true;
+    left_stick_click = false;
+    left_stick_y = 0;
+    poll();
+    Expect(pad.buttons == 0, "invalidation cannot synthesize a pending L3 click");
+    ResetRoomscaleTestControls();
+    InputInvalidateFrame();
 }
 void HeadDirectedLocomotion() {
     const XrSpace base = reinterpret_cast<XrSpace>(100);
@@ -1100,6 +1108,141 @@ void PhysicalAttacks() {
     reset();
     right_stick_value = 1;
 }
+
+// A rested reach with no bound native target must not tap interact.
+// InteractionTargetEligibility has no producer yet (H1 prompt/LOS owner
+// open), so the default refuses everything and the reach path logs the
+// refusal instead of silently pressing A at a wall or an enemy's face.
+void UntargetedReachRefuses() {
+    using namespace dsvr;
+    const auto saved = config;
+    const bool saved_left_pose = left_pose_valid;
+    const bool saved_right_pose = right_pose_valid;
+    left_pose_valid = right_pose_valid = true;
+    ResetRoomscaleTestControls();
+    config.reach_interact = true;
+    config.arm_ik_enabled = true;
+    config.arm_ik_log_only = false;
+    config.arm_ik_block_animation = true;
+    config.motion_attacks = true;
+    applied_hands_valid = true;
+    applied_hands_epoch = 1;
+    InputInvalidateFrame();
+    const auto base = reinterpret_cast<XrSpace>(100);
+    long long time = 6000000000LL;
+    const std::uint64_t epoch = 1;
+    VirtualPadState pad{};
+    // Both hands rest, then the left hand thrusts forward: the exact shape
+    // the reach bridge arms on. Head-relative forward is -Z of the base
+    // space, so advancing +X with the head looking +X-equivalent is a
+    // sideways sweep, not a reach; the fixture instead moves the hand along
+    // the head-forward axis by editing grip Z against a fixed head.
+    const auto poll = [&] {
+        InputPublishHeadDirectedLocomotion({0, 0, 1}, {0, 0, 1}, 1);
+        InputPollFrame(base, kHead, epoch, time);
+        time += 11111111LL;
+        Expect(InputLatestPad(pad), "valid actions keep the pad available");
+    };
+    for (int n = 0; n < 40; ++n) {
+        grip_position[0][0] = grip_position[0][1] = grip_position[0][2] = 0.0f;
+        grip_position[1][0] = grip_position[1][1] = grip_position[1][2] = 0.0f;
+        poll();
+    }
+    bool any_a = false;
+    for (int n = 0; n < 30; ++n) {
+        // ~2.4 m/s forward: head at z=0, grip z advances 0.027 m/frame.
+        grip_position[0][2] -= 0.027f;
+        poll();
+        any_a = any_a || ((pad.buttons & kPadA) != 0);
+    }
+    Expect(!any_a, "an untargeted reach never taps native interact");
+    config = saved;
+    left_pose_valid = saved_left_pose;
+    right_pose_valid = saved_right_pose;
+    applied_hands_valid = false;
+    InputInvalidateFrame();
+}
+
+// A weapon swap, stance change or new player actor must not leave an armed
+// swing from the previous equipment alive on the pad, and must not kill the
+// bridge for the new equipment either.
+void EquipmentReprime() {
+    using namespace dsvr;
+    const auto saved = config;
+    const auto saved_status = g_combat_status;
+    const bool saved_left_pose = left_pose_valid;
+    const bool saved_right_pose = right_pose_valid;
+    left_pose_valid = right_pose_valid = true;
+    ResetRoomscaleTestControls();
+    right_stick_value = 0;
+    config.arm_ik_enabled = true;
+    config.arm_ik_log_only = false;
+    config.arm_ik_block_animation = true;
+    config.motion_attacks = config.physical_attacks = true;
+    config.dominant_hand_left = false;
+    config.swing_attack_speed_min = 2;
+    config.swing_attack_heavy_min = 4.5f;
+    config.swing_attack_cooldown_ms = 500;
+    applied_hands_valid = true;
+    applied_hands_epoch = 9;
+    g_combat_status = {};
+    g_combat_status.equipment_bound = true;
+    g_combat_status.equipment.player = 0x1000;
+    g_combat_status.equipment.weapon_id[1] = 7;
+    long long time = 4000000000LL;
+    const std::uint64_t epoch = 9;
+    int light_edges = 0, heavy_edges = 0;
+    bool last_light = false, last_heavy = false;
+    VirtualPadState last{};
+    const auto reset = [&] {
+        InputInvalidateFrame();
+        light_edges = heavy_edges = 0;
+        last_light = last_heavy = false;
+        std::memset(grip_position, 0, sizeof(grip_position));
+    };
+    const auto move = [&](int side, float speed, int frames) {
+        for (int n = 0; n < frames; ++n) {
+            time += 11111111LL;
+            grip_position[side][0] += speed / 90.0f;
+            InputPollFrame(reinterpret_cast<XrSpace>(100), kHead, epoch, time);
+            InputLatestPad(last);
+            const bool light = (last.buttons & kPadRightShoulder) != 0;
+            const bool heavy = last.right_trigger != 0;
+            light_edges += light && !last_light;
+            heavy_edges += heavy && !last_heavy;
+            last_light = light;
+            last_heavy = heavy;
+        }
+    };
+    reset(); move(1, 0, 40); move(1, 6, 4);
+    g_combat_status.equipment.weapon_id[1] = 42;
+    move(1, 6, 30);
+    Expect(light_edges == 0 && heavy_edges == 0,
+           "a weapon swap mid-swing discards the armed physical swing");
+    reset(); move(1, 0, 40); move(1, 6, 30);
+    Expect(heavy_edges == 1 && light_edges == 0,
+           "the new weapon arms and fires a fresh physical swing");
+    reset(); move(1, 0, 40); move(1, 6, 4);
+    g_combat_status.equipment.native_stance = 1;
+    move(1, 6, 30);
+    Expect(light_edges == 0 && heavy_edges == 0,
+           "a stance change mid-swing discards the armed physical swing");
+    reset(); move(1, 0, 40); move(1, 6, 4);
+    g_combat_status.equipment.player = 0x2000;
+    move(1, 6, 30);
+    Expect(light_edges == 0 && heavy_edges == 0,
+           "a new player actor mid-swing discards the armed physical swing");
+    reset(); move(1, 0, 40); move(1, 6, 30);
+    Expect(heavy_edges == 1, "the bridge remains live after the identity reprime");
+    config = saved;
+    g_combat_status = saved_status;
+    left_pose_valid = saved_left_pose;
+    right_pose_valid = saved_right_pose;
+    applied_hands_valid = false;
+    applied_hands_epoch = 1;
+    reset();
+    right_stick_value = 1;
+}
 void CapturedInput() {
     const XrSpace base = reinterpret_cast<XrSpace>(100);
     config.arm_ik_enabled = false;
@@ -1267,7 +1410,7 @@ void CapturedInput() {
 
 namespace dsvr {
 Config DiagnosticsCurrentConfig() { return config; }
-CombatNativeStatus CombatNativeGetStatus() { return {}; }
+CombatNativeStatus CombatNativeGetStatus() { return g_combat_status; }
 bool ArmIkLatestHands(ArmIkHands& out) {
     out = {};
     out.sequence = 1;
@@ -1319,20 +1462,37 @@ XRAPI_ATTR XrResult XRAPI_CALL xrCreateAction(XrActionSet, const XrActionCreateI
     if (std::strcmp(info->actionName, "primary") == 0) primary_action = *out;
     if (std::strcmp(info->actionName, "secondary") == 0) secondary_action = *out;
     if (std::strcmp(info->actionName, "stick_click") == 0) stick_click_action = *out;
-    if (std::strcmp(info->actionName, "dpad_up") == 0) dpad_up_action = *out;
-    if (std::strcmp(info->actionName, "dpad_down") == 0) dpad_down_action = *out;
-    if (std::strcmp(info->actionName, "dpad_left") == 0) dpad_left_action = *out;
-    if (std::strcmp(info->actionName, "dpad_right") == 0) dpad_right_action = *out;
     return XR_SUCCESS;
 }
 XRAPI_ATTR XrResult XRAPI_CALL xrSuggestInteractionProfileBindings(XrInstance, const XrInteractionProfileSuggestedBinding* info) {
     const auto& profile = path_names[info->interactionProfile];
+    if (profile == "/interaction_profiles/oculus/touch_controller") {
+        for (uint32_t i = 0; i < info->countSuggestedBindings; ++i) {
+            const auto& path = path_names[info->suggestedBindings[i].binding];
+            const bool left = path.starts_with("/user/hand/left/");
+            const bool right = path.starts_with("/user/hand/right/");
+            const std::string component = path.substr(left ? 15 : 16);
+            bool supported = false;
+            for (const char* common : {"/input/grip/pose", "/input/aim/pose",
+                    "/input/squeeze/value", "/input/trigger/value",
+                    "/input/thumbstick", "/input/thumbstick/click", "/output/haptic"})
+                supported |= component == common;
+            supported |= left && (component == "/input/x/click" ||
+                component == "/input/y/click" || component == "/input/menu/click");
+            supported |= right && (component == "/input/a/click" ||
+                component == "/input/b/click");
+            if ((!left && !right) || !supported) return XR_ERROR_PATH_UNSUPPORTED;
+        }
+    }
     suggested_bindings[profile].assign(info->suggestedBindings,
                                      info->suggestedBindings + info->countSuggestedBindings);
     ++suggestion_counts[profile];
     return XR_SUCCESS;
 }
-XRAPI_ATTR XrResult XRAPI_CALL xrAttachSessionActionSets(XrSession, const XrSessionActionSetsAttachInfo*) {
+XRAPI_ATTR XrResult XRAPI_CALL xrAttachSessionActionSets(XrSession session, const XrSessionActionSetsAttachInfo*) {
+    static std::map<XrSession, bool> attached;
+    if (attached[session]) return XR_ERROR_ACTIONSETS_ALREADY_ATTACHED;
+    attached[session] = true;
     return XR_SUCCESS;
 }
 XRAPI_ATTR XrResult XRAPI_CALL xrCreateActionSpace(XrSession, const XrActionSpaceCreateInfo* info, XrSpace* out) {
@@ -1343,7 +1503,7 @@ XRAPI_ATTR XrResult XRAPI_CALL xrCreateActionSpace(XrSession, const XrActionSpac
 XRAPI_ATTR XrResult XRAPI_CALL stub_destroy_action_space(XrSpace) { ++destroyed_spaces; return XR_SUCCESS; }
 XRAPI_ATTR XrResult XRAPI_CALL stub_destroy_action_set(XrActionSet) { ++destroyed_sets; return XR_SUCCESS; }
 XRAPI_ATTR XrResult XRAPI_CALL xrGetInstanceProcAddr(XrInstance, const char* name, PFN_xrVoidFunction* out) {
-    if (std::strcmp(name, "xrDestroyActionSpace") == 0) {
+    if (std::strcmp(name, "xrDestroySpace") == 0) {
         *out = reinterpret_cast<PFN_xrVoidFunction>(&stub_destroy_action_space);
         return XR_SUCCESS;
     }
@@ -1394,21 +1554,6 @@ XRAPI_ATTR XrResult XRAPI_CALL xrGetActionStateBoolean(XrSession, const XrAction
         out->currentState = left_primary ? XR_TRUE : XR_FALSE;
     if (info->action == stick_click_action)
         out->currentState = (info->subactionPath == left_path ? left_stick_click : right_stick_click) ? XR_TRUE : XR_FALSE;
-    // The D-pad is four booleans, exactly as the Oculus Touch profile publishes
-    // it. The test still drives it with signed axes and the stub resolves them
-    // into the discrete directions a runtime would report.
-    if (info->action == dpad_up_action || info->action == dpad_down_action ||
-        info->action == dpad_left_action || info->action == dpad_right_action) {
-        const bool right = info->subactionPath != left_path;
-        const float x = right ? right_dpad_x : left_dpad_x;
-        const float y = right ? right_dpad_y : left_dpad_y;
-        bool pressed = false;
-        if (info->action == dpad_up_action) pressed = y >= 0.5f;
-        else if (info->action == dpad_down_action) pressed = y <= -0.5f;
-        else if (info->action == dpad_left_action) pressed = x <= -0.5f;
-        else pressed = x >= 0.5f;
-        out->currentState = pressed ? XR_TRUE : XR_FALSE;
-    }
     return XR_SUCCESS;
 }
 XRAPI_ATTR XrResult XRAPI_CALL xrGetActionStateFloat(XrSession, const XrActionStateGetInfo* info, XrActionStateFloat* out) {
@@ -1508,12 +1653,12 @@ int main() {
     ReferenceChords();
     CalibratedRoomscale();
     PhysicalAttacks();
+    EquipmentReprime();
     PhysicalDefence();
+    UntargetedReachRefuses();
     DigitalDpad();
         CapturedInput();
-    // Last: it moves the clock forward and rebuilds the action set, so nothing
-    // that polls an earlier timestamp may run after it.
-    LiveBindingReattach();
+    DeferredBindingEdits();
     if (failures != 0) return 1;
     std::puts("input tests passed");
     return 0;

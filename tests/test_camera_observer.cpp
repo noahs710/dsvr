@@ -135,6 +135,7 @@ bool XrLatestTrackingFrame(TrackingFrame& frame) {
   return true;
 }
 void XrRecordCameraSequence(std::uint64_t sequence) { MutationCall(); applied_sequence = sequence; }
+void XrRecordCameraFrame(const TrackingFrame& frame,float) { XrRecordCameraSequence(frame.sequence); }
 float InputTakeTurnYaw() { MutationCall(); return 1; }
 void ArmIkTick(const TrackingFrame&) { MutationCall(); }
 bool ArmIkNativeReach(float& reach, std::uint64_t& revision) {

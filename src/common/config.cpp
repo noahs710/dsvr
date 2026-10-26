@@ -203,6 +203,8 @@ void Apply(Config& c, std::string_view section_raw, std::string_view key_raw,
     if (k == "eye_height_override" && ParseBool(value, b)) c.eye_height_override = b;
     if (k == "eye_height" && ParseFloat(value, f))
       c.eye_height = Clamp(f, 0.5f, 2.5f);
+    if (k == "seated_height_offset_m" && ParseFloat(value, f))
+      c.seated_height_offset_m = Clamp(f, 0.f, 1.f);
     if (k == "world_scale" && ParseFloat(value, f))
       c.world_scale = Clamp(f, 0.5f, 2.0f);
       if (k == "avatar_scale" && ParseFloat(value, f))
@@ -505,6 +507,7 @@ bool ConfigSave(const wchar_t* toml_path, const Config& c) {
   fprintf(f, "# Calibrated eye height by default; manual override is opt-in in the mod menu.\n");
   fprintf(f, "eye_height_override = %s\n", c.eye_height_override ? "true" : "false");
   fprintf(f, "eye_height = %s\n", FmtFloat(c.eye_height).c_str());
+  fprintf(f, "seated_height_offset_m = %s\n", FmtFloat(c.seated_height_offset_m).c_str());
   fprintf(f, "world_scale = %s\n", FmtFloat(c.world_scale).c_str());
   fprintf(f, "# Avatar size trim: a second multiplier on the same applied camera packet,\n");
   fprintf(f, "# so head, hands, roomscale and the IK body read one value. Not a mesh resize.\n");
@@ -593,6 +596,7 @@ bool ConfigValid(const Config& c) {
       range(c.smooth_turn_speed_dps, 30, 360) && range(c.mono_screen_fov_deg, 30, 110) &&
       range(c.menu_distance_m, 1, 4) && range(c.menu_reading_fov_deg, 45, 80) &&
       range(c.eye_height, .5f, 2.5f) && range(c.world_scale, .5f, 2) &&
+      range(c.seated_height_offset_m, 0, 1) &&
       range(c.forward_offset_m, 0, .4f) && range(c.eye_clearance_m, 0, 1.2f) &&
       range(c.swing_speed_min, .2f, 10) &&
       range(c.swing_damage_gain, .1f, 5) && range(c.thrust_speed_min, .2f, 10) &&

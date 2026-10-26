@@ -56,6 +56,9 @@ dsvr::UserCalibration calibration_profile{};
 bool gameplay_ready = true, mod_menu_visible = false, calibration_visible = false;
 bool physical_trigger = false;
 bool tracking_valid=true,should_render=true;
+float head_yaw=0;
+XrPosef last_projection_pose{};
+XrPosef last_projection_poses[2]{};
 XrFovf view_fov[2]{{-1,1,1,-1},{-1,1,1,-1}};
 bool block_inactive_wait=false;
 HANDLE inactive_wait_entered=nullptr,inactive_wait_release=nullptr;
@@ -196,7 +199,8 @@ XRAPI_ATTR XrResult XRAPI_CALL TestLocateViews(XrSession, const XrViewLocateInfo
       XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_VALID_BIT:0;
   *count = 2;
   for (int eye = 0; eye < 2; ++eye) {
-    views[eye].pose.orientation.w = 1;
+    views[eye].pose.orientation.y=std::sin(head_yaw*.5f);
+    views[eye].pose.orientation.w=std::cos(head_yaw*.5f);
     views[eye].pose.position.x = eye ? .032f : -.032f;
     views[eye].fov = view_fov[eye];
   }
@@ -206,6 +210,8 @@ XRAPI_ATTR XrResult XRAPI_CALL TestLocateSpace(XrSpace, XrSpace, XrTime, XrSpace
   out->locationFlags = tracking_valid?
       XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT:0;
   out->pose.orientation.w = 1;
+  out->pose.orientation.y=std::sin(head_yaw*.5f);
+  out->pose.orientation.w=std::cos(head_yaw*.5f);
   out->pose.position.y = 1.6f;
   return XR_SUCCESS;
 }
@@ -238,6 +244,14 @@ XRAPI_ATTR XrResult XRAPI_CALL TestEndFrame(XrSession, const XrFrameEndInfo* inf
   frame_begun = false;
   if (info->layerCount) {
     if (acquired[0] || acquired[1]) bad_order = true;
+    if (info->layers[0]->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
+      const auto* layer = reinterpret_cast<const XrCompositionLayerProjection*>(info->layers[0]);
+      if (layer->viewCount != 2) bad_order = true;
+      else {
+        for (unsigned eye = 0; eye < 2; ++eye) last_projection_poses[eye] = layer->views[eye].pose;
+        last_projection_pose = last_projection_poses[0];
+      }
+    }
     ++submitted;
   }
   return XR_SUCCESS;
@@ -328,6 +342,15 @@ void InputCopyTrackingSamples(HandSample hands[2], ArmTarget arms[2]) {
 void VrTraceRecord(VrTraceEvent) {}
 }
 
+// Model the natural game camera between Presents. The source image belongs to
+// this packet; xrWaitFrame in the following submission predicts a newer one.
+void SubmitMono(void* image) {
+  dsvr::TrackingFrame source;
+  if(dsvr::XrLatestTrackingFrame(source))
+    dsvr::XrRecordCameraFrame(source,source.vfov_rad*std::clamp(config.fov_scale,.7f,1.3f));
+  dsvr::XrSubmitMonoFrame(image);
+}
+
 int main() {
   using namespace dsvr;
   CHECK(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0,
@@ -407,6 +430,7 @@ int main() {
   // During title/login there may be no follow-camera callback at all, so the
   // title-camera heuristic cannot be the only way to enable menu navigation.
   gameplay_ready=false;g_menu_debounce=MenuDebouncer{0};
+  head_yaw=.2f;
   XrSubmitMonoFrame(backbuffer);
   CHECK(XrMenuPresentationActive());
   ID3D11RenderTargetView* restored_target=nullptr;
@@ -432,9 +456,13 @@ int main() {
   // the CPU. This used to allocate/map two staging textures every 600 frames.
   g_submitted = 600;
   const unsigned maps_before = readback_maps;
+  TrackingFrame rendered_pose{};CHECK(XrLatestTrackingFrame(rendered_pose));
+  XrRecordCameraFrame(rendered_pose,rendered_pose.vfov_rad);
+  head_yaw=.6f; // runtime advances AFTER the game has rendered the old camera
   gameplay_ready=true;
   XrSubmitMonoFrame(backbuffer);
   CHECK(!XrMenuPresentationActive());
+  CHECK(std::fabs(last_projection_pose.orientation.y-rendered_pose.head_quat[1])<1e-6f);
   const unsigned periodic_readbacks = readback_maps - maps_before;
   std::printf("Mono work: first-frame source copies=%u, periodic CPU readbacks=%u\n",
               first_frame_copies, periodic_readbacks);
@@ -442,16 +470,61 @@ int main() {
   CHECK(periodic_readbacks == 0);
   RenderMetrics metrics{};
   CHECK(XrRenderMetricsSnapshot(metrics));
+  CHECK(metrics.source_tracking_sequence==rendered_pose.sequence);
+  CHECK(metrics.target_tracking_sequence>metrics.source_tracking_sequence);
   CHECK(metrics.frame_sequence == 2 && metrics.submitted);
   CHECK(metrics.source_copies == 1 && metrics.eye_draws == 2);
   CHECK(metrics.source_width == 64 && metrics.source_height == 64);
   CHECK(metrics.eye_width == 64 && metrics.eye_height == 64);
   CHECK(metrics.cpu_frame_ms >= metrics.xr_wait_ms);
   CHECK(metrics.cpu_frame_ms >= metrics.source_copy_cpu_ms);
+    for (unsigned eye = 0; eye < 2; ++eye) {
+      const auto& pose = last_projection_poses[eye];
+      CHECK(std::fabs(pose.orientation.y - rendered_pose.head_quat[1]) < 1e-6f);
+      CHECK(std::fabs(pose.orientation.w - rendered_pose.head_quat[3]) < 1e-6f);
+      CHECK(std::fabs(pose.position.x - rendered_pose.head_pos[0]) < 1e-6f);
+      CHECK(std::fabs(pose.position.y - rendered_pose.head_pos[1]) < 1e-6f);
+      CHECK(std::fabs(pose.position.z - rendered_pose.head_pos[2]) < 1e-6f);
+    }
+    // Reject bad source provenance without losing the next camera prediction.
+    // Recovery needs a natural camera receipt, not a diagnostic sequence tag.
+    for (unsigned mutation = 0; mutation < 13; ++mutation) {
+      TrackingFrame source{};
+      CHECK(XrLatestTrackingFrame(source));
+      float vfov = source.vfov_rad;
+      switch (mutation) {
+        case 0: source.sequence = 0; break;
+        case 1: ++source.space_epoch; break;
+        case 2: source.captured_ms = GetTickCount64() - 101; break;
+        case 3: source.captured_ms = GetTickCount64() + 1000; break;
+        case 4: source.predicted_time_ns = 0; break;
+        case 5: source.predicted_time_ns = predicted + 1'000'000'000; break;
+        case 6: source.focused = false; break;
+        case 7: source.orientation_valid = false; break;
+        case 8: source.position_valid = false; break;
+        case 9: vfov = .5f; break;
+        case 10: vfov = 3.1f; break;
+        case 11: source.fov_aspect = 0; break;
+        default: break;
+      }
+      XrRecordCameraFrame(source, vfov);
+      if (mutation == 12) XrRecordCameraSequence(source.sequence);
+      const auto before_submit = submitted, before_copy = source_copies;
+      XrSubmitMonoFrame(backbuffer);
+      CHECK(submitted == before_submit && source_copies == before_copy);
+      CHECK(!frame_begun && !acquired[0] && !acquired[1]);
+      TrackingFrame fresh{};
+      CHECK(XrLatestTrackingFrame(fresh) && fresh.sequence > source.sequence);
+      XrRecordCameraFrame(fresh, fresh.vfov_rad);
+      XrSubmitMonoFrame(backbuffer);
+      CHECK(submitted == before_submit + 1);
+      CHECK(XrRenderMetricsSnapshot(metrics) && metrics.submitted);
+      CHECK(metrics.source_tracking_sequence == fresh.sequence);
+    }
   // A later missing camera sample (load/death/tracking transition) must not
   // reinterpret the locomotion stick as front-end navigation.
   gameplay_ready=false;
-  XrSubmitMonoFrame(backbuffer);
+  SubmitMono(backbuffer);
   CHECK(!XrMenuPresentationActive());
   gameplay_ready=true;
   // Even a GPU that never completes a timestamp query cannot stall rendering
@@ -459,7 +532,7 @@ int main() {
   force_queries_pending = true;
   for (unsigned frame = 0; frame < 130; ++frame) {
     const auto before = query_polls;
-    XrSubmitMonoFrame(backbuffer);
+    SubmitMono(backbuffer);
     CHECK(query_polls - before <= 4);
   }
   CHECK(!query_flush_requested && readback_maps == maps_before);
@@ -469,7 +542,7 @@ int main() {
   for (unsigned attempt = 0; attempt < 30; ++attempt) {
     g_context->Flush();
     Sleep(1);
-    XrSubmitMonoFrame(backbuffer);
+    SubmitMono(backbuffer);
     CHECK(XrRenderMetricsSnapshot(metrics));
     if (metrics.gpu_valid) break;
   }
@@ -494,20 +567,20 @@ int main() {
       g_context->Unmap(readback,0);return value;
     };
     comfort_motion={.7f,0};config.comfort_vignette=true;config.vignette_strength=1;
-    for(unsigned i=0;i<45;++i)XrSubmitMonoFrame(backbuffer);
+    for(unsigned i=0;i<45;++i)SubmitMono(backbuffer);
     CHECK(pixel(0,32,32)>250 && pixel(1,32,32)>250);
     const int left=pixel(0,2,32),right=pixel(1,2,32);
     CHECK(left>=0 && left<200 && std::abs(left-right)<=1);
     CHECK(pixel(0,12,32)>left); // feathered aperture, not a hard rectangle
     comfort_motion={1,0};
     view_fov[0]={-1.1f,.7f,.9f,-.8f};view_fov[1]={-.7f,1.1f,.9f,-.8f};
-    for(unsigned i=0;i<45;++i)XrSubmitMonoFrame(backbuffer);
+    for(unsigned i=0;i<45;++i)SubmitMono(backbuffer);
     CHECK(pixel(0,44,35)>250 && pixel(1,19,35)>250); // asymmetric optical axes
     CHECK(pixel(0,25,35)<60 && pixel(1,38,35)<60);
-    config.comfort_vignette=false;XrSubmitMonoFrame(backbuffer);
+    config.comfort_vignette=false;SubmitMono(backbuffer);
     CHECK(pixel(0,25,35)>250 && pixel(1,38,35)>250);
     comfort_motion={};config.comfort_vignette=true;
-    for(unsigned i=0;i<5;++i)XrSubmitMonoFrame(backbuffer);
+    for(unsigned i=0;i<5;++i)SubmitMono(backbuffer);
     CHECK(pixel(0,25,35)>250); // no stick/turn demand after Off
     view_fov[0]=view_fov[1]={-1,1,1,-1};
     config=saved;readback->Release();
@@ -522,24 +595,25 @@ int main() {
   config.eye_height = 1.73f;config.eye_height_override=true;
   calibration_profile.valid=true;calibration_profile.eye_height_m=1.71f;
   g_floor_space = reinterpret_cast<XrSpace>(5);
-  XrSubmitMonoFrame(backbuffer);
+  SubmitMono(backbuffer);
   CHECK(sampled_trigger && !sampled_gameplay && sampled_floor);
   CHECK(std::fabs(sampled_height - 1.6f) < .001f);
   CHECK(std::fabs(sampled_fallback - 1.71f) < .001f);
   CHECK(XrRenderMetricsSnapshot(metrics) && metrics.theater && metrics.eye_draws == 1);
   calibration_visible = false;
   mod_menu_visible = true;
-  XrSubmitMonoFrame(backbuffer);
+  SubmitMono(backbuffer);
   CHECK(XrRenderMetricsSnapshot(metrics) && metrics.theater && metrics.eye_draws == 1);
   mod_menu_visible = false;
   gameplay_ready = true;
   physical_trigger = false;
-  XrSubmitMonoFrame(backbuffer);
+  SubmitMono(backbuffer);
   CHECK(XrRenderMetricsSnapshot(metrics) && !metrics.theater && metrics.eye_draws == 2);
   // Project the runtime AIM pose through the shipped XR adapter. Deliberately
   // point the grip elsewhere: a grip-based ray would miss every sample below.
   {
-    const auto saved_config=config;const bool saved_local=g_local_space;
+      const auto saved_config=config;const bool saved_local=g_local_space;
+      TrackingFrame saved_tracking{};CHECK(XrLatestTrackingFrame(saved_tracking));
     g_local_space=true;g_menu_active=true;g_menu_anchored=true;
     for(float distance:{1.f,2.75f,4.f})for(float yaw:{0.f,.7f,1.5707963f,2.7f}) {
       config.menu_distance_m=distance;
@@ -569,52 +643,53 @@ int main() {
       }
     }
     config=saved_config;g_local_space=saved_local;g_menu_active=false;g_menu_anchored=false;
+    g_tracking_frames.Publish(saved_tracking); // pointer-only packets are not native camera predictions
   }
   // A lost/failed source SRV must rebuild on the next accepted frame instead
   // of permanently submitting a missing or stale source image.
   g_blit_srv->Release();
   g_blit_srv = nullptr;
   const auto before_source_recovery = submitted;
-  XrSubmitMonoFrame(backbuffer);
+  SubmitMono(backbuffer);
   CHECK(g_blit_srv && submitted == before_source_recovery + 1);
   // Each failed wait must retain the acquired image and prevent reacquisition
   // until a successful wait/release. A timeout is not a ready image.
   for (const auto failure : {XR_ERROR_RUNTIME_FAILURE, XR_TIMEOUT_EXPIRED}) {
     const unsigned before_submitted = submitted;
     image_wait[0] = failure;
-    XrSubmitMonoFrame(backbuffer);
+    SubmitMono(backbuffer);
     CHECK(submitted == before_submitted && acquired[0] && !ready[0]);
     TrackingFrame tracking{};
     CHECK(XrLatestTrackingFrame(tracking)); // valid pose is independent of GPU image readiness
     const auto last_tracking_sequence=tracking.sequence;
     const auto before_acquires = acquisitions, before_waits = frame_waits;
-    XrSubmitMonoFrame(backbuffer);
+    SubmitMono(backbuffer);
     CHECK(acquisitions == before_acquires && frame_waits == before_waits);
     CHECK(XrLatestTrackingFrame(tracking) && tracking.sequence==last_tracking_sequence);
     image_wait[0] = XR_SUCCESS;
-    XrSubmitMonoFrame(backbuffer);
+    SubmitMono(backbuffer);
     CHECK(submitted == before_submitted + 1 && !acquired[0] && !acquired[1]);
   }
   // A failed release cannot submit an eye pair or acquire over its held image.
   image_release[1] = XR_ERROR_RUNTIME_FAILURE;
   const unsigned before_submitted = submitted;
-  XrSubmitMonoFrame(backbuffer);
+  SubmitMono(backbuffer);
   CHECK(submitted == before_submitted && acquired[1] && ready[1]);
   const auto before_acquires = acquisitions;
-  XrSubmitMonoFrame(backbuffer);
+  SubmitMono(backbuffer);
   CHECK(acquisitions == before_acquires);
   image_release[1] = XR_SUCCESS;
-  XrSubmitMonoFrame(backbuffer);
+  SubmitMono(backbuffer);
   CHECK(submitted == before_submitted + 1 && !bad_order);
   CHECK(longest_wait <= 5'000'000);
   // Runtime rendering suppression must not turn a fresh, valid tracked pose
   // into apparent tracking loss. Actual invalid head tracking still clears it.
   TrackingFrame preserved{};CHECK(XrLatestTrackingFrame(preserved));
-  should_render=false;XrSubmitMonoFrame(backbuffer);
+  should_render=false;SubmitMono(backbuffer);
   TrackingFrame suppressed{};CHECK(XrLatestTrackingFrame(suppressed) && suppressed.sequence==preserved.sequence);
-  should_render=true;tracking_valid=false;XrSubmitMonoFrame(backbuffer);
+  should_render=true;tracking_valid=false;SubmitMono(backbuffer);
   CHECK(!XrLatestTrackingFrame(suppressed));
-  tracking_valid=true;XrSubmitMonoFrame(backbuffer);CHECK(XrLatestTrackingFrame(suppressed));
+  tracking_valid=true;SubmitMono(backbuffer);CHECK(XrLatestTrackingFrame(suppressed));
   // Exercise the actual mono -> PublishRate -> XrEffectiveRate path, not just
   // the policy helper. Application reprojection must not masquerade as 60 Hz.
   {
@@ -623,41 +698,41 @@ int main() {
     config.frame_limit_fps=90;application_period=16'666'667;
     g_rate_stabilizer=RateStabilizer{};
     const auto queries_before=refresh_queries;
-    for(int i=0;i<6;++i)XrSubmitMonoFrame(backbuffer);
+    for(int i=0;i<6;++i)SubmitMono(backbuffer);
     CHECK(XrEffectiveRate(rate) && rate.from_display && rate.effective_fps==120);
     CHECK(rate.display_hz==120.0 && std::fabs(rate.runtime_hz-60.0)<.01);
     CHECK(refresh_queries==queries_before); // cache, not a per-frame API poll
     event_refresh=80.0f;refresh_event_pending=true;
-    for(int i=0;i<kStableRateSamples;++i)XrSubmitMonoFrame(backbuffer);
+    for(int i=0;i<kStableRateSamples;++i)SubmitMono(backbuffer);
     CHECK(XrEffectiveRate(rate) && rate.from_display && rate.effective_fps==80);
     CHECK(rate.display_hz==80.0 && refresh_queries==queries_before);
     // Invalid FB values must clear, not pin the last physical refresh forever.
     const float invalid[]{0.0f,-90.0f,NAN,INFINITY,1.0f};
     for(float hz:invalid) {
       event_refresh=hz;refresh_event_pending=true;
-      for(int i=0;i<kStableRateSamples;++i)XrSubmitMonoFrame(backbuffer);
+      for(int i=0;i<kStableRateSamples;++i)SubmitMono(backbuffer);
       CHECK(XrEffectiveRate(rate) && !rate.from_display && rate.effective_fps==60);
     }
     // Lost events trigger one resync; failed query never uses a written value.
     physical_refresh=144.0f;events_lost_pending=true;
-    for(int i=0;i<kStableRateSamples;++i)XrSubmitMonoFrame(backbuffer);
+    for(int i=0;i<kStableRateSamples;++i)SubmitMono(backbuffer);
     CHECK(refresh_queries==queries_before+1);
     CHECK(XrEffectiveRate(rate) && rate.from_display && rate.effective_fps==144);
     refresh_query_result=XR_ERROR_RUNTIME_FAILURE;events_lost_pending=true;
-    for(int i=0;i<kStableRateSamples;++i)XrSubmitMonoFrame(backbuffer);
+    for(int i=0;i<kStableRateSamples;++i)SubmitMono(backbuffer);
     CHECK(refresh_queries==queries_before+2 && g_display_refresh_hz==0.0);
     CHECK(XrEffectiveRate(rate) && !rate.from_display && rate.effective_fps==60);
     refresh_query_result=XR_SUCCESS;
     for(float hz:invalid) {
       physical_refresh=hz;events_lost_pending=true;
-      for(int i=0;i<kStableRateSamples;++i)XrSubmitMonoFrame(backbuffer);
+      for(int i=0;i<kStableRateSamples;++i)SubmitMono(backbuffer);
       CHECK(XrEffectiveRate(rate) && !rate.from_display && rate.effective_fps==60);
     }
     // Extension absent: same runtime frame path, predicted fallback, no query.
     g_get_display_refresh_rate=nullptr;g_display_refresh_hz=0.0;
     const auto absent_queries=refresh_queries;
     events_lost_pending=true;event_refresh=120.0f;refresh_event_pending=true;
-    for(int i=0;i<kStableRateSamples;++i)XrSubmitMonoFrame(backbuffer);
+    for(int i=0;i<kStableRateSamples;++i)SubmitMono(backbuffer);
     CHECK(XrEffectiveRate(rate) && !rate.from_display && rate.effective_fps==60);
     CHECK(refresh_queries==absent_queries);
     g_get_display_refresh_rate=&TestGetDisplayRefreshRateFB;
@@ -670,7 +745,7 @@ int main() {
   inactive_wait_release=CreateEventW(nullptr,TRUE,FALSE,nullptr);
   block_inactive_wait=true;should_render=false;g_state=XR_SESSION_STATE_SYNCHRONIZED;
   const auto inactive_start=GetTickCount64();
-  XrSubmitMonoFrame(backbuffer);
+  SubmitMono(backbuffer);
   CHECK(GetTickCount64()-inactive_start<100);
   CHECK(WaitForSingleObject(inactive_wait_entered,1000)==WAIT_OBJECT_0);
   CHECK(XrMenuPresentationActive());
@@ -678,7 +753,7 @@ int main() {
   // Do not begin a graphics frame or destroy its session before that handoff.
   g_state=XR_SESSION_STATE_FOCUSED;
   const auto graphics_waits=frame_waits;
-  XrSubmitMonoFrame(backbuffer);
+  SubmitMono(backbuffer);
   CHECK(frame_waits==graphics_waits && !g_inactive_pump.PauseAndIdle());
   SetEvent(inactive_wait_release);
   const auto handoff_deadline=GetTickCount64()+1000;
@@ -686,7 +761,7 @@ int main() {
   CHECK(g_inactive_pump.PauseAndIdle());
   block_inactive_wait=false;should_render=true;
   CloseHandle(inactive_wait_entered);CloseHandle(inactive_wait_release);
-  XrSubmitMonoFrame(backbuffer);
+  SubmitMono(backbuffer);
   CHECK(!XrMenuPresentationActive() && XrLatestTrackingFrame(suppressed));
   // Failed owner destruction must retain that eye's lease and resources;
   // successful partial teardown must not erase the remaining owner's state.
@@ -703,7 +778,7 @@ int main() {
       }
     }
     image_wait[1] = XR_TIMEOUT_EXPIRED;
-    XrSubmitMonoFrame(backbuffer);
+    SubmitMono(backbuffer);
     CHECK(acquired[1] && !ready[1]);
     destroy_result[1] = XR_ERROR_RUNTIME_FAILURE;
     const auto cleanup_deadline = GetTickCount64() + 1000;
@@ -722,7 +797,7 @@ int main() {
     // Resume through public entry points while that image STILL times out.
     // Cleanup must run before waiting on the retained image again.
     if (entry == 0) XrOnPresentFrame();
-    if (entry == 1) XrSubmitMonoFrame(backbuffer);
+    if (entry == 1) SubmitMono(backbuffer);
     if (entry == 2) {
       NativeStereoFrame frame{};
       CHECK(!XrBeginNativeStereoFrame(backbuffer, frame));
