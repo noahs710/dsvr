@@ -1,5 +1,15 @@
 # DSVR current handoff
 
+### 26 Oct ObjDam correction: 141C7B1B0 gates the condition, not the dispatch
+
+1404D0BB0 assigns NS_FRPG::FrpgEventConditionObjDam::vftable — an
+event-condition constructor, not a dispatcher. 1404D0F20 is false when
+DAT_141c7b1b0 == 0; owner 1404D0D40 runs the condition checks and fires
+1404A7740(0x1b). Same global also gates the +0x460/+0x490 tail — one
+global read in two places, not one mechanism. Kind-assignment hop
+(1405290C0 tail / 140529670) still the next probe. Full correction in
+docs/NATIVE_MELEE_CONTRACT.md. No invocation; DB unsaved. B/C/H open.
+
 ### 26 Oct kind-writer probe: creation chain placed, kind assignment one hop out
 
 Creation chain recovered (3 bulk calls, read-only): 140490F40 resolves

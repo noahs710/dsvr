@@ -1221,3 +1221,20 @@ in the contact/dispatch chain:
 Next: one bulk probe on 1404D0BB0/1404D0F20/14068BDCF contexts plus
 the 1405290C0 body past the 35-instruction head. No HP/stamina
 attribution or submission binding claimed; B/C/H stay open.
+
+### 26 Oct ObjDam correction: 141C7B1B0 gates the condition, not the dispatch
+
+One bulk call, read-only, no invocation. 1404D0BB0 names itself in its
+own decompiled body: `*param_1 = NS_FRPG::FrpgEventConditionObjDam::vftable`
+-- an event-CONDITION constructor (ObjDam), not a contact dispatcher.
+Its sibling 1404D0F20 returns false immediately when DAT_141c7b1b0 == 0;
+its owner 1404D0D40 runs the condition (1403CA320/1403CA180/1403CA380
+checks) and fires 1404A7740(0x1b,...) on success. Teardown is 1403C9FE0
+(pool lookup + 1403C5C90/1403C5D20/1403C7ED0).
+
+Correction to the prior note's framing: DAT_141c7b1b0 gates the ObjDam
+*condition enable*, and separately the +0x460/+0x490 source-side tail
+selection -- one global read in two places, not one mechanism. The
+kind-assignment hop (1405290C0 tail / 140529670) is untouched by this
+subtree and remains the next probe. No submission binding claimed;
+B/C/H stay open.
