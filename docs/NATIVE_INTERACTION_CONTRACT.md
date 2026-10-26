@@ -78,6 +78,23 @@ Two bulk calls, read-only. Both predicates are split-entry shims:
   prompt vs activation. No distance formula or prompt text claimed;
   H1 static mapping complete to the same one-hop boundary as melee.
 
+### 26 Oct continuations placed via raw bytes (bridge timeout worked around)
+
+get_functions timed out twice on 14238E1C6 (heavy xref compute; request
+may still be running in Ghidra -- no state trusted from it). Recovered
+both continuations with cheap disassemble_bytes instead:
+
+- Eligibility-accepted `14238E1C6`: register-save prologue (R15/XMM6-9/11
+  spills, RBP-frame) then `JMP 14030D4A0` -- next hop unrecovered.
+- LOS-accepted `142B32AD7`: `MOV RCX,[RCX+0x48]`, NULL-checks, then
+  forged-return selection between `140F8CFD5` (present) and the shared
+  `thunk_142EEE285/14030F40F` (absent) via CMOVZ. Fallthrough is
+  `JMP 140F8CFD5` + downstream block (`142B494B9` region) --
+  unrecovered past the selector. Same presence/absence idiom as every
+  other forged-return selector in both chains.
+- No distance formula, prompt text or dummy position in either head.
+  H1 static work stops at the same boundary: named entries, open bodies.
+
 ## Installed ObjActParam rows, 26 October 2026
 
 Read-only installed `param/GameParam/GameParam.parambnd.dcx`: 498,505 bytes,

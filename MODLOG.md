@@ -1,5 +1,13 @@
 # DSVR current handoff
 
+### 26 Oct continuations placed via raw bytes (bridge timeout worked around)
+
+get_functions timed out on 14238E1C6; used disassemble_bytes instead.
+Eligibility-accepted = reg-save + JMP 14030D4A0. LOS-accepted =
+[RCX+0x48] NULL-check selecting 140F8CFD5 vs shared thunk_142EEE285.
+Bodies past selectors unrecovered; H1 static at the boundary. Full note
+in docs/NATIVE_INTERACTION_CONTRACT.md. No invocation; DB unsaved.
+
 ### 26 Oct predicate shims mapped; NULL paths are refusals
 
 Eligibility (14203FAB4) = bit-clear + actor-present + 38E1C6; LOS
