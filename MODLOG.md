@@ -1,5 +1,15 @@
 # DSVR current handoff
 
+### 26 Oct payload v2: 140529670 store fields captured (96f3bb7)
+
+Response payload v2: weight +0x50, paired IDs +0xac/+0xb0, tag +0xb4
+(mask 0x10, slots 9-14, version 2). Why: after-snapshot starts at
++0x130 so the kind-store fields were never captured post-dispatch.
+Fixture + analyzer + classifier cover v1/v2 incl. malformed. Both
+suites 100/100; retained v1 capture still validates. Next capture
+will record weight/paired-IDs per dispatch -- the fields that select
+kind. No game, no invocation; tree clean.
+
 ### 26 Oct kind-2 FOUND in retained capture + auto-classifier built
 
 tools/classify_cases.py: post-hoc per-window classifier (contacts, HP
