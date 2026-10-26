@@ -1,5 +1,19 @@
 # DSVR current handoff
 
+### 26 Oct kind-2 FOUND in retained capture + auto-classifier built
+
+tools/classify_cases.py: post-hoc per-window classifier (contacts, HP
+deltas, block signatures, kind histogram, ident transitions,
+interactions). Proved on last session's trace with synthetic windows
+-- reproduces your manual log with zero mid-game narration.
+
+Correction: the "all kind-0" claim was wrong -- my first scan printed
+only 25 rows. 5 kind-2 records exist (seq 4259 kill 21->0; 5620/21/25/26
+riposte window 69->12), paired 1:1 with contacts, native return 1 on
+accepted ones -- same return as kind-0 accepts. Kind-2 elicitation with
+your broadsword CONFIRMED; +0x490 firing still unseen (handler side
+unobserved). No new game needed. Inner loop green.
+
 ### 26 Oct +150/+148 resolved: veto-bit tests, default-pass
 
 1402FCD10 = +0x45 bit-2 forced-true else 1402F9270 = null-link pass
