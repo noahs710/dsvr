@@ -407,6 +407,16 @@ std::uint64_t __fastcall ContactDetour(void* record) {
     context_reads|=4u;
   } else if (object>=0x10000 && object<=UINTPTR_MAX-0x144 &&
       GuardedRead(object+0x140,event_handle)) context_reads|=4u;
+  // 140529670's kind store (weight +0x50, kind +0x54, paired IDs +0xac/+0xb0,
+  // tag +0xb4) is the creation-time vocabulary the dispatch consumes. The
+  // after-snapshot starts at +0x130, so these fields need their own reads.
+  float store_weight_after=0;std::uint32_t store_ac_after=0,store_b0_after=0;
+  unsigned char store_b4_after=0;
+  if (object>=0x10000 && object<=UINTPTR_MAX-0xb4 &&
+      GuardedReadBytes(object+0x50,&store_weight_after,sizeof(store_weight_after)) &&
+      GuardedRead(object+0xac,store_ac_after) &&
+      GuardedRead(object+0xb0,store_b0_after) &&
+      GuardedRead(object+0xb4,store_b4_after)) response_reads|=0x10u;
   ContactActor before[2]{};
   bool admitted[2]{};
   ContactRead read_before[2]{ContactRead::Record,ContactRead::Record};
@@ -495,7 +505,9 @@ std::uint64_t __fastcall ContactDetour(void* record) {
   for (float& value:diagnostics.values) value=0;
   // Versioned raw fields, never a defense classification. Legacy version 0
   // remains unknown; successful reads of zero stay distinct from failed reads.
-  diagnostics.values[15]=1;
+  // Version 2 adds the 140529670 store fields in slots 9-14; the mask bit
+  // 0x10 certifies that group. Version 1 readers ignore slots 9-14.
+  diagnostics.values[15]=2;
   diagnostics.values[0]=static_cast<float>(response_reads);
   if (response_reads&1u) {
     diagnostics.values[1]=static_cast<float>(context_fields[8]&0xffffu);
@@ -512,6 +524,14 @@ std::uint64_t __fastcall ContactDetour(void* record) {
   if (response_reads&8u) {
     diagnostics.values[7]=record_after[0x38];
     diagnostics.values[8]=record_after[0x39];
+  }
+  if (response_reads&0x10u) {
+    diagnostics.values[9]=store_weight_after;
+    diagnostics.values[10]=static_cast<float>(store_ac_after&0xffffu);
+    diagnostics.values[11]=static_cast<float>(store_ac_after>>16);
+    diagnostics.values[12]=static_cast<float>(store_b0_after&0xffffu);
+    diagnostics.values[13]=static_cast<float>(store_b0_after>>16);
+    diagnostics.values[14]=static_cast<float>(store_b4_after);
   }
   for(unsigned side=0;side<2;++side) {
     diagnostics.flags|=static_cast<unsigned>(read_before[side])<<(side*4);

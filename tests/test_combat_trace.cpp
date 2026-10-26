@@ -87,6 +87,11 @@ void Fixture() {
   Put(record,0x140,0xfedcba98u);
   Put(record,0x54,2u);
   Put(record,0x168,std::uint16_t{0x5aa5});
+  // 140529670 store fields: weight +0x50, paired IDs +0xac/+0xb0, tag +0xb4.
+  Put(record,0x50,2.5f);
+  Put(record,0xac,0x11223344u);
+  Put(record,0xb0,0x55667788u);
+  Put(record,0xb4,static_cast<unsigned char>(0x7e));
 }
 std::string Read(const std::wstring& path) {
   std::ifstream file(std::filesystem::path(path),std::ios::binary);
@@ -138,7 +143,9 @@ bool GuardedReadBytes(std::uintptr_t address,void* out,std::size_t size) {
   ++reads;if (unreadable) return false;
   const auto object=reinterpret_cast<std::uintptr_t>(record.data());
   if (response_unreadable && ((address==object+0x130 && size==0x3a) ||
-      (address==object+0x34 && size==36) || (address==object+0x54 && size==4))) return false;
+      (address==object+0x34 && size==36) || (address==object+0x54 && size==4) ||
+      (address==object+0x50 && size==4) || (address==object+0xac && size==4) ||
+      (address==object+0xb0 && size==4) || (address==object+0xb4 && size==1))) return false;
   if(!GuardedReadScope::Contains(address,address+size)) ++permission_queries;
   if (address==table+0x10 && size==8) {
     GuardedReadScope::Remember(table,table+0x18);
@@ -239,7 +246,7 @@ int main(int argc,char** argv) {
       CHECK(text.find("native_combat_diagnostics")!=std::string::npos);
             const auto diagnostic_at=text.find("\"event\":\"native_combat_diagnostics\"");
             const auto diagnostic=text.substr(diagnostic_at,text.find('\n',diagnostic_at)-diagnostic_at);
-            CHECK(diagnostic.find("[15,2,0,47768,65244,165,90,1,0,0,0,0,0,0,0,1]")!=std::string::npos);
+            CHECK(diagnostic.find("[31,2,0,47768,65244,165,90,1,0,2.5,13124,4386,30600,21862,126,2]")!=std::string::npos);
       const auto context_at=text.find("\"event\":\"native_combat_context\"");
       CHECK(context_at!=std::string::npos);
       const auto context=text.substr(context_at,text.find('\n',context_at)-context_at);
@@ -271,7 +278,7 @@ int main(int argc,char** argv) {
     const auto at=text.find("\"event\":\"native_combat_diagnostics\"");
     CHECK(at!=std::string::npos);
     const auto line=text.substr(at,text.find('\n',at)-at);
-    CHECK(line.find("[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1]")!=std::string::npos);
+    CHECK(line.find("[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2]")!=std::string::npos);
     CHECK(text.find(",1000,1000,120,120,400,375,100,80]")!=std::string::npos);
     CHECK(text.find("[64,0,22136,4660,6000,0,1,0,65534,65535,41248,7,19,1,47768,65244]")!=std::string::npos);
     std::filesystem::remove(partial_path);

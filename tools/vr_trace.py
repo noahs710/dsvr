@@ -197,15 +197,28 @@ def _record_ok(event):
                 return False
             if all(v == 0 for v in values):  # legacy: response fields unavailable
                 return True
-            if values[15] != 1 or any(v != 0 for v in values[9:15]):
+            if values[15] not in (1, 2):
                 return False
-            limits = [15] + [65535]*4 + [255]*4
+            if values[15] == 1 and any(v != 0 for v in values[9:15]):
+                return False
+            limits = [31] + [65535]*4 + [255]*4
             if any(not 0 <= value <= limit or int(value) != value
                    for value, limit in zip(values[:9], limits)):
                 return False
+            if values[15] == 2:
+                # v2 store group: raw float weight + int limbs + tag byte.
+                if not (isinstance(values[9], (int, float)) and
+                        all(type(v) in (int, float) and 0 <= v <= 65535 and int(v) == v
+                            for v in values[10:14]) and
+                        type(values[14]) in (int, float) and 0 <= values[14] <= 255 and
+                        int(values[14]) == values[14]):
+                    return False
             mask = int(values[0])
+            groups = [(1,1,3), (2,3,5), (4,5,7), (8,7,9)]
+            if values[15] == 2:
+                groups.append((16,9,15))
             return all(mask & bit or not any(values[start:end])
-                       for bit, start, end in ((1,1,3), (2,3,5), (4,5,7), (8,7,9)))
+                       for bit, start, end in groups)
         if not 0 <= flags <= 15 or (flags >> 2) & ~flags:
             return False
         limb_count = 16 if kind == "native_combat_identity" else 8
@@ -380,16 +393,23 @@ def _combat_observations(records, require_diagnostics=False, frequency=0, cases=
                   "case": next((label for label, start, end in cases
                                 if start <= outcome["qpc"] <= end), None)}
         sample["native_response"] = None
-        if isinstance(diagnostic, dict) and diagnostic["values"][15] == 1:
+        if isinstance(diagnostic, dict) and diagnostic["values"][15] in (1, 2):
             values = diagnostic["values"]
             mask = int(values[0])
             sample["native_response"] = {
-                "schema": 1,
+                "schema": int(values[15]),
                 "kind_before": _limbs(values[1:3]) if mask & 1 else None,
                 "kind_after": _limbs(values[3:5]) if mask & 2 else None,
                 "status_before": [int(v) for v in values[5:7]] if mask & 4 else None,
                 "status_after": [int(v) for v in values[7:9]] if mask & 8 else None,
             }
+            if int(values[15]) == 2:
+                sample["native_response"].update({
+                    "store_weight_after": float(values[9]) if mask & 16 else None,
+                    "store_paired_ac": _limbs(values[10:12]) if mask & 16 else None,
+                    "store_paired_b0": _limbs(values[12:14]) if mask & 16 else None,
+                    "store_tag_b4": int(values[14]) if mask & 16 else None,
+                })
         context_rows = contexts.get(key, [])
         sample["native_context"] = None
         if len(context_rows) > 1 or (require_context and len(context_rows) != 1):

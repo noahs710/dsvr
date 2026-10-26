@@ -59,6 +59,13 @@ def main(trace_path, cases_path):
             if key != prev:
                 pairs.append((t(d["qpc"]), key))
                 prev = key
+        stores = []
+        for d in diags:
+            v = d["values"]
+            if len(v) > 15 and int(v[15]) == 2 and int(v[0]) & 16:
+                stores.append((t(d["qpc"]), float(v[9]),
+                               int(v[10]) + (int(v[11]) << 16),
+                               int(v[12]) + (int(v[13]) << 16), int(v[14])))
         print("=== %s [%s] T+%.0f..%.0fs (%d contacts, %d diags, %d interact) ==="
               % (label, state, t(start), t(end), len(contacts), len(diags), len(inter)))
         for ts, side, a, b in hp:
@@ -67,6 +74,8 @@ def main(trace_path, cases_path):
             print("  BLOCK T+%7.1fs side%d STAM %g->%g (hp static)" % (ts, side, a, b))
         if kinds:
             print("  KINDS:", dict(kinds))
+        for ts, w, ac, b0, tag in stores:
+            print("  STORE T+%7.1fs weight %g ac %d b0 %d tag %d" % (ts, w, ac, b0, tag))
         if len(pairs) > 1:
             print("  IDENT transitions:", len(pairs))
         if inter:

@@ -441,11 +441,33 @@ def main():
                   (decoded_response["status_before"] is not None) == bool(mask & 4) and
                   (decoded_response["status_after"] is not None) == bool(mask & 8),
                   "unread native response manufactured as zero")
-        for index, value in ((0,16), (1,65536), (3,-1), (5,256), (7,.5), (9,1), (15,2)):
+        for index, value in ((0,16), (0,32), (1,65536), (3,-1), (5,256), (7,.5), (9,1),
+                               (10,65536), (14,256), (15,0), (15,3)):
             bad_values = response_values.copy()
             bad_values[index] = value
             check(not combat_capture(samples[:2] + [dict(response_record, values=bad_values)])["valid"],
                   "malformed native response accepted")
+        # Version 2 carries the 140529670 store group; v1 payloads must keep
+        # slots 9-14 zero, v2 must carry a well-formed store group.
+        store_values = response_values.copy()
+        store_values[15] = 2
+        store_values[0] = 31
+        store_values[9] = 2.5
+        store_values[10:14] = [0x3344, 0x1122, 0x7788, 0x5566]
+        store_values[14] = 0x7e
+        check(combat_capture(samples[:2] + [dict(response_record, values=store_values)])["valid"],
+              "well-formed v2 store group rejected")
+        decoded_store = combat_capture(samples[:2] + [dict(response_record, values=store_values)]
+                                       )["native_combat_observations"]["samples"][0]["native_response"]
+        check(decoded_store["schema"] == 2 and decoded_store["store_weight_after"] == 2.5 and
+              decoded_store["store_paired_ac"] == 0x11223344 and
+              decoded_store["store_paired_b0"] == 0x55667788 and
+              decoded_store["store_tag_b4"] == 0x7e,
+              "v2 store group lost or truncated")
+        bad_store = store_values.copy()
+        bad_store[0] = 15  # mask drops the store bit: nonzero store fields refused
+        check(not combat_capture(samples[:2] + [dict(response_record, values=bad_store)])["valid"],
+              "v2 store group accepted without read-validity bit")
         masked_values = response_values.copy()
         masked_values[0] = 0
         check(not combat_capture(samples[:2] + [dict(response_record, values=masked_values)])["valid"],
