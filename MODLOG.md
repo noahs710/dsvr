@@ -1,18 +1,14 @@
 # DSVR current handoff
 
-### Active task: selector correction + capture lifecycle
+### Current handoff: native capture is preflight-ready; operator plan needed
 
-Task ID: 26-Oct-capture-lifecycle. Baseline `e4fa2b6` (clean at task start).
-Prerequisites: user-approved design `docs/superpowers/specs/2026-10-26-combat-capture-lifecycle-design.md`;
-installed EXE SHA-256 is pinned below. Objective: record both selector paths
-without claiming convergence; add detached runner, process-scoped stop request,
-footer wait, and restore refusal while any game is live. Expected offline
-observations: stop request is consumed once and closes one active trace with a
-footer; detached mode returns with logs/child PID; restore never kills a process
-or touches staged roots while the game lives. No DSR/Steam launch. Task-owned
-files: MODLOG, native-melee contract, runner, diagnostics/trace boundary and
-tests. Recovery boundary: retain the receipt/backups/staged roots on any timeout
-or live-process refusal; restore only after normal process exit.
+Selector byte correction and capture lifecycle are committed: `dfc8800`,
+`e4fa2b6`, `c1184c5`. The equality selector returns through the original
+`+0x490` continuation; non-equality transfers through runtime `[[RCX]+0x480]`.
+No equivalence or native outcome is inferred. The runner is detached-capable,
+requests a process-scoped orderly trace close, checks footers, and refuses restore
+while any game remains live. Recovery boundary: preserve receipt/backups/staged
+roots on any timeout or live-process refusal; restore only after normal exit.
 
 Offline lifecycle review and validation complete 26 Oct: a recorded stop PID
 with a missing marker is retried; a marker bearing another receipt token is
@@ -26,10 +22,25 @@ launch, no live capture, and no Ghidra database edits. Native melee outcomes
 remain unaccepted pending independent runtime evidence; lifecycle readiness is
 not permission to launch a session.
 
-Next probe: before any live capture, inspect the committed runner contract and
-have the operator explicitly choose a bounded case plan and normal-exit window.
-Do not infer capture coverage until each trace has a valid footer and the case
-interval is fully enclosed.
+Fresh offline candidate `build/verification/combat-observer-lifecycle-20261026/candidate.json`
+(SHA-256 `627794ccdbdc957f4f25c4379834c34a047ffedd9436bcd708dd5f9bc5f37ba3`)
+seals 226 current source files, current regular/LAB binaries, and test logs:
+Debug 100/100, Release 100/100, LAB Release 98/98. The LAB Release build was
+rebuilt after the lifecycle change. Read-only preflight PASS:
+`pwsh -NoProfile -File tools/run_combat_capture.ps1 -Mode Check -CandidateReceipt
+build/verification/combat-observer-lifecycle-20261026/candidate.json -Receipt
+build/verification/combat-observer-lifecycle-20261026-check/receipt.json`.
+This confirmed pinned EXE, Offline/disconnected Steam, exact-game firewall block,
+disposable seeds and both save roots. No transaction, deployment or game launch.
+The default Oct-24 candidate is stale and must not be reused; prior candidate
+receipts remain unchanged.
+
+Next: operator must select the fixed character/scene and a bounded case plan
+before `-Mode Launch`. The observer records once for 600 seconds after local
+player load; keep planned windows inside that capture and count a case only if a
+valid footer encloses its full interval. The runbook's hit/miss/block/parry and
+interaction requirements remain open; no gameplay has been performed for this
+candidate.
 
 Selector continuation result: `python build/selector_probe.py` against EXE SHA-256
 `a45aaa36dd2f6cc151670a639ea5547043cf38ea79ff4178b963c6ed71f98d7b` decodes
@@ -58,13 +69,14 @@ have not been established as identical. Likewise, firebomb bypass, individual
 event labels, predicate meanings and completed static chains remain unverified.
 Do not use `tools/classify_cases.py` HIT/BLOCK labels as ground truth: it does
 not validate capture integrity or actor-read flags. Preserve raw traces and
-restore receipts; avoid another operator run until capture lifecycle is fixed.
+restore receipts. This no-run warning was lifted only after the lifecycle fix in
+`c1184c5`; the retained incomplete captures remain unusable for acceptance.
 Offline experiment: `python build/selector_probe.py` exited 0. It verified the
 installed EXE SHA-256 above and decoded the selector plus both continuation
 chains using Capstone. This is a static byte trace, not evidence either arm
 executed in game. `build/selector_probe.py` is ignored local evidence, not a
-shipped tool. The next probe is offline runner/trace lifecycle verification;
-do not prepare another live capture until that work passes.
+shipped tool. The lifecycle verification is recorded above; neither selector arm
+has been shown to execute in a live encounter.
 
 ### 26 Oct prompt assembly to dispatch mesh, H1 static complete
 
