@@ -1,5 +1,30 @@
 cmake_minimum_required(VERSION 3.24)
 
+# Two variants: the LAB-gated bodies in vr_trace.cpp (input-blocker/step/
+# contact/interaction observers) compile out without the define, so the four
+# LAB tests link the LAB variant. test_lab_runner exercises the no-LAB path
+# with the plain variant. Each TU compiles exactly once per variant (2x total,
+# down from 9x spread across the old per-target lists).
+add_library(dsvr_test_support STATIC
+  ../src/core/vr_trace.cpp
+  ../src/core/combat_native.cpp
+  ../src/core/lab_runner.cpp
+  ../src/core/lab_scenario.cpp
+)
+target_include_directories(dsvr_test_support PUBLIC
+  $<TARGET_PROPERTY:minhook,INTERFACE_INCLUDE_DIRECTORIES>)
+target_link_libraries(dsvr_test_support PUBLIC dsvr_common minhook)
+add_library(dsvr_test_support_lab STATIC
+  ../src/core/vr_trace.cpp
+  ../src/core/combat_native.cpp
+  ../src/core/lab_runner.cpp
+  ../src/core/lab_scenario.cpp
+)
+target_compile_definitions(dsvr_test_support_lab PRIVATE DSVR_ENABLE_LAB)
+target_include_directories(dsvr_test_support_lab PUBLIC
+  $<TARGET_PROPERTY:minhook,INTERFACE_INCLUDE_DIRECTORIES>)
+target_link_libraries(dsvr_test_support_lab PUBLIC dsvr_common minhook)
+
 # No external test framework: plain CHECK (never assert), one binary per
 # area, all runnable without the game, plus bounded Python tool tests.
 add_executable(test_xr_inactive_frame_pump test_xr_inactive_frame_pump.cpp)
@@ -23,9 +48,9 @@ add_executable(test_combat_contact test_combat_contact.cpp)
 add_test(NAME combat_contact COMMAND test_combat_contact)
 add_executable(test_combat_atkparam test_combat_atkparam.cpp)
 add_test(NAME combat_atkparam COMMAND test_combat_atkparam)
-add_executable(test_combat_trace test_combat_trace.cpp ../src/core/vr_trace.cpp ../src/core/combat_native.cpp)
+add_executable(test_combat_trace test_combat_trace.cpp)
 target_compile_definitions(test_combat_trace PRIVATE DSVR_ENABLE_LAB)
-target_include_directories(test_combat_trace PRIVATE $<TARGET_PROPERTY:minhook,INTERFACE_INCLUDE_DIRECTORIES>)
+target_link_libraries(test_combat_trace PRIVATE dsvr_test_support_lab)
 add_test(NAME combat_native_trace COMMAND test_combat_trace)
 add_test(NAME combat_native_trace_filtered COMMAND test_combat_trace --combat-only)
 if(WIN32)
@@ -66,7 +91,8 @@ add_executable(test_calibration test_calibration.cpp ../src/core/calibration.cpp
 add_test(NAME calibration_persistence COMMAND test_calibration)
 add_executable(test_weapon_grip test_weapon_grip.cpp ../src/core/weapon_grip.cpp)
 add_test(NAME weapon_grip COMMAND test_weapon_grip)
-add_executable(test_combat_native test_combat_native.cpp ../src/core/combat_native.cpp)
+add_executable(test_combat_native test_combat_native.cpp)
+target_link_libraries(test_combat_native PRIVATE dsvr_test_support_lab)
 add_test(NAME combat_equipment COMMAND test_combat_native)
 add_executable(test_mod_menu test_mod_menu.cpp ../src/core/mod_menu.cpp)
 target_link_libraries(test_mod_menu PRIVATE dsvr_common dsvr_gui d3d11 dxgi)
@@ -84,9 +110,8 @@ target_include_directories(test_camera_observer PRIVATE
   $<TARGET_PROPERTY:minhook,INTERFACE_INCLUDE_DIRECTORIES>)
 add_test(NAME camera_observer COMMAND test_camera_observer)
 
-add_executable(test_camera_consumer test_camera_consumer.cpp ../src/core/vr_trace.cpp)
-target_include_directories(test_camera_consumer PRIVATE
-  $<TARGET_PROPERTY:minhook,INTERFACE_INCLUDE_DIRECTORIES>)
+add_executable(test_camera_consumer test_camera_consumer.cpp)
+target_link_libraries(test_camera_consumer PRIVATE dsvr_test_support)
 add_test(NAME camera_consumer COMMAND test_camera_consumer)
 add_test(NAME camera_consumer_derived COMMAND test_camera_consumer derived)
 add_test(NAME camera_constant_upload COMMAND test_camera_consumer upload)
@@ -230,20 +255,18 @@ if(DSVR_BUILD_RESHADE_ADDON)
     $<TARGET_FILE:dsvr_reshade> $<TARGET_FILE:dsvr_core>
     $<TARGET_FILE:reshade_frame_fixture>)
 endif()
-add_executable(test_vr_trace_capture test_vr_trace_capture.cpp
-  ../src/core/vr_trace.cpp)
-target_link_libraries(test_vr_trace_capture PRIVATE dsvr_common minhook)
+add_executable(test_vr_trace_capture test_vr_trace_capture.cpp)
+target_link_libraries(test_vr_trace_capture PRIVATE dsvr_test_support)
 add_test(NAME vr_trace_capture COMMAND test_vr_trace_capture)
-add_executable(test_lab_scenario test_lab_scenario.cpp ../src/core/lab_scenario.cpp)
+add_executable(test_lab_scenario test_lab_scenario.cpp)
+target_link_libraries(test_lab_scenario PRIVATE dsvr_test_support)
 add_test(NAME lab_scenario COMMAND test_lab_scenario)
-add_executable(test_lab_runner test_lab_runner.cpp ../src/core/lab_runner.cpp
-  ../src/core/lab_scenario.cpp ../src/core/vr_trace.cpp)
-target_link_libraries(test_lab_runner PRIVATE dsvr_common minhook)
+add_executable(test_lab_runner test_lab_runner.cpp)
+target_link_libraries(test_lab_runner PRIVATE dsvr_test_support)
 add_test(NAME lab_runner COMMAND test_lab_runner)
-add_executable(test_lab_runner_opt_in test_lab_runner.cpp ../src/core/lab_runner.cpp
-  ../src/core/lab_scenario.cpp ../src/core/vr_trace.cpp ../src/core/combat_native.cpp)
+add_executable(test_lab_runner_opt_in test_lab_runner.cpp)
 target_compile_definitions(test_lab_runner_opt_in PRIVATE DSVR_ENABLE_LAB)
-target_link_libraries(test_lab_runner_opt_in PRIVATE dsvr_common minhook)
+target_link_libraries(test_lab_runner_opt_in PRIVATE dsvr_test_support_lab)
 add_test(NAME lab_runner_opt_in COMMAND test_lab_runner_opt_in)
 find_package(Python3 COMPONENTS Interpreter QUIET)
 add_executable(test_camera_writes test_camera_writes.cpp
