@@ -34,6 +34,41 @@ FollowCamUpdateFn g_orig = nullptr;
 std::uint64_t g_tracking_epoch = 0;  // game-thread only
 bool g_observer_only = false;  // published before enabling the hook; never reloaded
 
+// Every return before ArmIkTick closes the applied-camera sequence, which in
+// turn holds shut the IK body (arm_ik.cpp requires XrAppliedCameraSequence()
+// == targets.sequence), the physical attack/defence bridges, head-directed
+// locomotion and the immersive screen rect. A retained session could not tell
+// which one fired: DSVR.log held zero Camera: lines while the hook was
+// installed and tracking was valid. Name the gate once per change, following
+// the LogBridgeReadiness pattern in input.cpp.
+enum CamGate : std::uint32_t {
+  kCamGateApplied = 0,
+  kCamGateHeadlookOff = 1,
+  kCamGateMenuPresentation = 2,
+  kCamGateNoTrackingFrame = 3,
+  kCamGateStatureRevisionMismatch = 4,
+  kCamGateMappingInvalid = 5,
+  kCamGateApplyRefused = 6,  // camera.cpp names the predicate itself
+};
+std::uint32_t g_reported_gate = 0xFFFFFFFFu;
+
+void ReportCamGate(CamGate gate) {
+  if (g_reported_gate == static_cast<std::uint32_t>(gate)) return;
+  g_reported_gate = static_cast<std::uint32_t>(gate);
+  static const char* const kWhy[] = {
+      "applied; IK body, locomotion and immersive rect armed",
+      "headlook_enabled=false",
+      "XR menu presentation active (theater/sanctuary)",
+      "no fresh XR tracking frame",
+      "native model/stature revisions disagree",
+      "calibration mapping refused to resolve",
+      "CameraApplyFirstPerson refused (see the Camera: refusal line)"};
+  if (gate == kCamGateApplied)
+    DSVR_LOG("CamGate: first-person camera path %s", kWhy[0]);
+  else
+    DSVR_WARN("CamGate: first-person camera path closed - %s", kWhy[gate]);
+}
+
 struct LabObservationOnExit {
   void* camera;
   ~LabObservationOnExit() {
@@ -72,6 +107,8 @@ void __fastcall FollowCamUpdateDetour(void* self, float dt, void* arg3,
   CameraTraceFollowCam(self);
   Config cfg = DiagnosticsCurrentConfig();
   if (!cfg.headlook_enabled || XrMenuPresentationActive()) {
+    ReportCamGate(cfg.headlook_enabled ? kCamGateMenuPresentation
+                                       : kCamGateHeadlookOff);
     CameraResetHeadlook();
     XrRecordCameraSequence(0);
     g_tracking_epoch = 0;
@@ -79,6 +116,7 @@ void __fastcall FollowCamUpdateDetour(void* self, float dt, void* arg3,
   }
   TrackingFrame frame{};
   if (!XrLatestTrackingFrame(frame)) {
+    ReportCamGate(kCamGateNoTrackingFrame);
     CameraResetHeadlook();
     XrRecordCameraSequence(0);
     g_tracking_epoch = 0;
@@ -107,18 +145,22 @@ void __fastcall FollowCamUpdateDetour(void* self, float dt, void* arg3,
     // must not erase the valid reach revision needed by the arm-fit fallback.
     if (ArmIkNativeStature(native_head, native_shoulders, stature_revision)) {
       if (model_revision && model_revision != stature_revision) {
+        ReportCamGate(kCamGateStatureRevisionMismatch);
         XrRecordCameraSequence(0);
         InputInvalidateHeadDirectedLocomotion();
         return;
       }
       model_revision = stature_revision;
     }
+    // The fit is always the combined head+reach anchor now: the legacy
+    // "arm" spelling parses to the same value, so no branch is needed.
     const auto mapping = ResolveCalibrationMapping(CalibrationCurrent(),
         cfg.eye_height, cfg.play_style == "seated", cfg.world_scale,
         native_reach, model_revision, native_head, native_shoulders,
-        cfg.embodiment_fit != "arm", cfg.eye_height_override, cfg.avatar_scale,
+        true, cfg.eye_height_override, cfg.avatar_scale,
         cfg.seated_height_offset_m);
     if (!mapping.valid) {
+      ReportCamGate(kCamGateMappingInvalid);
       XrRecordCameraSequence(0);
       InputInvalidateHeadDirectedLocomotion();
       return;
@@ -138,14 +180,14 @@ void __fastcall FollowCamUpdateDetour(void* self, float dt, void* arg3,
                (unsigned long long)mapping.model_revision,
                mapping.fit==CalibrationFit::Head?"native head bone":
                mapping.fit==CalibrationFit::Arm?"native arm geometry":"manual fallback");
-      // A requested head anchor with no upright native head measurement yet is
-      // a real difference in where the camera sits, so say so once instead of
+      // No upright native head measurement yet: the combined fit falls back
+      // to the reach-only scale (or manual), so say so once instead of
       // letting the user wonder why the avatar still does not match.
       static bool head_fallback_warned=false;
-      if (cfg.embodiment_fit!="arm"&&mapping.fit!=CalibrationFit::Head&&
+      if (mapping.fit!=CalibrationFit::Head&&
           !head_fallback_warned) {
         head_fallback_warned=true;
-        DSVR_WARN("CalibrationFit: embodiment_fit=\"head\" requested, but no upright "
+        DSVR_WARN("CalibrationFit: no upright "
                   "native Head-bone measurement is available yet; using arm fit "
                   "when available, otherwise manual scale, until an upright pose is observed");
       }
@@ -158,10 +200,12 @@ void __fastcall FollowCamUpdateDetour(void* self, float dt, void* arg3,
                               cfg.eye_clearance_m * mapping.world_scale, &mapping);
   apply_time.Stop();
   if (!applied) {
+    ReportCamGate(kCamGateApplyRefused);
     InputInvalidateHeadDirectedLocomotion();
     XrRecordCameraSequence(0);
     return;
   }
+  ReportCamGate(kCamGateApplied);
   XrRecordCameraFrame(frame, comfort_vfov);
   CameraPublishHeadDirectedLocomotion(frame.space_epoch);
   if (VrTraceActive()) {

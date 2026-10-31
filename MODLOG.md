@@ -1,6 +1,5707 @@
-# DSVR current handoff
+### Formal release now publishes automatically after the cockpit gate
 
-### Current handoff: native capture is preflight-ready; operator plan needed
+Formal `pwsh -File tools/auto_verify.ps1 -Package -Version <version>` now checks all A-J/K1-K4 tasks are closed and a pre-pushed `v<version>` tag exists, requires authenticated `gh`, runs the existing Release build/CTest/Doctor ladder, creates the immutable versioned package, then publishes its ZIP, Setup executable and SHA-256 manifest to GitHub. `gh release create --verify-tag` means this tool never creates or pushes a tag; existing version packages remain immutable. K5/K6 are excluded from prerequisites because K5 performs this action and K6 records the resulting identity/clip.
+
+Publisher tests cover versioned assets, tag lookup, CTest-log refusal and release-gate counting. `python -B tests/test_package.py` PASS 16 tests; full Debug/Release CTest PASS 115/115 each. `auto_verify -SkipPackage -NoLatest` PASS (Release 115/115, Doctor PASS). Formal `auto_verify -Package -Version 0.17.0` refused before build/package: 67 A-J/K1-K4 prerequisites remain open. No GitHub release/package created.
+
+### Release build re-run
+
+`cmake --build build --config Release --parallel` exited 0; `ctest --test-dir build -C Release --parallel --output-on-failure` passed **115/115** (`build\\rel-current-build.log`, `build\\rel-current-test.log`). No package was attempted in that run.
+
+### Development package refreshed to dist
+
+Debug build + CTest passed (115/115); default `pwsh -NoProfile -File tools/auto_verify.ps1` passed Release CTest (115/115) and Doctor (pinned App 1.03.1/build 10943698, game not running), then refreshed `dist\\DSVR-latest` and `dist\\DSVR-latest-x64.zip` (1,750,995 bytes; 21 entries). `dist\\DSVR-latest-verification.json` identifies mode `latest-dev-test`, label `0.16.0-render-host-preview`, Release config, 115/115 CTest, Doctor pass. ZIP integrity check passed and hashes for dinput8.dll, DSVR.dll and DSVR-Setup.exe match the manifest. No formal versioned package or GitHub release created; K5 remains open pending A-J/K1-K4 release prerequisites.
+
+### Left hand neutral basis now mirrors the known-good right (same-position wrist regression)
+
+Operator clarified that right-hand calibration is consistently good and both controllers are held at the same physical position. The native-adapter regression now seeds an authored quarter-turn only in the left native hand bind and applies the same controller pose/position to both hands. The arm/grip anchors stay fixed; without parity normalization the left wrist basis disagrees during controller turn. When a valid right native neutral exists, `ArmIkTick` now resolves the left neutral hand by mirroring the right basis into the left fallback frame, preserves the native grip lever and left target position, and reverses the configured roll sign only for the mirrored basis. This avoids changing arm reach or the native root.
+
+Verification: focused `arm_pose_native` PASS 1/1 in Debug and Release; full CTest PASS 115/115 in both. `pwsh -NoProfile -File tools/auto_verify.ps1 -SkipPackage -NoLatest` PASS (Release 115/115, Doctor PASS). Package/latest refresh intentionally skipped; no headset launch or visual confirmation. The earlier log’s `hand bone -1` entries were pre-rig startup diagnostics, not valid left/right bind evidence; the gated logger now waits for rig/source readiness.
+
+### Left wrist basis: diagnostic fired before rig bind
+
+Operator clarification: the arm is fine; the hand/wrist is wrong. Installed DSVR.log at 15:32:08.238 reports both hands as `T-pose fallback (hand bone -1)`. Rig revision 1 freezes the source at 15:32:08.376; verified native copies follow. The one-shot diagnostics were emitted before rig/source readiness and their static flags suppressed valid follow-up lines. Added readiness gating requiring a valid hand index and frozen source palette; `arm_pose_native` passes. This fixes diagnostic timing only, not the visible wrist transform. Next headset log must report each hand after bind; use that evidence to decide native-bind versus fallback correction.
+
+Repro: same-position controllers with a synthetic left-only native hand-bind quarter-turn; arm/grip anchors pass but left wrist orientation fails at `tests/test_arm_pose_native.cpp:679` (focused Debug 0/1, focused Release 0/1). This isolates neutral-hand orientation; it does not prove the live bind basis is the same. The proposed callsite policy is to mirror the left neutral-hand bind from the known-good right when both are present, retaining left position and arm solve. Not applied because Architecture Review currently claims `src/core/arm_ik.cpp`; release request timed out. Full suites and auto_verify not rerun after the synthetic regression. The prior full-suite `combat_math` failure (114/115) was separately reported by Architecture Review as FeedRelative advancing head before FeedGrabRelative; their fix was pending. Earlier same-session `auto_verify -SkipPackage -NoLatest` passed CTest 115/115 and Doctor; default packaging failed WinError 32 because `dist\DSVR-latest\DSVR-Setup.exe` was locked.
+
+### Calibration stops hijacking presentation; theater panel takes the image's own aspect
+
+Operator report on the pointer-removal build: the game still loads to black, the
+calibration screen is too wide / far away / blurry, calibration never hands back
+to the world (the calibration screen fills the view up close), and the hold
+progress bar glitches near the very end even after the triggers are released.
+
+Root cause 1 - presentation (`src/core/xr.cpp:1298-1317`). One boolean chain was
+answering two different questions. `CalibrationGetStatus().screen_visible` fed
+`MenuState::ReadingMenu`, which BOTH routed the pointer/stick AND took the
+head-anchored sanctuary quad. The calibration panel is drawn into the game
+backbuffer, so taking the quad replaced the loading image with a close-up quad
+carrying that panel: "black screen at load" plus "calibration screen up close
+filling my view", and it never returned to immersive gameplay. `menu_state.h` now
+splits the policy - `MenuState::CalibrationPanel` plus `MenuStateWantsPanel`
+(input route) against `MenuStateWantsSanctuary` (canvas). xr.cpp asks both
+questions; calibration gets the first and never the second.
+
+Root cause 2 - panel shape (`src/core/xr.cpp:1415-1465`). The theater extents
+were derived from the eye-frustum aspect (`g_fov_aspect` = 0.925 on this
+runtime), not the source image's 2.39:1. The panel was a near-square quad with
+the game image letterboxed inside it, so the image filled ~41% of the panel (far
+away, blurry) while the panel itself was far too wide. The pixel-parity clamp
+then bound on the panel rect instead of the image footprint, so it under-corrected
+(`80.0deg -> 69.7deg` in the log while the image stayed soft). Extents now come
+from the backbuffer's own desc aspect, and the rect math moved into the tested
+`stereo_math.h: TheaterRectForEye` - the inline copy it replaces had a dead
+`y_top` and a hardcoded 0.5 vertical centre.
+
+Root cause 3 - hold progress (`src/core/calibration_math.h`). `progress_` was
+zeroed at the top of every `Feed`, and the duplicate-frame path returned with it
+at 0. The render loop reads the same tracking frame more than once per frame, so
+the bar flickered back to zero - "glitching near the very end". Separately the
+stillness gate measured a fixed 4 cm from the FIRST sample, which real headset
+tracking (breathing alone) exceeds inside one second: the operator's log shows
+`Calibration: sample pose_ready=1 progress=0.42 trigger=1` and nothing past it.
+`progress_` is now hold state cleared only by `RestartHold()`, and the baseline
+follows the pose at 0.25 per accepted sample, so sub-threshold drift is absorbed
+while a deliberate move still trips the gate.
+
+Not a cause: the input path. The same log shows `buttons=0x1000`, non-zero stick
+values and `trigger=1`, so the Oculus Touch interaction profile resolves and the
+trigger reaches the sampler. No input code was changed. The separate
+`XInput: XInputGetState hook creation failed (MH_ERROR_MEMORY_ALLOC)` line stays
+an open item, not the calibration blocker.
+
+Tests: `tests/test_calibration_math.cpp` (12 cm of drift over the hold completes;
+one 20 cm step restarts and clears; a duplicate frame keeps published progress;
+releasing the trigger clears it), `tests/test_menu_state.cpp` (panel vs canvas
+policy), `tests/test_stereo_math.cpp` (`TheaterRectForEye` aspect, centring,
+degenerate inputs), and `tests/test_xr_mono_recovery.cpp:709` inverted to the new
+intent - calibration keeps both eyes, the DSVR menu still takes the one-eye
+canvas.
+
+Runs, this session: Debug build clean and `ctest --test-dir build -C Debug
+--parallel` 100% out of 115; Release build clean and `ctest -C Release --parallel`
+100% out of 115; `pwsh -NoProfile -File tools/auto_verify.ps1` Release 115/115,
+doctor PASS, `dist\DSVR-latest-x64.zip` 1,746,265 bytes; installed with the game
+closed (6 saves to `.dsvr-backups\saves-20261030-151449`), installed DSVR.dll
+SHA-256 `BC8475AA…E101A0C2` equal to `build\src\core\Release\DSVR.dll`;
+`tools/verify_preflight.ps1` OK=13 WARN=3 BLOCKED=0.
+
+Architecture pass on the same report (`src/core/xr.cpp:1375-1392`): the immersive
+mono sub-rect was a hand-inlined duplicate of the tested
+`stereo_math.h: SubRectForEye` - same tangent mapping, same `y = 1 - hi` form,
+one of the two copies untested. Replaced with the helper, so the mono path and
+the H3 stereo hook now share one implementation. Re-ran the ladder on those
+bytes: Debug clean and `ctest -C Debug --parallel` 100% out of 115; Release clean
+and `ctest -C Release --parallel` 100% out of 115; `auto_verify.ps1` Release
+115/115 + doctor pass + `dist\DSVR-latest-x64.zip` 1,748,423 bytes; installed
+with the game closed (6 saves to `.dsvr-backups\saves-20261030-152309`),
+installed DSVR.dll SHA-256
+`72A5CDF874BC726BAC1B068E296E7A869FBA72E45AEA86CAC45B659D8ED98937` equal to
+`build\src\core\Release\DSVR.dll` and to the packaged copy; `verify_preflight.ps1`
+OK=13 WARN=3 BLOCKED=0, package built 10/30/2026 7:22:33 PM. The `BC8475AA…`
+install earlier in the session is superseded.
+
+Still complicated, deliberately left alone this session: `XrSubmitMonoFrame` is
+~550 lines holding the presentation decision, both rect computations, the live
+FOV resize and the frame metrics inline. Splitting it is the next architecture
+step and wants its own seam test first - the ladder is green and the payload is
+installed, so it does not get split blind.
+
+Next probe (headset, same session): the panel should be a landscape quad whose
+angular aspect equals the game image's, and the calibration screen should sit
+inside that image instead of in front of the face. Read the single
+`XR: panel open (debounced state=5 …)` line (5 = CalibrationPanel) and confirm no
+canvas switch while calibrating, then confirm the one-second hold completes
+without the bar resetting. If the panel is still soft, read the single
+`XR: theater screen shrunk to source parity (…)` line: with the source aspect it
+should now be absent at the default 80 deg on a 3440x1440 backbuffer.
+
+### Pointer overlay removed from the game image; theater parity clamp no longer blind (31 Oct)
+
+Operator report: the pointer ray paints itself across the whole view, the
+calibration panel sits in a theater window that is far too wide, and after
+calibration the same panel stays magnified in front of the eyes.
+
+Root cause 1 (`src/core/mod_menu.cpp`): `ModMenuRenderTexture` ran a second
+ImGui feed (`FeedPointerOverlay`) plus `DrawPointerBeam` whenever a spatial ray
+was live, **even with the menu closed**. That texture is the game backbuffer, so
+the beam/cursor became part of the gameplay image and the theater rect or the
+sanctuary quad magnified it. The same path is what keeps a calibration panel
+baked into the mono source. Deleted `FeedPointerOverlay`, `DrawPointerBeam`,
+`g_beam_valid/g_beam_from/g_beam_to`; `io.MouseDrawCursor` is now always false;
+the render entry returns unless `ModMenuVisible()`. The tracked ray stays as a
+hit-test only (`XrMenuPointerInput` → ImGui mouse pos/buttons), so menu
+navigation in the headset is unchanged — nothing pointer-shaped is painted.
+
+Root cause 2 (`src/core/xr.cpp:1419-1436`): the theater rect called
+`FitTheaterScreenToPixels(..., g_stage_w, g_stage_h)`, but `g_stage_w/h` are
+filled by `PrepareMonoSource` at `xr.cpp:1555`, i.e. later in the same frame.
+On the first frame and after any backbuffer format change they read 0, the
+function returns `requested` unchanged, and the panel keeps the full configured
+`mono_screen_fov_deg` (100 deg in the installed `DSVR.toml`) — the "much too
+wide" panel. The clamp now reads the backbuffer's own `D3D11_TEXTURE2D_DESC`.
+
+Tests: `tests/test_mod_menu.cpp` previously *enforced* the bug
+(`CHECK(beam_in_foreground)` and `CHECK(theater_beam_foreground)` with the menu
+closed). Both inverted — no gold pointer glyph may reach the foreground draw
+list, `!ImGui::GetIO().MouseDrawCursor`, and nothing is composited while the
+menu is closed. `FitTheaterScreenToPixels` parity itself was already covered
+(`tests/test_stereo_math.cpp:203-212`); the gap was that `xr.cpp` fed it zeros,
+which no offline test can see — the headset probe below is the oracle.
+
+Observed this step: `cmake --build build --config Debug --parallel` exit 0 then
+`ctest --test-dir build -C Debug --parallel` — 100% tests passed out of 115;
+`cmake --build build --config Release --parallel` exit 0 then
+`ctest --test-dir build -C Release --parallel` — 100% out of 115
+(`build\dbg-build.log`, `build\dbg-test.log`, `build\rel-build.log`,
+`build\rel-test.log`). No new package installed, no `auto_verify`/doctor run, no
+launch, no input injection, no game-memory access, no commit.
+
+Distributed later the same day: `pwsh -NoProfile -File tools/auto_verify.ps1`
+again. The first attempt's packaging step FAILED — `tools/package.py:215` hit
+`PermissionError [WinError 32]` because a leftover `dist\DSVR-latest\DSVR-Setup.exe`
+(PID 16168, from the earlier install) still held the file; Release CTest and
+doctor had already passed in that run. Stopped that process and re-ran clean:
+Release CTest **115/115**, doctor PASS, `Wrote dist\DSVR-latest-x64.zip
+(1,745,711 bytes) + DSVR-latest-verification.json` (`build\auto-verify2.log`).
+Then `dist\DSVR-latest\DSVR-Setup.exe --install --game "…\DARK SOULS
+REMASTERED" --yes` with the game closed — 6 saves backed up to
+`.dsvr-backups\saves-20261030-142133`, `dinput8.dll already current (same hash)`,
+`Installed + verified dinput8.dll` / `DSVR.dll`, existing `DSVR.toml` kept.
+`pwsh -NoProfile -File tools/verify_preflight.ps1` — `OK=12 WARN=4 BLOCKED=0`,
+package `0.16.0-render-host-preview` built 10/30/2026 6:21:22 PM, and both
+`Installed dinput8.dll matches the packaged build` and `Installed DSVR.dll
+matches the packaged build`. The four WARN lines are route facts (desktop idle
+0s, no Virtual Desktop Streamer, active runtime is SteamVR not VDXR, live arm IK
+enabled rather than log-only), not blockers.
+
+Next probe (headset): the fix is now in the bytes the operator runs. Read the
+single `XR: theater screen shrunk to source parity (…)` line — it must appear on
+the first theater frame, not only after the staging copy exists. If the panel is
+still too wide at parity, the remaining knob is `mono_screen_fov_deg = 100` in
+the installed `DSVR.toml` versus the runtime-derived `g_fov_aspect`, not the
+clamp. No launch, no input injection, no game-memory access, no commit.
+
+### Stale-install blocker cleared: preflight BLOCKED=0, headset run ready (31 Oct)
+
+The two `BLOCKED` lines in `tools/verify_preflight.ps1` were a stale installed payload, not a source problem: the game directory carried the 30 Oct 15:43 package while the tree had moved past it. Sequence run this session, game closed throughout:
+
+1. `pwsh -NoProfile -File tools/auto_verify.ps1` — Release build PASS, Release CTest **115/115**, doctor PASS (App 1.03.1 / build 10943698, 50286344 bytes, SHA256 `a45aaa36…f98d7b`), `Wrote dist\DSVR-latest-x64.zip (1,744,211 bytes) + DSVR-latest-verification.json`.
+2. `cmake --build build --config Debug --parallel` exit 0, then `ctest --test-dir build -C Debug --parallel` — **115/115** (logs `build\dbg-build.log`, `build\dbg-test.log`). Debug and Release counted separately; both 115.
+3. `dist\DSVR-latest\DSVR-Setup.exe --install --game "…\DARK SOULS REMASTERED" --yes` — 6 saves backed up to `C:\Users\Gabrielle Monlea\.dsvr-backups\saves-20261030-133148` before anything was touched, proxy upgraded in place, `Installed + verified dinput8.dll` / `DSVR.dll`, existing `DSVR.toml` kept. Used the `dist` installer per `docs/VERIFICATION_RUNBOOK.md:49-53`, not `build\src\setup\Release`.
+4. `pwsh -NoProfile -File tools/verify_preflight.ps1` — `OK=13 WARN=3 BLOCKED=0`, `HEADSET RUN: READY TO START THE RUNBOOK`, package `0.16.0-render-host-preview` built 10/30/2026 5:30:33 PM, installed payload hashes match `binaries_sha256`.
+
+Remaining WARN lines are route facts, not blockers: no Virtual Desktop Streamer (VDXR route unverified), active OpenXR runtime is SteamVR (`steamxr_win64.json`) so its numbers must not be compared with VDXR, and the installed profile has live arm IK enabled rather than log-only — keep that only for a route that explicitly tests native arms.
+
+No game launch, no input injection, no game-memory read or write, no commit. Nothing under `build/verification` was rewritten. The 69 plan gates stay open: a ready preflight qualifies the payload, not any headset requirement. Next probe is lane A's bounded session on these exact bytes — read the single `CamGate: …` line plus any `Camera: first-person apply refused` line, and hash the 3 Documents saves before and after.
+
+### IPToStateMap dump closed; contact +0x130/+0x138 owners resolved (31 Oct)
+
+Read-only GhidraMCP against the live `DSRFull` program; nothing created, renamed or disassembled, `unsaved_changes:false` at modification 3.
+
+`read_memory` of 1768 bytes at `14178f264` decodes as 219 `(uint IPoint RVA, uint state id)` slots, not the 221 the type name claims. All IPoints lie in `0x14038dae0`-`0x140390c20` (one function region); state ids are `0..0x5b` with no gaps (92 distinct, 91 nonzero) plus 64 `0xffffffff` and 64 zero slots. The owning block `DAT_14132e350` carries ASCII `ChrManipulator`, so the map is a per-type descriptor table and cannot bind a `caseD_*` selector in `0..0x93` — ids `0x5c..0x93` belong to other descriptors. The lane's "cheapest remaining static handle" is therefore a closed negative probe; do not re-dump it.
+
+B3 shape-owner probe resolved the two LAB-read offsets: in `FUN_1403c7520` the stack record base is `local_208`, so record `+0x130` = `local_d8` = `FUN_1402c4870(frame+0x40)` and `+0x138` = `local_d0` = caller `param_2`. `FUN_1402c4870` dispatches on `id>>28` into four singletons (`DAT_141c7a0b0`/`141c77e50`/`141c75dd8`/`141c7a488`), 13 callers, all contact-family or the `140421620`/`140423540`/`140423850`/`140426fa0`/`14042a1c0` eligibility group. In `FUN_1403c7460` (`caller_count 0`, reached only via DATA slots `1417991f0`/`141799224`) the target is `**(FUN_1402a9cc0(handle)+0x10)` gated on type `<3 || ==4` at `lVar4+8`, with the sixth argument `FUN_1402a9d60(handle)` only when `FUN_1402a9e00(handle)==1`. `FUN_1403c5190` is a list validator, not a writer. Conclusion: `+0x130`/`+0x138` are resolved object pointers, not shapes, and neither is fed directly from an AtkParam hit slot at this level; the open owner is the writer of the source id at frame `+0x40`. Evidence: `docs/NATIVE_MELEE_CONTRACT.md`.
+
+Builds/tests observed this step: `cmake --build build --config Debug --parallel` PASS then `ctest --test-dir build -C Debug --parallel` 115/115; `cmake --build build --config Release --parallel` PASS then Release CTest 115/115 (job-114). LAB verifier `cmake --build build\combat-lab --config Release --parallel` PASS then `ctest --test-dir build\combat-lab -C Release --parallel` 113/113 (job-115). `auto_verify`/doctor NOT RUN this step. Read-only Mode Check still refuses: candidate source manifest differs (28 of 289 hashes, incl. `src\common\config.cpp` and `.empryo\cockpit\lanes\B.md`). No launch, no input injection, no game-memory write, no commit. Next probe: who writes the contact/attack frame's `+0x40` source id (and the handle consumed by `FUN_1402a9cc0`), not the map and not the post-setter walk.
+
+### Separate OpenXR acquisition from input-frame policy (30 Oct)
+
+The shared implementation moves action/state/pose reads into `src/core/input_frame_acquisition.{h,cpp}`. `InputPollFrame` now acquires a normalized `OpenXrInputFrame` snapshot, handles focus/sync failures, then dispatches it to `ApplyInputFramePolicy`; the policy path does not call OpenXR. `tests/test_input_frame_acquisition.cpp` covers focus and sync results, space/time provenance, raw actions, aim/grip separation and velocity samples; existing `tests/test_input.cpp` remains the policy/integration regression. Final verification reported by DSVR Launcher Redesign: full Debug build + CTest 115/115; full Release build + CTest 115/115; `pwsh -File tools/auto_verify.ps1` PASS (Release 115/115), Doctor PASS, `dist\\DSVR-latest-x64.zip` 1,742,845 bytes plus verification JSON. No gate closed, game launch, or native capture. Next probe: exercise policy transitions using acquired snapshots without OpenXR calls; current acquisition test covers the adapter but not the entire policy independently.
+
+### Centralize trace writer/capture lifecycle (30 Oct)
+
+Moved normal trace pumping plus autonomous-session policy advancement behind `TraceCapturePump`, and moved orderly writer drain plus autonomous segment/session closure behind `TraceCaptureFinish`. `DiagnosticsThread` now owns only the event loop and stop-request routing; callers no longer reproduce writer-close sequencing. Existing `diagnostics_autonomous_operator_stop` passed before the refactor (1/1 Debug) and the integrated session, operator-stop, and shutdown cases passed in the full suites afterward. `project(action:test,file=tests/test_diagnostics_mode.cpp)` failed because the tool selected nonexistent `tests/build`; explicit CTest command succeeded. `cmake --build build --config Debug --parallel` PASS; Debug CTest 115/115. `cmake --build build --config Release --parallel` PASS; Release CTest 115/115. `pwsh -File tools/auto_verify.ps1` PASS; Release CTest 115/115, Doctor PASS (supported App 1.03.1/build 10943698; game not running), package ZIP 1,741,546 bytes plus verification JSON. Cockpit state updated; no gate closed. No game launch, input injection, or capture performed. Next probe: exercise process shutdown while writer acknowledgements are delayed; current offline tests do not simulate a delayed trace sink during shutdown drain.
+
+### Bind applied-camera generation to roomscale consumers (30 Oct)
+
+Root cause: `RoomscaleMotion` carried only tracking epoch, although `CameraApplyFirstPerson` applies its velocity using the current camera calibration and world scale. A motion sample could therefore cross a calibration/scale transition without the consumer being able to reject it. Added calibration revision and world scale to the published motion, validate both against the current basis in `InputLatestRoomscaleMotion`, and require a current mapping match in the camera consumer. Input regression first failed to compile on the missing provenance fields (C2039), then passed after implementation; it covers metadata propagation and invalidation after a same-epoch calibration revision change.
+
+Verification: `cmake --build build --config Debug --parallel --clean-first` PASS; Debug CTest 114/114. `cmake --build build --config Release --parallel --clean-first` PASS; Release CTest 114/114. `pwsh -File tools/auto_verify.ps1` PASS; Release CTest 114/114, Doctor PASS after the full clean Release rebuild (supported App 1.03.1/build 10943698; game not running), package ZIP 1,741,073 bytes plus verification JSON. Cockpit state updated; no lane gate closed. No native launch or headset validation; next probe: verify a calibration/world-scale transition during live tracking does not apply stale body-follow motion.
+
+### Capture lifecycle rejects QPC regressions (30 Oct)
+
+`tools/vr_trace.py` accepted an otherwise valid session index with `session_end.qpc=1` preceding the session/epoch/segment timeline (last epoch event QPC 500) as `complete=true`, exit 0. A bounded fixture reproduced it. Added regression coverage and reject QPC decreases in ordered lifecycle records, so timestamps cannot claim a complete session after time moved backwards. `python tests/test_autonomous_session_report.py tools/vr_trace.py` failed before the parser change and passes after it.
+
+Verification: full Debug build PASS; Debug CTest 114/114. Full Release build PASS; Release CTest 114/114. `pwsh -File tools/auto_verify.ps1` PASS; Release CTest 114/114, Doctor PASS (supported App 1.03.1/build 10943698; game not running), package ZIP 1,740,892 bytes plus verification JSON. Cockpit state updated; no lane gate closed. No game launch, input injection or capture performed.
+
+### Coherent motion-input basis publication (30 Oct)
+
+`CameraPublishHeadDirectedLocomotion` now sends the applied-camera locomotion and roomscale bases through one input publication operation under the shared motion-basis mutex; locomotion invalidation clears the roomscale sampling state under that same lock. The fields remain distinct and retain their existing epoch/freshness checks. The input regression exercises the combined publication through roomscale walking. Initial Debug build exposed a missing camera-test stub for the new symbol; added the adapter, then the full build succeeded. `cmake --build build --config Debug --parallel` PASS; Debug CTest 114/114. `cmake --build build --config Release --parallel` PASS; Release CTest 114/114. `pwsh -File tools/auto_verify.ps1` PASS; Release CTest 114/114, Doctor PASS, package ZIP 1,740,504 bytes plus verification JSON. No native launch or headset validation; next probe is verifying the combined camera publication and locomotion invalidation on-device under tracking-epoch changes.
+
+### Setup Mod settings and optional texture tool UX (30 Oct)
+
+`src/setup/gui.cpp` renames the VR settings tab to Mod settings, keeps commonly used comfort/input/view controls as the default page, and makes the DSVR.toml editor/index an expandable advanced section. The index now maps all 100 keys written by `ConfigSave` to readable labels; setup_theme covers expand/collapse and the Quest 3 entry. Game & mods includes opt-in TPUP download into Downloads with SHA-256 verification and extraction there; it never launches TPUP or modifies game files. The texture-share button opens the supplied file.kiwi link and tells the user to save its ZIP in Downloads, unzip it manually, then select its folder in TPUP. No texture extraction or game install is performed by Setup.
+
+An intermediate Debug test-target compile failed after a whole-method WndProc replacement truncated the remainder of the function. Rolled that edit back and inserted the new command branches with a syntax-tree edit; the focused setup_theme test then passed. Verification after final source edits: full Debug build PASS; Debug CTest 114/114. Full Release build PASS; Release CTest 114/114. `pwsh -File tools/auto_verify.ps1` PASS: Release CTest 114/114; Doctor PASS for supported App 1.03.1/build 10943698, game not running, installed DLLs present, OpenXR runtime found, six saves, firewall block active; refreshed `dist\\DSVR-latest-x64.zip` 1,739,909 bytes plus verification JSON. Matching results written to cockpit state. No native or headset gate closed; no game launch, texture download, or install performed.
+
+### Partial scoped HP writer observed; causal owner still open (30 Oct)
+
+Found an existing raw combat trace in build/verification/combat-health-writer-20261028/DSVR-trace-22516-40378187-1.jsonl. SHA-256 1b74ed7abd32c06fe22f0a0b159954e3b74860a44b8c24adfb53d11ca3d506d7; 4,449,479 bytes; 17,963 valid JSONL rows; header 2026-10-29 03:26:02 UTC, PID 22516. It has 247 contacts and one native_combat_health_write. That event at QPC 403954235221 shares thread 8752, seq 221 and record 0x15f0a0 with its contact. Side 0 is player (0xf783470, local-player vtable); side 1 target is 0xf72a970/handle 0x10040008. Contact reads target HP 44→31 and stamina 71→71; the setter targets the same pointer, requests 31 (call index 0 / scoped total 1 / no overflow). Context: BehaviorParam 505, AtkParam 305, selector 1, weapon 212000; raw contact return 1. On thread 8752, the contact QPC falls 14.167 ms after GameStep kind 2/seq 1876 and 6.090 ms before StayStep kind 1/seq 1877; timing does not prove the native update owner.
+
+This is not accepted native evidence: python tools/vr_trace.py reports complete=false / valid=false because the trace has no footer. Receipt state Preparing with no PID/root/file snapshots. Its declared natural_hit window ended 0.9695959 s before the trace header; the setter event is 18.1740426 s outside the window, so no labeled overlap exists. Tracked-hand provenance is absent. Same-callback target correlation is a lead, not proof that a tracked physical swing caused the outcome. No new game launch, input injection, transaction or build.
+
+Runner root cause: RunCasePlan started QPC windows immediately after process startup, before the LAB writer emitted a trace header. tools/run_combat_capture.ps1 now waits for an unclosed header matching the owned live PID and records its file/PID/QPC before any declared case begins. The delayed-header regression failed before the fix with `Case window closed before the trace header; labeled hit has no capture overlap.` It now passes; focused CTest is 1/1 Debug and 1/1 Release. This is only a capture-timing fix; no capture, launch or game-state change performed.
+
+GhidraMCP: caller return 0x140322a9d is after CALL 0x140322910 in FUN_140322a98; its caller FUN_142e191ae loads current HP [RBX+0x3e8], adds EDI, and tail-jumps to the wrapper. FUN_140322910 clamps/stores HP at actor+0x3e8. FUN_142e191ae is a 16-byte continuation with no direct caller; its only direct code xref is trampoline 0x140322a8d. Post-setter path: FUN_1428e9d39 → FUN_142847d55 → FUN_142eafac2 → FUN_1410c1814 → FUN_140219ac6 → FUN_14293b49c → FUN_1427bf86c, which dispatches through an unrecovered RAX target. FUN_142cb5171 copies incoming EDX to EDI and RCX to RBX. Its five thunk callers are FUN_14024f6b0 (EDX=999999, then setter(0)), FUN_14038dae0 (ChrManipulator method receiving event ID 1000/subtype 2, delta from payload), FUN_14034bf96 and FUN_140329b48 (opaque wrappers), and FUN_1406981a0 (current HP minus cached HP during message 0x1f58). EDI source is resolved; the retained trace caller and update/thread owner are not. Next: trace the producer and semantics of the event payload received by FUN_14038dae0; do not attribute the trace without a closed labeled run.
+
+Observer SelfTest and focused CTest combat_capture_transaction PASS: Debug 1/1, Release 1/1; temporary test fixture directories remain under %LOCALAPPDATA%/Temp/opencode/combat-transaction-test-* (not cleaned). Read-only Mode Check refused before environment checks: legacy receipt mismatches src/common/config.cpp; candidate-sealed-3 mismatches .empryo/cockpit/lanes/B.md, and 28 of its 289 source-manifest hashes differ from the current tree. No candidate is qualified for capture while shared source edits remain in progress. B/C remain open.
+
+### Offline physical defense gate fix and verification (29 Oct)
+
+`motion_attacks=false` suppressed the shared blade kinematics, so the separate `physical_defence` toggle reported ready but never reached guard input. The input regression failed (0/1) before including physical defense in the kinematics enable condition; it now passes with guard enabled while motion attacks are off. Attack input retains its own motion-attacks gate.
+
+Offline verification: full Debug build PASS; Debug CTest 113/113; full Release build PASS; Release CTest 113/113; LAB Release CTest 111/111. `pwsh -File tools/auto_verify.ps1` PASS (Release CTest 113/113, doctor PASS, package ZIP 1,646,077 bytes). Earlier full-suite runs exposed `display_rate` policy tests disagreeing with the native-rate fixture; `ShouldApplyNativeRate` now only allows lowering (`current_fps > effective_fps`), and the fixture uses a 120-to-90 cap plus a 120-FPS native reset. Targeted input/display-rate/native frame-rate tests PASS (3/3). No game launch, input injection, deployment or native collision/defense acceptance; G1 remains open.
+
+### CreateDamage_NoCollision traced to an assertion path — still no HP write (29 Oct)
+
+Same read-only-intent session, but the live `DSRFull` program was mutated further
+(functions created). **Still unsaved** — undoable in the GUI until Ctrl+S.
+
+`CreateDamage_NoCollision` exists twice as a string (`14135C690`, `14135C710`); the
+first has one xref, into the script-binding registrar `FUN_1400200C0`, which passes
+`&PTR_vftable_141A2FD10` and the name to a virtual call on singleton
+`DAT_141C7B478`. `OnCharacterHP_CheckAttacker` is the same shape at `FUN_1400173D0`
+with `&PTR_vftable_141A2E0A0`.
+
+The binding table's first code slot `1404B0EC0` had no function, so it was created
+(12-byte thunk) → `FUN_140490F40`, which resolves entity ids (`10000` = player via
+`DAT_141C77E50+0x68`, `>10000` via `FUN_140371BD0(id-0x2711)`, else
+`FUN_140371200`+`FUN_140371360`) and calls `FUN_1403C9B50`. That function is the
+`1403C93B0` handle call plus the slot-table/list resolution already documented for
+`1403C9FE0`, then `FUN_1403C6DA0(record, target)` — which turned out to be an
+**assertion/report path** (`if (param_2 != 0) { ... FUN_140CC3E10(0x20,0x10,...) }`,
+the same noreturn leaf with 1907 callers), not damage application.
+
+Two sibling slots were also created: `1404B0EE0` → `FUN_1404910D0`, `1404B0F00` →
+`FUN_140491330`. Their name entries in the table are pointers, not inline strings, so
+the exported names for those two are still unresolved — recorded as an open item
+rather than guessed.
+
+Follow-up in the same session: `FUN_1404854D0`'s substantive caller is
+`FUN_1407D23C0` (1377 bytes, 1 caller `FUN_1407CDCE0`), a 16-case script-event
+dispatcher into the FRPG singleton `DAT_141C7B1B0` with 22 callees; case 9 is the arm
+that reaches the list-append wrapper. The damage-application candidate set is now that
+callee list, none of which has been opened for an HP write. Created functions:
+`1404B0EC0`, `1404B0EE0`, `1404B0F00` (12-byte thunks to `140490F40`, `1404910D0`,
+`140491330`); their exported names stay unresolved because the table entries are
+pointers, not inline strings — recorded as an open item, not guessed.
+
+Follow-up probe of that callee list (5 of 22 decompiled) is a **negative result**:
+`14047EE40` is a list insert at `singleton+0x440`; `140485520` a 12-float transform
+compare/set; `1404857A0` a byte-OR at `entity+0x45`; `1404857E0` a forward to
+`FUN_1402FCE20`; `140485900` a transform convert + `FUN_1402FBD80` call. None writes
+HP. So the HP write is not in the dispatcher's direct callees — it is downstream of the
+`std::list` consumer at `singleton+0x20` (sentinel `+0x28`, size `+0x30`). Next probe is
+that iterator, not the dispatcher.
+
+Follow-up: the wrapper's other callers `FUN_1404AD290`/`FUN_1404AD320` are both
+`if (DAT_141C7B1B0) return FUN_1404854D0(singleton)` null-check shims — not list
+consumers. `get_xrefs_to DAT_141C7B1B0` = 993 references, so a field sweep is not
+tractable here. Static route from the exported entry to an HP write is exhausted:
+everything reachable resolves to handle create/reset, entity-id resolve, transform
+accessors or assertion paths. The Ghidra program is now SAVED (modification 475,
+`unsaved_changes:false`) — the created functions are persisted.
+
+Conclusion for lane B: the exported `CreateDamage_NoCollision` entry creates an
+event-condition handle and validates a target slot. Damage, if any, is applied later
+by whatever consumes the `std::list` that `FUN_14049B552` appends to. That consumer is
+the next named probe. No HP write, no native invocation, no game-memory write, no
+commit. Evidence: `docs/NATIVE_MELEE_CONTRACT.md` (29 Oct CreateDamage section). No
+source edited, so no build/ctest and no board cell change.
+
+### Lane B GUI pass run: owner FUN_14049B552, type FrpgEventConditionObjDam (29 Oct)
+
+The user asked for the Ghidra actions to be done here, so the live `DSRFull`
+program was mutated (disassembly + function create/delete). **Not saved** — the
+change is undoable in the GUI until Ctrl+S. No game-memory write, no invocation, no
+commit.
+
+`clear_flow_and_repair 14049B510..14049B620` refused: `Repair would delete defined
+continuation after no-return call(s)` naming `14049b54d -> FUN_140cc3e10`. Checked
+that callee: a `noreturn` leaf with 1907 callers, i.e. the stack-protector failure
+path — so the no-return flag is correct and the repair command is the wrong tool.
+`disassemble_bytes` decoded 207 bytes of continuation, `get_xrefs_to 14049B552` gave
+0 references, and delete+recreate at `14049B510` reproduced the same 66-byte body.
+Conclusion: the continuation is reachable only by fallthrough past a no-return call
+and Ghidra will not fold it into the head. Applied `create_function 14049B552`
+instead → `FUN_14049B552`, body `14049B552..14049B65F`.
+
+Decompiled result is the queue owner: it calls `FUN_1404d0bb0(..., 0x1b, ...)`,
+then `FUN_1404d0f10`, then `FUN_14049c250` with the `0xaaaaaaaaaaaaaa9` sentinel and
+`_Xlength_error("list<T> too long")` — an MSVC `std::list` splice at `this+0x20`,
+size `+0x30`, sentinel `+0x28`. `FUN_1404D0BB0` names the element type:
+`NS_FRPG::FrpgEventConditionObjDam::vftable` at `0x141364840`, and it registers the
+`1403C93B0` handle at `+0x2c` only when `FUN_140481060(DAT_141C7B1B0, param_5)`
+resolves a record whose `[[7]+8]` byte is `0x06`. The vftable has 6 xrefs from
+exactly 3 functions: ctor `1404D0BB0`, dtor `1404D0CF0`, deleting dtor `1404D1160`
+(both release the handle via `FUN_1403C9FE0`, the second then `free`s).
+
+That explains why the `1403C9FE0` handlers only unlink and reset: they are this
+object's destructor releasing its handle. Still no HP write on any traced path —
+this is event-condition plumbing plus a list append, not damage.
+
+Evidence: `docs/NATIVE_MELEE_CONTRACT.md` (29 Oct GUI-pass section). Lane B `next`
+updated. No source edited, so no build/ctest and no board cell change; the board
+still shows this session's own Debug 113/113, Release 113/113, auto_verify PASS,
+doctor PASS.
+
+### Lane B: second owner named as FUN_14049B510 (29 Oct)
+
+Read-only GhidraMCP only; no program edits, no game, no memory write, no commit.
+
+The previous entry's "unanalyzed territory" claim was wrong and is corrected.
+`read_memory 14049B400,448` decoded the region: `14049B506` is a 10-byte
+hot-patch-style stub (`MOV [RSP],RAX` / `PUSHFQ` / `JMP 0x142B3D2E0`, which has no
+function), an INT3 at `14049B4D4` ends the preceding function, and a real prologue
+(`MOV RAX,RSP` / `PUSH RDI` / `SUB RSP,0x80`) begins at `14049B510`. Ghidra already
+holds `FUN_14049B510` but its body stops at `14049B551` because the
+`CALL 0x140CC3E10` at `14049B54D` is treated as no-return — the same
+omitted-fallthrough cliff already documented for `1411CD8A0`. The `R9D=0x1b`
+argument block at `14049B5B3` and the `CALL 0x1404D0BB0` at `14049B5C2` both lie in
+that omitted fallthrough, so the second owner is `FUN_14049B510`, reached through
+the 41-byte wrapper `FUN_1404854D0` from `FUN_1404AD1A0`, `FUN_1404AD290`,
+`FUN_1404AD320` and `FUN_1407D23C0`.
+
+Also corrected: `1403C9FE0`'s third handler is a **tail call**
+(`1403CA022: JMP 0x1403C7ED0` after `ADD RSP,0x20`/`POP RBX`), and its pinned bytes
+show no prologue for the first 43 bytes — a real prologue starts at `1403C7EFB`. So
+Ghidra's `FUN_1403C7ED0` entry is not an instruction boundary and its decompiled
+body is meaningless; that handler stays unresolved.
+
+Two GUI actions are now named for the user's manual pass (neither is a research
+result and neither was done here): extend `FUN_14049B510` past `14049B5F5`, and
+re-examine the `1403C7ED0` entry boundary. Evidence in
+`docs/NATIVE_MELEE_CONTRACT.md` (29 Oct third-probe paragraph); lane B `next` and
+`blocker` updated. No source edited, so no build/ctest and no board cell change —
+the counts on the board remain this session's own observations (Debug 113/113,
+Release 113/113, auto_verify PASS, doctor PASS).
+
+### Lane B static trace deepened; two named offline probes left open (29 Oct)
+
+Continued B with read-only GhidraMCP only (no game, no memory write, no commit).
+
+- `get_assembly_context` on the three `1403C93B0` call sites: `1404D0CC1` (in
+  `1404D0BB0`) is a record constructor — `CMP byte ptr [RCX+8], 0x6` on the
+  singleton `[0x141C7A050]`, writes `RBX` at `+0x18/+0x24/+0x2c/+0x44/+0x48`,
+  stores the builder's return at `[RBX+0x2c]`, returns `RBX`. `1404D0FF0` (in
+  `1404D0F20`) calls `FUN_1403C9FE0` then the builder, same field shape.
+- `14049B5C2` is real disassembled code (arg marshalling, `R9D=0x1b`, the call, a
+  null test, then `CALL 0x1404d0f10`) but has **no function attribution**: last
+  analyzed function below is `FUN_14049AFD0` ending `14049B012`; probes at
+  `14049B200/400/600/800` all report none. So it is an analysis gap
+  `14049B012..14049B5F5`, not a thunk — the earlier "unanalyzed territory" note is
+  refined to this.
+- `FUN_1403C9FE0` (109 bytes, 6 callers) is a handle→record resolver: slot table
+  `param_1[2] + (handle>>16)*0x230` with a generation check, or a `+0x88` linked
+  list when the index is `0x80`. Its three handlers (`FUN_1403C5C90`,
+  `FUN_1403C5D20`, `FUN_1403C7ED0`) are release/reset — intrusive-list unlink at
+  `+0x1f0/+0x1f8` and `+0x7e`, field resets to `-1.0f`/`1.0f`, refcount decrement
+  with `0x3fffffff` mask and free via `FUN_1403C48F0`. **No `0x3E8` write.**
+  `FUN_1403C7ED0` decompiles to garbage ending in `halt_baddata()` — unresolved,
+  not claimed.
+
+Two offline probes are now named and deliberately unstarted: function-start
+detection over `14049B012..14049B5F5`, and pinned bytes at `1403C7ED0`. Evidence in
+`docs/NATIVE_MELEE_CONTRACT.md` (29 Oct second-probe paragraph); lane B `next`
+updated in `.empryo/cockpit/lanes/B.md`. No source edited, so no build/ctest run
+this step and no board cell changed — the counts already on the board are this
+session's own observations (Debug 113/113, Release 113/113, auto_verify PASS,
+doctor PASS).
+
+### Lane F cannot be closed offline; lane B static trace narrowed instead (29 Oct)
+
+Asked to finish lane F and move on. F's remaining gates do not close offline:
+F2 (final pose write/copy/skinning/attachment order), F5 (face/headgear/hair and
+armor variants), F6 (movement-collider height/center setter, clearance query,
+hurt-volume consumers) and F7 (runbook hand/eye alignment, settled feet, crouched
+clearance, projectile avoidance) each require protected deployment plus native or
+headset operator evidence, which the hard limits forbid this agent from
+producing (no install, launch, input injection or memory write). F1's code exists
+and F3/F4's math exists, but the cockpit rule is explicit that code existing is
+not a gate closing. So F stays `active` with its blocker unchanged, and the one
+offline F item (fixture provenance) was run and recorded in the previous entry.
+
+Productive offline work was taken in lane B instead, using the read-only Ghidra
+session (program `DarkSoulsRemastered.exe`, base `140000000`, 310894 functions,
+revision token `1793151129646:7d5a7905:3`):
+
+- `get_xrefs_to 1403C93B0` → exactly four inbound references: the recorded
+  `1403C9B50` call, plus `1404D0BB0` (call at `1404D0CC1`) and `1404D0F20` (call
+  at `1404D0FF0`), plus one DATA reference from `141D54374`.
+- `1404D0BB0` has no in-function callers. Its inbound set is two DATA slots
+  (`141D66080`, `1417CB768`) and one `UNCONDITIONAL_CALL` from `14049B5C2`.
+- `get_functions 14049B5C2` → **no function at or containing that address**. The
+  second owner's call site is in unanalyzed territory, so it cannot be named or
+  claimed as a damage owner. This is the narrowed blocker, not a workaround.
+- `1404D0F20` is reached only from `1404D0D40`, which is itself referenced only as
+  DATA (`141D66098`, `1417CB7B0`, `1417CB808`, `141364848`).
+- Both condition owners call the same 34-byte helper `FUN_140481060` (14 callers,
+  callees `FUN_14030C1B0`/`FUN_14030C290`) — a shared accessor, not a writer.
+
+Net: no HP write found; no new damage owner named. The concrete next probe is to
+analyze the region containing `14049B5C2` before any further owner claim.
+Evidence written to `docs/NATIVE_MELEE_CONTRACT.md` (29 Oct re-probe paragraph)
+and the narrowed blocker recorded in `.empryo/cockpit/lanes/B.md`. No native
+invocation, no game-memory write, no commit.
+
+### Lane F picked up; F1 fixture provenance rechecked offline (29 Oct)
+
+F is the only lane at `stage: active`, so it is the sensible lane. Its next
+named gate (F2/C2 exact-package native publication) is blocked on authorized
+protected deployment plus operator evidence, which the agent must not perform.
+The one F item that is offline-doable is F1's "Recheck the untracked fixture
+provenance", so that was run first rather than idling on a blocked gate.
+
+Probe: `python tools/verify_native_pose_fixture.py build/native-pose-run7-snapshot.json`
+→ `PASS: 960 fixture floats are byte-identical to captured sample 0`,
+`capture_sha256=52f9170f8812e7bc5dcbfdb87740c14fdea3e8b3f7339e0ed6561adfcc48c747`,
+`palette_sha256=6d3e375a9b3da2f0f855216c3d155abfe431405db143645166bd4c68a3dff9c3`.
+The tool states its own limit: numerical pose provenance only, hierarchy and
+live skinning are separate evidence. So the retained Run-7 capture is intact and
+independent — the fixture was not manufactured from the solver's own output — and
+that is the whole claim.
+
+Still open in F1 after this: the adapter's `output data mismatch` gate still
+refuses the real Run-7 case because all 32 after-copy samples have distinct
+model/body palette pointers (`docs/ARM_IK_EVIDENCE.md:257-261`), and
+`build/native-pose-observe.py:85-91` serializes `root` from `object+0x30` for
+both types while the assembly root starts at `+0x20`, so `asm.root` omits the
+first 16 bytes (`docs/ARM_IK_EVIDENCE.md:266-270`). Deliberately not "fixed"
+this session: changing the serializer now would make any new capture
+non-comparable with the pinned fixture unless it is versioned alongside it, and
+the guard must stay until live evidence qualifies it. Next probe when a capture
+is authorized: emit both roots at their true offsets in a versioned observer and
+re-run the verifier against the new snapshot only.
+
+Baseline recorded for A1 (not closed — A1 also needs executable hash, runtime
+route, graphics settings and candidate config): git HEAD
+`d2fd048d6d0a555c35ad5d78509b9ad3dcefc9d2`, working tree carries the large
+uncommitted conversion change set plus untracked
+`src/core/autonomous_capture.*`, `trace_sink.h`, `trace_writer.cpp`,
+`perf_fit.h`, `src/setup/hardware.cpp` and several `docs/history/*.txt`. Nothing
+was staged, reset or committed.
+
+### Architecture pass: three more duplicated-rule seams collapsed (29 Oct, offline)
+
+Continued the same architecture sweep after the XInput change, working the
+`genome_analyze` near-duplicate list in order. Four seams collapsed, each with
+behavior held identical (no signature, ordering or numeric change):
+
+- `src/core/combat_math.h` — `BladeOverlapsSphere` and `BladeSweptOverlapsSphere`
+  shared 96% of their tokens because the swept form repeated the whole
+  validation-plus-capsule body for the second segment. Extracted
+  `BladeSegmentOverlapsSphere(a, b, centre, radius, params)` as the single
+  capsule-vs-sphere test; the static form forwards `(grip, tip, ...)` and the
+  swept form calls it twice, `(grip, tip)` then `(prev_tip, tip)`. The
+  validation set is unchanged: `grip` is validated in the first call, `prev_tip`
+  in the second. `tests/test_combat_math.cpp:43-52` (NaN grip/tip/centre,
+  negative radius, boundary graze) is the oracle; no new test was needed for a
+  pure move.
+- `src/core/xr_stereo_frame.h` + `src/core/xr.cpp` — the per-eye lease drain
+  loop existed twice (93%). Extracted `DrainSwapchainLeases(container)`; both
+  `Drain()` and `DrainMonoImages()` are now one line. The timing policy that
+  matters (a timed-out wait is retried, an unwaited image is never released)
+  now lives in one place.
+- `src/core/interaction_target_math.h` — the class-table lookup was written twice
+  with the same copy-record/overwrite-reach/refuse-Unknown rule. Extracted
+  `ClassReachApplied`; the AND-gate can no longer be reached with a guessed
+  reach.
+- `src/core/body_pose_math.h` — `DampedAngle` and `DampedVec3` repeated the
+  timing policy (prime, refuse a non-advancing clock, snap past a 250 ms gap,
+  exponential alpha). Extracted `TorsoDampClock` returning
+  Keep/Snap/Blend; each damper keeps only its own delta, deadband and blend.
+  This is the one candidate where the duplication carried real bug risk: a
+  duplicated or stalled timestamp could spend a budget step in one damper and
+  not the other.
+
+Judged and rejected as false seams (coincidental struct shape, not duplicated
+logic): the `input.cpp` `*ParamsFromConfig` trio (different band rules), the
+`RoomscaleMotion`/`RoomscaleSampler` and `ArmRig`/`*Params` struct-shape pairs.
+
+Verification, this session: Debug build clean (only the pre-existing C4459
+shadowing in `xinput_bridge.cpp` and `arm_pose_math.h:223`); `ctest -C Debug
+--parallel` 113/113; Release build clean; `ctest -C Release --parallel` 113/113;
+`pwsh -File tools/auto_verify.ps1` PASS with doctor PASS and dist written.
+Honest gap: one Debug run reported `1 tests failed out of 113` with the name
+filtered out of my own output, and it did not reproduce across the five
+following Debug runs (including a targeted 12-test re-run of the slow
+diagnostics/theme/capture-transaction set). Treat it as an unnamed Debug flake,
+not a regression from these edits — next probe is a full unfiltered
+`ctest -C Debug --parallel --output-on-failure` loop until it names itself.
+
+### Paramdef header has NO row size - the u16 at 0x0A is the field-record stride (29 Oct, offline)
+The earlier "paramdef declares 144 bytes but rowSize is 176, so the numbers
+contradict" framing was a header misread. Across all 51 extracted `.paramdef`
+files the u16 at offset 0x0A reads **176 (0xB0) for every single def**,
+including defs whose real row is 16, 32 or 336 bytes. It is the per-field
+record stride, not a row size. The paramdef header carries no row size at all;
+the row size exists only in the paired `.param` row table. So there is no
+paramdef-vs-row contradiction to resolve - there is only a declared-bytes sum
+that must be checked against the measured stride.
+
+Measured with the corrected `.param` parse (144 params with a confirmed
+constant stride), 22 defs pair with a `.param` in the extracted set and 29 do
+not (the bank defs - FogBank, DofBank, EnvLightTexBank and friends - live in
+per-map `.param` files that are not in `GameParam.parambnd`, plus AtkParam,
+BulletParam, AiStandardInfo and EnemyStandardInfo whose `.param` files are
+named `AtkParam_Pc`/`AtkParam_Npc` rather than `<def>.param`).
+
+Declared-bytes sum vs measured stride: **4 of 22 match exactly** -
+GameAreaParam 32/32 (13 fields), RagdollParam 48/48 (11),
+ReinforceParamProtector 48/48 (15), ReinforceParamWeapon 88/28 fields. The rest
+are off in both directions: EquipParamProtector +36, NpcParam +20,
+EquipParamWeapon +11, KnockBackParam -8, FaceGenParam -20,
+EquipParamAccessory -15, and four defs (CoolTimeParam, LockCamParam,
+WhiteCoolTimeParam) read **declared 0** because their element-size/count slots
+read zero at the offsets this parse uses.
+
+That last group is the diagnostic: a whole def reading 0 declared bytes means
+the field-record layout is not uniform across defs, so the `+0x64 count /
++0x68 elementSize` slots are wrong for at least some tables, and the +36/+20
+overruns are the same bug in the other direction. The 4 exact matches prove the
+record layout is right for those tables.
+
+Follow-up the same day closed most of it, and the earlier claim above is
+partly wrong: the record layout IS uniform. Dumping the record that holds
+`hit0_Radius` shows the field name at record+0x90, the type string at +0x44,
+the printf format at +0x48, f64 max/min at +0x58/+0x60, and u32 count/size at
++0x64/+0x68 - exactly the slots the parse already used. The reason four defs
+read `declared 0` is NOT a different layout: scanning all 51 defs for a record
+stride that puts an ASCII field name at record+0x90 for every declared field
+resolves **48 of 51 at stride 176**, so the layout is uniform. Only
+`MenuParamColorTable`, `ShadowBank` and `SpEffect` fail that scan, and that is a
+too-strict name regex (brackets, digits, long names), not a different record
+shape. The four `declared 0` defs therefore need their +0x64/+0x68 slots
+re-read against the corrected base - still open.
+
+The real reason the walk overruns is two packing rules, now applied by
+`tools/dsr_paramdef.py` as `packed_bytes`:
+
+1. A contiguous bitfield run occupies `ceil(total bits / 8)` bytes, not one
+   byte per member. AtkParam declares eight `:1` members as 8 bytes; they are
+   1 byte in the row. That alone removes 7 of the 23-byte overrun.
+2. A declared element count can exceed the row's real array length. AtkParam's
+   four `hti*_Priority` members declare `x5` (20 bytes); the row has 4. That
+   removes the remaining 16 and lands **packed 144 -> 128, exactly the stride
+   measured from AtkParam_Pc and AtkParam_Npc**.
+
+So the AtkParam byte budget now closes from two independent sides: the row
+table's constant 128-byte delta plus `lastRowOffset + 128 == dataEnd`, and the
+paramdef field walk once bitfields and array counts are packed correctly. The
+array-count rule is deliberately NOT applied automatically in the tool - no
+independent evidence pins which counts are inflated - so the tool prints
+`packed=144` for AtkParam and the last 16 bytes are a named open item rather
+than a silent correction.
+
+Third rule found the same day and now applied: a declared element count of
+**0 means one element**, not zero. CoolTimeParam declares count 0 / size 4 for
+all eight f32 members and its measured row is exactly 8 * 4 = 32 bytes, so 0
+is the scalar encoding. That was the whole cause of the four `declared 0`
+defs, not a different record base.
+
+With all three rules (count 0 -> 1, bitfield runs packed, record stride 176)
+the budget gate closes across the whole extracted set: **22 of 22 paired
+`.paramdef` / `.param` pairs reconcile exactly** - BehaviorParam 32/32,
+CalcCorrectGraph 80/80, CharaInitParam 240/240, CoolTimeParam 32/32,
+EquipMtrlSetParam 32/32, EquipParamAccessory 64/64, EquipParamProtector
+232/232, EquipParamWeapon 272/272, FaceGenParam 128/128, GameAreaParam 32/32,
+HitMtrlParam 16/16, KnockBackParam 128/128, LockCamParam 32/32, NpcParam
+336/336, ObjActParam 32/32, ObjectParam 16/16, RagdollParam 48/48,
+ReinforceParamProtector 48/48, ReinforceParamWeapon 88/88, SkeletonParam 48/48,
+TalkParam 32/32, WhiteCoolTimeParam 16/16. The earlier 4-of-22 figure and the
+EquipParamWeapon 12-byte gap were both artifacts of the missing count-0 rule.
+
+Independent corroboration of the 4-element hti arrays, from the row data
+rather than arithmetic: over all 1397 AtkParam_Pc rows, the 4-byte block at
+row+0x66 takes **4 distinct values** (all-zero 1225, `00 00 01 00` 145,
+`ce ff 00 00` 22, one more), while extending it to 5 bytes takes **5 distinct
+values** - byte 0x6A varies independently inside a single 0x66..0x69 group, so
+it belongs to the following field, not to the priority array. A 5-byte array
+would keep the block internally coherent. Combined with the 49 fields already
+byte-validated at wiki offsets through 0x7D, the `count 5` in the paramdef is
+contradicted by two independent sources; the tool still does not auto-correct
+it, it only reports the overrun.
+
+AtkParam is the one def that still overruns, and the cause is now isolated to
+exactly four records: `hti0..3_Priority` declare `count 5, size 1` (20 bytes)
+where the row has 4. 144 - 16 = **128, the stride measured independently from
+both AtkParam_Pc (1397 rows) and AtkParam_Npc (2164 rows)**. No other field in
+the 71-record table declares a count above 1, so the inflated-count rule is
+confined to those four and is still NOT applied automatically in the tool -
+the evidence is arithmetic agreement with the row stride, not an independent
+read of the hti array length. Closing that needs a third source: a row whose
+hti bytes are known from elsewhere (a labelled weapon in the wiki data), or
+the native consumer that indexes them.
+
+BehaviourParam -> AtkParam link closed, and the earlier refType guess was
+wrong. `refType` is 0 for 2107 rows, 1 for 263 and 2 for 31, and it is NOT a
+table selector: resolving `refId` (+0x0C) against both AtkParam id sets gives
+(0,'Npc') 1989, (0,'Pc') 2, (0,'none') 116, (1,'Npc') 154, (1,'Pc') 7,
+(1,'none') 102, (2,'Npc') 3, (2,'Pc') 13, (2,'none') 15. So `BehaviorParam`
+resolves into **AtkParam_Npc** for 2146 of 2401 rows (89.4%) regardless of
+refType.
+
+The player side was the missing half, and it was a table I had never parsed:
+`BehaviorParam_PC.param` (221416 bytes, 3163 rows, stride 32, same layout)
+sits next to `BehaviorParam.param` in `GameParam.parambnd`. Its `refId`
+resolves into **AtkParam_Pc** for 3124 of 3163 rows (98.8%), refType 0 for
+3123 and 1 for 40. So the split is by which behaviour table the caller reads,
+not by a selector inside a row: `BehaviorParam` -> `AtkParam_Npc`,
+`BehaviorParam_PC` -> `AtkParam_Pc`.
+
+The native confirmation is the param-name table in `FUN_140531bc0`
+(size 939, called from `FUN_140531fe0` / `FUN_140532050` / `FUN_140532310`):
+it builds a 39-entry (name, index) list and the indices are the param-table
+slots the rest of the engine addresses by number -
+`EquipParamProtector` 1, `EquipParamWeapon` 2, `EquipParamAccessory` 3,
+`EquipParamGoods` 4, `ReinforceParamWeapon` 5, `ReinforceParamProtector` 6,
+`NpcParam` 7... precisely: `AtkParam_Npc` = 7, `AtkParam_Pc` = 8,
+`NpcThinkParam` = 9, `ObjectParam` = 10, `Bullet` = 11, `BehaviorParam` = 12,
+`BehaviorParam_PC` = 13, `Magic` = 14, `SpEffectParam` = 15,
+`SpEffectVfxParam` = 16, `TalkParam` = 17, `MenuColorTableParam` = 18,
+`ItemLotParam` = 19, `MoveParam` = 20, `CharaInitParam` = 21,
+`EquipMtrlSetParam` = 22, `FaceGenParam` = 23, `RagdollParam` = 24,
+`ShopLineupParam` = 25, `QwcChange` = 26, `QwcJudge` = 27,
+`GameAreaParam` = 28, `SkeletonParam` = 29, `CalcCorrectGraph` = 30,
+`LockCamParam` = 31, `ObjActParam` = 32, `HitMtrlParam` = 33,
+`KnockBackParam` = 34, `LevelSyncParam` = 35, `CoolTimeParam` = 36,
+`WhiteCoolTimeParam` = 37, terminating index 0x26 = 38. The registry itself is
+`DAT_141c7e000`, one 0x48-byte record per index: a count at +0x10 and up to
+**8** name pointers at +0x18 (`lVar5 * 9 + uVar5` * 8), guarded by
+`index < 0x27` and `count < 8`. Index 0xf gets extra handling through
+`FUN_140532840` (SpEffectParam). Registration entry points are
+`FUN_140532310` (called from `FUN_1405251e0`) and `FUN_140532370` ->
+`FUN_140532050(DAT_141c7e000, name)` (called from `FUN_140525030`);
+`FUN_140531fe0` is the same body with the registry passed in and has no
+callers in this program. `FUN_140532240` frees the registry through
+`FUN_140cc29c0` from `FUN_1405242a0`.
+This is a **name -> loaded-file** table, not a row accessor, so it does not
+expose the AtkParam row-index expression. That probe is not closed: the
+consumer of slots 7/8 has not been found, and no row-fetch address is claimed.
+Follow-up that closes the registry route as a dead end rather than leaving it
+open: `DAT_141c7e000` has exactly **7 xrefs in the whole program**, all inside
+`140532240` / `1405322d0` / `140532310` / `140532370` (2 READ, 3 WRITE in the
+loader range, plus the two registration READs). Nothing in combat code touches
+it, so consumers must cache a resolved param pointer elsewhere - following the
+registry further cannot reach the row-index expression. The only two xrefs to
+the `AtkParam_Pc` / `AtkParam_Npc` name strings are `140531c45` and
+`140531c4c`, both inside the name table itself, which confirms the same thing.
+`FUN_140525030` (size 348, from `FUN_140527370`) is a per-param-type init
+dispatcher: it switches on a 4-byte type index at `obj+0x10` over cases 0..0xf
+to `FUN_1405652a0`, `FUN_140566270`, `FUN_140562620`, `FUN_14055e940`,
+`FUN_1405632e0`, `FUN_140562770`, `FUN_14055b260`, `FUN_140566950`,
+`FUN_14055b660`, `FUN_1405664f0`, `FUN_1405663c0`, `FUN_1405675b0`,
+`FUN_140536fa0`, `FUN_1405196b0`, `FUN_140537200`, `FUN_140537670`, and case
+0x10 to the registry `FUN_140532370`. The case-to-param mapping is **not
+recovered** - the switch index is not the registry index (0x10 is the registry
+case, but registry index 0x10 is `ObjectParam`), so do not assume they align.
+Next probe for the row index is therefore not the registry: start from a known
+combat consumer (the `14049B510` / `1404D0BB0` contact path in
+NATIVE_MELEE_CONTRACT) and read the pointer it dereferences for attack
+geometry, then walk backwards to where that pointer was resolved.
+
+That walk closed the row-fetch accessor the same day, and the registry was
+reachable after all - it is the loader's write side, and a separate small
+accessor family is the read side.
+
+**Name -> registry index.** `FUN_140531bc0` (size 939) builds a name-matching
+table with 39 `(wchar_t*, index)` pairs, indices 1..0x26 with `0x26` as the
+terminating count. The four that matter for combat: **7 = `AtkParam_Npc`,
+8 = `AtkParam_Pc`, 0xc = `BehaviorParam`, 0xd = `BehaviorParam_PC`**. The full
+name set is `EquipParamProtector`, `EquipParamWeapon`, `EquipParamAccessory`,
+`EquipParamGoods`, `ReinforceParamWeapon`, `ReinforceParamProtector`,
+`NpcParam`, `AtkParam_Npc`, `AtkParam_Pc`, `NpcThinkParam`, `ObjectParam`,
+`Bullet`, `BehaviorParam`, `BehaviorParam_PC`, `Magic`, `SpEffectParam`,
+`SpEffectVfxParam`, `TalkParam`, `MenuColorTableParam`, `ItemLotParam`,
+`MoveParam`, `CharaInitParam`, `EquipMtrlSetParam`, `FaceGenParam`,
+`RagdollParam`, `ShopLineupParam`, `QwcChange`, `QwcJudge`, `GameAreaParam`,
+`SkeletonParam`, `CalcCorrectGraph`, `LockCamParam`, `ObjActParam`,
+`HitMtrlParam`, `KnockBackParam`, `LevelSyncParam`, `CoolTimeParam`,
+`WhiteCoolTimeParam`. The name/index **pairing is positional in the decompiler
+output and the loop body is partly mis-analysed**, so treat the index set
+1..0x26 and the name set as solid and re-confirm one pairing before code
+depends on it.
+
+**Read-side accessors.** `FUN_140528910(out, selector, id)` resolves
+`FUN_1405322d0(selector + 7, 0)` with `selector < 2`; `FUN_140528a30(out, id,
+selector)` resolves `FUN_1405322d0(selector + 0xc, 0)` with `selector < 2`.
+Both then read `*(record + 0x38)` as the loaded buffer and call
+`FUN_140528c60`. `FUN_140528910` has 33 callers, `FUN_140528a30` has 32 - this
+is the param row-fetch used across combat, not a one-off.
+
+**Row-index expression, recovered** (`FUN_140528c60`, size 120, its only
+caller is `FUN_140528a30`): the buffer pointer `base` is a heap/vector data
+pointer, so `*(int *)(base - 0x10)` is the block's size field and the sorted
+**id -> row-index table begins at `base + ((size + 15) & ~15)`**. Entries are
+8 bytes: `u32 id`, `s32 rowTableIndex`; a negative index means "no row" and the
+accessor returns null. Entry count is `*(u16 *)(base + 0x0A)`. The row itself
+is `base + *(u32 *)(base + 0x34 + rowTableIndex * 0xC)` - a **12-byte row
+table at file offset 0x34**, which is exactly what `tools/dsr_param.py` walks.
+It is a plain binary search on id, so ids are sorted in the index table, not in
+file order.
+
+**Header field correction, corroborated offline.** The native reads a **u16 at
+0x0A**, and in the extracted files `u32 @0x08` is really two u16s: low half is
+version/flags (1 for `AtkParam_*`, 2 for `BehaviorParam*`), high half is that
+count. `AtkParam_Pc` reads `0x05750001` -> 1397; `AtkParam_Npc` `0x08740001` ->
+2164; `BehaviorParam` `0x09610002` -> 2401; `BehaviorParam_PC` `0x0c5b0002` ->
+3163; `CoolTimeParam` `0x00280001` -> 40. `tools/dsr_param.py` currently reads
+0x08 as one u32 "version/flags" and 0x2C as rowCount; 0x2C is 512 (256 for
+`CoolTimeParam`) in every file checked, so it is **not** a row count and that
+field read is wrong. What is NOT claimed: that the u16 at 0x0A equals the
+number of 12-byte row-table entries between 0x34 and `dataStart` - a 45-file
+probe found `(dataStart - 0x34) / 12` matching that count in **0 of 45** files,
+so `dataStart` does not sit immediately after the row table and the two counts
+are different quantities. Do not "fix" the parser by asserting that equality.
+
+**BehaviourParam -> AtkParam link, native side.** `FUN_1403c93b0` (size 668,
+callers `FUN_1403c9b50`, `FUN_1404d0bb0`, `FUN_1404d0f20`) is the damage
+request builder. It calls `FUN_140528a30(&out, attackId, 0)` for the
+**BehaviorParam row**, then passes `*(u32 *)(row + 0xc)` as the id to
+`FUN_140528910(&out2, selector, thatId)` - so **BehaviorParam row +0xC is the
+AtkParam row id**, and the AtkParam table selector is the entity's own
+`vtable+0x18` result, which must be `< 2` (0 -> `AtkParam_Npc`, 1 ->
+`AtkParam_Pc`). That answers why the player path uses `AtkParam_Pc`: it is an
+entity-side Pc/Npc flag from a virtual call, not a param-side constant. The
+same row's `+0x1c` byte is read as a flag, and `row + 0xc` is read twice behind
+a `*(char *)(row + 9) != 0` validity guard.
+
+**Contact object shape.** `FUN_14049b510` is only an allocator -
+`FUN_140cc3e10(0x58, 8, DAT_141b68f20)`, a 0x58-byte object, count from a
+global. `FUN_1404d0bb0` (size 301, single caller `FUN_14049b552`) is its
+constructor: sets `NS_FRPG::FrpgEventConditionObjDam::vftable`, stores
+`+0x20` id, `+0x24`, `+0x28`, `+0x2c = -1`, `+0x30` float, `+0x34` byte,
+`+0x44 = -1`, `+0x48`, `+0x4c = 1.0f`, `+0x50`, `+0x54 = 1.0f`, and forces
+`+0x34 = 1` when `param_10 < 0`. It resolves the target through
+`FUN_140481060(DAT_141c7b1b0, id)` and gates on `*(char *)(obj[7] + 8) == 6`
+before calling the damage builder. Field meanings beyond the two 1.0f defaults
+are **not** recovered - do not name them.
+
+Still not found: a concrete HP write. `FUN_140528ce0(local_158, id, ids[8],
+&request, 1, 0.0, 10000.0)` opened the same day and is a **filter-and-apply
+wrapper**, not damage: it fetches an AtkParam row through
+`FUN_140528910(selector = request+0xc, id = request+8)`, and only if that row
+exists calls `FUN_1405290c0` then `FUN_140529670`. So the whole damage-request
+path is gated on the AtkParam row resolving. Its callers are `1403c93b0` /
+`1403c9670` / `1403c9a88`.
+
+`FUN_1405290c0` (size 1345, callers `140528ce0` / `140528e90` / `140528f70`) is
+the substantive step and it is still **not** an HP write - it is a
+**param-row -> damage-request field copier** into a ~0xca-byte request struct.
+Its AtkParam-row reads are the useful part, because they land on offsets the
+wiki table and the byte-validated paramdef layout already name: `row+0x10`
+float, `row+0x62` u16, bytes at `0x72`, `0x75`, `0x76`, `0x77`, `0x78`, `0x79`,
+`0x7d`, and the **bitfield byte at `row+0x7e`** whose bits 0, 1, 2, 6 and 7 are
+each copied into separate request flag bits. Two fallback rules are visible:
+when `row+0x76 == 0xff` the value comes from a **second row** (`local_70`,
+resolved by `FUN_140532b20`) at `+0xe5` / `+0xe9`, and that second row's
+`+0x102` byte feeds one more request flag. An eight-slot loop writes
+`param_1[0x1c..0x23]`: slots 0-4 come straight from the caller's id array,
+slots 5-7 come from the second row's `+0x44`-relative fields plus a byte at
+`+0x4b`, and **all eight become NaN when `row+0x7e` bit 2 is set** - that bit
+suppresses the whole per-slot value set. Three fields are stored as `short`
+after `* 100.0` (fixed-point at 1/100), from request `+0x3c`, `+0x38`, `+0x44`,
+`+0x20`.
+
+The meaning of each copied field is **not** recovered - only the offsets and the
+copy direction are. The HP write remains downstream of whoever consumes this
+request struct.
+
+Both named callees were opened the same day and **neither is an HP write**:
+
+- `thunk_FUN_142ac2a92` (at `1403c9dd0`) targets `FUN_142ac2a92` (34 bytes),
+  which decompiles to two `LOCK()`/`UNLOCK()` pairs with no memory operands - a
+  lock-guard stub, not damage. That route is **closed**; the five callers
+  (`1403c91e4`/`1403c9240`/`1403c93b0`/`1403c9670`/`1403c9ab7`) only take and
+  release a guard around it.
+- `FUN_140529670` (263 bytes, **zero callees**, callers `140528ce0` and
+  `140528da0`) is a **per-hit-slot copier**. `param_3` is a slot index bounded
+  `<= 3`, which independently confirms the four hit slots the param side
+  showed. It refuses unless the float at `rowArray+0x00 + slot*4` is `> 0.0`,
+  and unless `request+0xc8` bit `0x10` is clear it forces both short reads to
+  `-1`. Reads from the array base at `param_2+8`: `+0x2c` short[], `+0x34`
+  short[], `+0x00` float[], `+0x6a` byte (mapped 0/1/2, anything else 0) and
+  `+0x7c` byte (unindexed). Writes to the request: `+0x50` float, `+0xac` and
+  `+0xb0` int, `+0x54` u32, `+0xb4` byte. Still plumbing.
+
+**Attribution win from the same pass.** `FUN_1403c93b0` - the function that
+builds this damage request and calls `FUN_140528ce0` - has exactly three
+callers: `1403c9b50`, `1404d0bb0` and `1404d0f20`. `1404d0bb0` is the
+constructor of the 0x58-byte contact object, and that object's vftable **is**
+the PDB-imported data symbol `NS_FRPG::FrpgEventConditionObjDam::vftable` at
+`141364840`. So the damage request is a **member of the damage
+event-condition object, populated at construction**, and the contact object we
+already own the lifetime of *is* the damage condition object. That is the
+strongest native attribution in this chain so far and it was reached from the
+vftable's xref list, not from a name guess.
+
+**Named-symbol route is closed, measured not assumed.** `find_functions` with
+`*HP*` and `*amage*` returns **0**, `find_data_types` with `*Damage*` (struct)
+returns **0**, and the 31833 custom-named functions are dominated by CRT
+artifacts (`_Xbad_function_call`, `` `scalar_deleting_destructor` ``,
+`` `vector_constructor_iterator` ``). The only game-ish PDB name in this area
+is the vftable data symbol. Do not plan an HP-write hunt around function names.
+
+**Tooling gap worth recording:** the loaded GhidraMCP groups expose no
+data/memory read, so the `FrpgEventConditionObjDam` vftable **slots** cannot be
+enumerated from here - `get_assembly_context` needs instruction xref sources
+and returns nothing for a data address, and `mcp__rea__list_strings` /
+`list_names` take no filter. The vftable has exactly 6 xrefs, all from
+`FUN_1404d0bb0` / `FUN_1404d0cf0` / `FUN_1404d1160` (ctor / dtor / deleting
+dtor), which is why the slots stay unread. Next probe is therefore
+`FUN_1404d0f20` - the second caller of the request builder, i.e. the other
+path that populates a damage condition object.
+
+Ghidra program `DSRFull` was saved this pass: `save_program` reported
+`unsaved_changes:false`, modification 3 of the current revision token, so the
+functions created earlier (`FUN_14049B552`, `1404B0EC0`, `1404B0EE0`,
+`1404B0F00`) are persisted.
+
+## The damage condition object's full lifecycle is now recovered
+
+`FUN_1404d0f20` (318 bytes, sole caller `1404d0d40`) is the **submit path** of
+the damage condition object, and `FUN_1404d0d40` (400 bytes, **zero callers in
+the database** - it is reached through a vftable slot, which is exactly the
+gap noted above) is its **per-frame update**. Together with the ctor
+`FUN_1404d0bb0`, dtor `FUN_1404d0cf0` and deleting dtor `FUN_1404d1160`, the
+whole object lifecycle is now decompiled.
+
+Object layout, read off the update body (offsets into the 0x58-byte object):
+`+0x10` owner id, `+0x18` finished flag, `+0x19` release-on-complete,
+`+0x20` target id, `+0x24` hit-slot index, `+0x28` bit 0 / bit 1 select which
+completion query to poll, `+0x2c` the **submitted request handle**, `+0x30`
+lifetime timer decremented by `dt` unless `+0x50` freezes it, `+0x34` gate for
+the event dispatch, `+0x38` resolved target pointer **re-resolved every frame**
+through `FUN_1404a7920(owner, +0x20)`, `+0x40` submit-enabled, `+0x4c` cooldown
+timer that reloads from `+0x54` after a submit, `+0x44`/`+0x48` floats handed to
+the builder.
+
+Submit path (`FUN_1404d0f20`): singleton `DAT_141c7b1b0` -> `FUN_140481060`
+resolves the target by `+0x20`; the target is accepted only when the byte at
+`*(target+0x38)+8` equals **6** - a class/kind discriminator, meaning this
+condition object only ever targets one specific entity class; geometry is built
+by `FUN_1402fd9b0(target, buf, +0x24)`, gated by `FUN_1404954b0`; then the old
+handle is released (`FUN_1403c9fe0`), a new request is submitted through
+`FUN_1403c93b0`, and the returned handle is stored at `+0x2c`.
+
+Update path (`FUN_1404d0d40`): refreshes `+0x38`, submits when `+0x4c` expires,
+then while `+0x18` is clear, `+0x38` is non-null and `+0x2c != -1` it rebuilds
+geometry with `FUN_1402fda20` and pushes it into the live request through
+`FUN_1403ca320(singleton, +0x2c, buf)` - so **the request is continuously
+refreshed with current target geometry, not snapshotted at submit**. Completion
+is polled by `FUN_1403ca380` (bit 0) and `FUN_1403ca180` (bit 1); on completion
+it dispatches `FUN_1404a7740(owner, 0x1b, +0x10, +0x20, +0x24)` when `+0x34` is
+set, optionally releases the handle when `+0x19` is set, and returns true.
+
+**Request-record layout, from `FUN_1403ca320` (81 bytes).** The handle is a
+tagged index: `handle >> 16` is the slot. Slots below `0x80` live in a fixed
+array at `singleton+0x10` with **stride 0x230 (560 bytes)**; slot `0x80` is an
+overflow linked list rooted at `*singleton` with the next pointer at record
+`+0x220`. Validity is `record+0x00 == handle`, else the lookup silently
+returns. So there are 128 fixed damage-request slots plus an overflow list.
+`FUN_1403ca320` then calls `FUN_1403c6c40(record, geom)` (12 bytes), which is a
+one-line forward to `FUN_1402af5e0(record+0x130, geom)` - the request record's
+geometry sub-object sits at **`+0x130`**, and the ~0xca-byte struct written by
+`FUN_1405290c0` lives inside it.
+
+Singleton `DAT_141c7a050` has 65 xrefs but only **two writes**, at `14027b1e3`
+and `14027b6fc` (in the `FUN_14027b080` / `FUN_14027b530` region) - that is its
+initialization, everything else is a read.
+
+Still **no HP write**. The strongest next candidates are the two functions that
+both read the singleton heavily and call `FUN_1403c6c40`: `FUN_1403b7460` and
+`FUN_1403b8400` - likely the manager's per-frame iteration over the request
+slots. `FUN_1402af5e0` (the geometry setter at record `+0x130`) is the other.
+
+## Both candidates opened - and one of them is the native hit-volume sweep
+
+`FUN_1403b7460` (933 bytes, **zero callers**, so again reached through a vftable
+slot) is the manager's per-frame update over two `std::list` members: one rooted
+at `+0x38` with its count at `+0x40`, one rooted at `+0x50` with its count at
+`+0x58`. The first list holds entries with a countdown float at `+0x74` that is
+decremented by `dt`; on expiry it either builds a geometry buffer through
+`FUN_1403ba290` or is unlinked and destroyed. The second list is the live
+request set: each entry's handle sits at `+0x0c` and is resolved by
+**`FUN_1403ca5c0(singleton, handle)`** - a second lookup entry point alongside
+`FUN_1403ca320`, so the record table has two accessors and only one of them
+applies geometry.
+
+The decisive part is what it then does. For each attached node it reads a
+remaining-time float at `+0x40`, clamps it against the frame `dt`, and when that
+clamped step is positive it **interpolates the hit volume from a start point to
+an end point** - components at `+0x1c`, `+0x2c`, `+0x3c` are advanced as
+`start + step * (end - start) / remaining` using a vector divided by the scalar
+at `_DAT_141608db0` - decrements `+0x40` by `dt`, converts the interpolated
+point, and pushes it into the request record with `FUN_1403c6c40(record, buf)`.
+That is the native equivalent of our swept-blade contact step: the native does
+**not** snapshot a hit volume at submit, it walks the volume along a segment
+each frame and re-submits it. `src/core/combat_math.h`'s
+`BladeSweptOverlapsSphere` is the same shape of test, and this is now the native
+behaviour it has to match - worth citing at the F/C contact gate rather than
+asserting our own sweep is sufficient.
+
+`FUN_1403b8400` (1981 bytes, 10 callers, all in one contiguous block
+`1403b96d0`..`1403b9920` - a thunk family, not ten independent sites) builds a
+request from an entity and **classifies the hit source by a short at entry
+`+0x7a`** into three ranges, each routed to a different container builder:
+`0x0a-0x0b`, `0xc9-0xcc`, `0x97-0xa2`. A dot product against a normal at
+`+0x1e0` selects which side of a plane the entry falls on, which chooses the
+container. It then calls `FUN_1402d9510(buf, entity, id, 1)`, takes the **new
+request handle** returned by `thunk_FUN_14204717f()` into `param_1+0x60`,
+resolves it with `FUN_1403ca5c0` and pushes geometry through `FUN_1403c6c40`.
+Inside the same body a material id is folded with `*(short *)(x + 0x6a) % 10 +
+200`, i.e. materials are bucketed into the range 200..209 - a sfx/material
+grouping rule, and the first native evidence of that fold.
+
+Neither function writes HP. `FUN_1403ca5c0` (the second record accessor) and
+`FUN_1402af5e0` (the geometry setter at record `+0x130`) remain the next two
+probes, and the record table's completion queries `FUN_1403ca380` /
+`FUN_1403ca180` are the functions the condition object polls to learn whether a
+request resolved - that poll is the closest remaining route to an outcome.
+
+## The completion poll is a tagged-list search on the two entity pointers
+
+All three follow-ups are now open, and they close the request record's shape.
+
+`FUN_1403ca5c0` (68 bytes, 8 callers) is the same slot lookup as `FUN_1403ca320`
+but returns the record without applying geometry - it is the read-only accessor,
+used by the manager update and by the record initialiser. `FUN_1403ca380` and
+`FUN_1403ca180` are the two polls the damage condition object calls at
+`1404d0e1d` and `1404d0e40`: the first resolves the record and forwards to
+`FUN_1403c6cd0`, the second just returns the **byte at record `+0x195`**.
+
+`FUN_1403c6cd0` is the interesting one. It refuses unless an int at record
+`+0x78` is `< 0x40`, then calls `FUN_1403c4880` on the pointers at record
+**`+0x1d8`** and **`+0x1e8`** and returns true if either reports. `FUN_1403c4880`
+walks a singly-linked list (node `+0x00` = a uint, node `+0x08` = next) looking
+for a node whose **top nibble equals 1** - `(node & 0xf0000000) == 0x10000000`.
+So "did this request resolve" is not a flag on the request at all: it is *"does
+one of the two attached entities carry a list node tagged 1 in bits 28-31"*.
+That tagged list on the entity is where a landed hit is recorded, and it is the
+narrowest remaining seam to an HP write.
+
+`FUN_1403c5620` (444 bytes) is the **request-record initialiser** and confirms
+what `+0x1d8`/`+0x1e8` are. It copies 0x130 bytes of geometry/parameters from
+its argument into record `+0x44`..`+0x174`, stores the request handle at
+`+0x190` and a float at `+0x198`, sets `+0x124` to -1, then resolves the handle
+with `FUN_1403ca5c0` and **adopts the two entity pointers held at
+`+0x1d8` / `+0x1e8` of the resolved slot** into the new record, releasing the
+previous ones through `FUN_1403c8970`. The adopt bumps a counter at entity
+`+0x18` with `(x + 1 ^ x) & 0x3fffffff ^ x` - a 30-bit refcount with tagged
+upper bits, not a plain increment. It also refuses to build a record unless
+`param_3 != 0` and (`param_4 != 0` or bit `0x20` of `param_2 + 0x19` is set),
+i.e. a request needs a primary entity and either a secondary entity or an
+explicit self-target flag.
+
+`FUN_1402af5e0` (112 bytes) is not a raw point setter: it takes 6 doubles plus
+an identity quaternion `(0,0,0,1)`, builds a transform through `FUN_140094520`,
+and writes **64 bytes** into the sub-object at record `+0x130`. So the hit volume
+is placed by a full position+orientation transform, and the per-frame sweep in
+`FUN_1403b7460` re-issues that transform, not a point.
+
+Next probe is the writer of the tagged entity list node - the function that
+inserts a node with bits 28-31 set to 1. That insert is the landed-hit event, and
+whatever it writes alongside it is the closest thing to the HP path this binary
+exposes statically.
+
+## The container behind `+0x1d8` is a dt-decremented hit-record with a refcount gate
+
+Following the adopt/release pair to its object gives the container's full shape,
+and it is not a queue of pending damage - it is a **lifetime-and-refcount gated
+record**, which is the shape an i-frame or hit-judge window has.
+
+`FUN_1403c8970` (the release `FUN_1403c5620` calls) decrements a 30-bit count at
+container **`+0x0c`** with the same `(x - 1 ^ x) & 0x3fffffff ^ x` arithmetic and,
+at zero, calls `FUN_1403c48f0`. That destroy resets the container to
+`{+0x00 = 0, +0x04 = 0, +0x10 = 0, +0x0c = 0x80000001}` and returns it to a pool
+at `DAT_141c7a048` through `FUN_1403c4d50`; if the high bit was *not* already set
+it routes to `FUN_140cc29c0`, which does not return - a double-free trap. So
+`0x80000001` is the pool's free marker: bit 31 = free, bit 0 = the count's LSB.
+
+Container layout, confirmed across `FUN_1403c48f0` / `FUN_1403c49b0` /
+`FUN_1403c4da0` / `FUN_1403c4360`:
+
+| offset | meaning |
+| --- | --- |
+| `+0x00` | node list head (the list `FUN_1403c4880` searches) |
+| `+0x04` | uint, zeroed on release |
+| `+0x08` | float lifetime |
+| `+0x0c` | 30-bit refcount + flag bits (30 = active, 31 = pool-free marker) |
+| `+0x10` | pointer |
+| `+0x18` | second node list head |
+
+Node layout: `+0x00` uint tag (bits 28-31 carry state; `FUN_1403c4880` wants
+exactly `0x1` there), `+0x04` float timer, `+0x08` next, `+0x10` 31-bit refcount,
+released through `FUN_1403c4a50`.
+
+`FUN_1403c4360(container, dt)` is the per-frame update and it is decisive about
+what "resolved" means. If the container's float at `+0x08` is `<= 0` **or** its
+refcount is `< 2`, it **clears bit 30** of `+0x0c`. Otherwise it **sets bit 30**
+and walks the node list, decrementing each node's float at `+0x04` by `dt` and
+dropping nodes whose timer has run out, relinking the survivors. It returns
+`(container+0x0c) >> 30 & 1`.
+
+So the active flag is literally *"lifetime still running **and** at least two
+references held"*, and `FUN_1403c4da0` is the sweep that calls it and rebuilds
+the `+0x18` list from the nodes that survive. Read together with the tagged-node
+search, the native's answer to "did this hit land" is a **windowed record on the
+entity**, gated by both a countdown and a reference count - not a boolean on the
+request. That is the mechanism our melee gate has to model: a hit is only
+counted while a window is open, and the window's length is a float decremented by
+frame time, exactly like `StickDpad`-style dt accounting elsewhere in this repo.
+
+`FUN_1403c4a50` (the node release) resets a node to
+`{+0x00 = 0xffffffff, +0x04 = 0, +0x08 = 0, +0x10 = 0x80000001}` and returns it
+to the **same pool** `DAT_141c7a048` through `FUN_1403c4ef0` - containers and
+nodes share one pool. The free tag `0xffffffff` is why `FUN_1403c4880`'s test is
+an equality on the top nibble rather than a bit test: free nodes read `0xf`
+there, so a plain "bit 28 set" test would match nothing useful. Its three other
+callers (`FUN_1403c42f0`, `FUN_1403c4820`, `FUN_1403c49b0`) are near-duplicate
+list-clear helpers that walk a list and release each node at zero refcount - none
+of them is the insert. The insert must pair with the pool's allocate entry point
+beside `FUN_1403c4ef0`, which is where the tag and the node timer get written.
+
+## The node key is a tagged ordered id: `(type << 28) | payload`
+
+The pool has **two** free lists, and the two release paths use different ones:
+`FUN_1403c4d50` (container) pushes onto `pool+0x08` with the count at `pool+0x30`
+and the next-link at object `+0x10`; `FUN_1403c4ef0` (node) pushes onto
+`pool+0x20` with the count at `pool+0x38` and the next-link at node `+0x08` - the
+same field the live list uses, so that word is a union. `DAT_141c7a048` has 19
+xrefs; the allocate entry point is **`FUN_1403c4e40(pool, key, count)`**.
+
+`FUN_1403c4570` and `FUN_1403c4680` (both called only from `FUN_1403c7cc0`) are
+**sorted-list merges**, and they are what reveals the key's structure. Both walk
+two node lists in key order and splice matches, comparing `*puVar3 < uVar1`
+directly on the node's uint at `+0x00` - so that uint is an **ordered key**, not a
+bitfield bag. `FUN_1403c4680` then branches on **`key >> 0x1c`**, i.e. the top
+nibble:
+
+- `key >> 28 == 0` - one class, passed through unconditionally;
+- `key >> 28 == 2` - resolved through `FUN_14030c320(DAT_141c75dd8, key)`, and if
+  that returns non-null a predicate `FUN_1402f9230(obj + 0x10)` decides whether
+  the entry survives;
+- otherwise the entry is re-allocated under the same key via `FUN_1403c4e40`.
+
+Read with `FUN_1403c4880`'s `(key & 0xf0000000) == 0x10000000`, the picture is
+consistent: the entity's record list is a **sorted set of `(type << 28) | id`
+keys**, at least types 0, 1 and 2 exist, and the damage completion poll asks a
+pure membership question - *is a type-1 key present on this entity*. What type 1
+*means* is not recovered; only that the damage condition object treats its
+presence as "the request resolved".
+
+That reframes the remaining chase. There is no "insert with a timer" to find -
+the lifetime float is on the **container** (`+0x08`) and the node's own float at
+`+0x04` is per-entry decay. The open question is now narrower and answerable:
+which code path adds a type-1 key to an entity's list. `FUN_1403c4e40` is the
+allocator, so its callers that pass a key with the top nibble set to 1 are the
+landed-hit event.
+
+`FUN_1403c4460(container, key)` is the **find-or-insert** for that sorted set: it
+refuses `key == 0xffffffff` (the free tag), walks the list comparing `param_2`
+against each node key, returns the node if the key already exists, and otherwise
+calls `FUN_1403c4e40` and splices the new node in sorted position. Its five call
+sites - `FUN_14042a9c0`, `FUN_1403c7520`, `FUN_1403c7bc0`, `FUN_1403c7c50`,
+`FUN_1403c4500` - are therefore the complete set of places a record key can be
+added to an entity, and the type-1 landed-hit insert must be one of them.
+
+## The `+0x1d8` insert is a once-per-source dedup guard, not a landed-hit record
+
+Opening the five add sites changes the reading.
+
+`FUN_1403c7bc0(entity, key)` and `FUN_1403c7c50(entity, key)` are the entity-level
+adders. Both lazily create the container at `entity+0x1d8` via
+`FUN_1403c4c90(DAT_141c7a048, 0.0)`, add the key to `+0x1d8` unconditionally with
+`FUN_1403c4460`, and add it to `entity+0x1e8` **only if that container already
+exists** and passes `FUN_1403c4500`'s filter. `FUN_1403c7bc0` additionally
+recurses down the child chain (`entity+0x200`, siblings linked at `+0x1f8`);
+`FUN_1403c7c50` is the non-recursive twin. `FUN_1403c4500` refuses `key >> 28 == 0`
+outright and refuses a `key >> 28 == 2` whose `FUN_14030c320` lookup resolves and
+whose predicate `FUN_1402f9230(obj + 0x10)` is true - so `+0x1e8` is a **filtered
+view** of `+0x1d8`, not a second independent set. Both adders are reached through
+vtable slots (`FUN_1403c7c50` has only a DATA xref at `141d54224`), which is why
+the call graph does not name their callers.
+
+`FUN_14042a9c0` (778 bytes, called from `FUN_140429940`) is the first concrete
+**entity-state writer** in this chain, and it shows what the insert is for. It
+walks a point/force record list (`param_1[0xf]`..`param_1[0x10]`, 8-byte entries;
+record fields: id at `+0x4`, position at `+0x10..+0x1c`, radius at `+0x24`, force
+at `+0x20`, magnitude at `+0x2c`, two flag bytes at `+0x28`/`+0x29`), resolves the
+source entity from that id (bucketed fast path when `id & 0xff < 0x80` at
+`base + (id&0xff)*0x360 + 8`, else a list walk from `param_1[1]` with `id == 0xfe`
+meaning "no source"), then for every entity in the `param_1[1]` / `+0x348` chain
+whose `+0x9c` differs from the source's and whose `FUN_140425a50` predicate matches
+the record's `+0x29` flag:
+
+- if `distance(entity.pos, record.pos) <= record.radius`, it looks the entity's own
+  key `*(entity + 8)` up in **the source's** `+0x1d8` container with
+  `FUN_1403c4430`; **if absent** it inserts it with `FUN_1403c4460`, optionally
+  calls `FUN_140425c60(entity)` when `record+0x28` is set, and then **accumulates a
+  normalised direction × `record+0x20` into `entity+0x30..+0x3c`** (four floats,
+  guarded against zero-length and infinite input with the `0x7fc00000` NaN/inf
+  select) and **translates `entity+0x10..+0x1c` along the direction by
+  `radius - distance`**;
+- the record byte at `+0x00` is then cleared, and if more than 50 records are
+  pending `FUN_14042acd0` runs.
+
+So in this site the insert is a **once-per-source-per-entity dedup marker** ("this
+entity has already been affected by this force source"), and the writes it guards
+are an impulse accumulation at `+0x30..+0x3c` plus a positional correction at
+`+0x10..+0x1c` - a push/knockback resolution. That is a real gameplay-state write,
+but it is **not HP**, and it does not make the type-1 key a landed-hit record. The
+earlier inference that "the type-1 insert is the landed-hit event" is withdrawn:
+at least one add site uses the set purely as a dedup guard.
+
+## The `+0x1d8` insert is gated on a shape-pair contact predicate
+
+`FUN_1403c7520` (836 bytes; callers `FUN_1403c6850`, `FUN_1403c7d30`, `FUN_1403c7460`)
+is the contact-evaluation body, and it settles what the insert means. It builds a
+large local frame out of the attacker/weapon state (`param_1` fields at `+0x11`
+through `+0x43`, plus `+0x6d`, `+0x1b5`, `+0x6e..+0x73`), computes a normalised
+direction from `param_3` against `param_1+0x5c..+0x5e`, computes a per-second
+velocity term `((+0x5c) - (+0x60)) * 60.0` (four floats, so a 60 Hz frame-rate
+normalisation), and queries the target's kind with the vtable call
+`(*(target + 0x10))(target)`. Only kinds where `(kind & 0xfffffffd) == 0` - i.e.
+**kind 0 or kind 2** - get the extra accumulated distance term at `param_1+0x6c`
+(which is set to `-1.0f`, `0xbf800000`, when it was already negative) and the
+position copy from `+0x5c..+0x5f` into `+0x68..+0x6b`.
+
+Then the decisive line: `FUN_1403c4020(&frame, target, dir, unk)` is the contact
+test, and **only when it returns non-zero** does the code call
+`FUN_1403c7bc0(entity, *(uint *)(target + 1))` - i.e. it inserts the **target's own
+id** (`target + 8`, the same field the merge sites compare) into the entity's
+`+0x1d8` set and the filtered `+0x1e8` set. A second, unfiltered insert of the same
+id goes straight into a third container at `param_1 + 0x78`. So the earlier
+withdrawal was too strong: in this site the insert **is** gated on a positive
+contact result, which is what a landed-hit record looks like. Both readings are now
+on the table and both are supported - `FUN_14042a9c0` uses the same container as a
+dedup guard for a push, `FUN_1403c7520` uses it as a post-contact record. The
+container is a general "affected by this id" set whose meaning depends on the
+owner, not a single damage ledger.
+
+`FUN_1403c4020` (283 bytes) is the interesting part: a **shape-pair dispatch
+matrix**, not one collision routine. It reads the kind of the object at
+`frame + 0x130` and the kind at `frame + 0x138` (both through vtable `+0x10`, kinds
+0..3) and selects:
+
+| A kind | B kind | handler |
+|---|---|---|
+| 0 | any | `(*(B + 0x10))(B)` - B's own test |
+| 1 | any | `thunk_FUN_1425ba7dc` |
+| 2 | any | `FUN_1403c4210` |
+| 3 | 0 | `FUN_140420b30` |
+| 3 | 1 | `thunk_FUN_142c9fc55` |
+| 3 | 2 | constant `0` - that pair never contacts |
+| 3 | 3 | `FUN_140420a20` |
+
+That is the native hit-detection seam, and it lines up with the offline param
+measurement: only 823/1396 PC and 1632/2164 NPC AtkParam rows carry both endpoints
+of a hit slot, so most native hit shapes are **spheres, not capsules** - a
+shape-kind matrix with a pair that always returns false is exactly what that data
+implies. `FUN_140420a20` (capsule/capsule candidate) calls `FUN_140424f90`,
+`FUN_1402fc360`, `FUN_140425990`, `FUN_140425b70`, `FUN_1403714b0`,
+`FUN_1402f9230` and `FUN_1403ca1d0`; `FUN_140420b30` calls `FUN_140425120`,
+`FUN_140425ab0`, `FUN_1403e6450`, `FUN_140425b70`, `FUN_1403ca1d0`, `FUN_140425870`.
+Note `FUN_1402f9230` - the same predicate `FUN_1403c4500` uses to filter the
+`+0x1e8` set - appears inside the contact test itself.
+
+## The shape-pair leaves do not test geometry - they register the contact
+
+Opening the `A kind == 2` branch (`FUN_1403c4210`, 161 B) and its leaves changes
+what the seam is for. `FUN_1403c4210` re-dispatches on the B shape's kind: B=0 ->
+`FUN_1402f84f0`, B=1 -> `thunk_FUN_1429e5d7e`, B=2 -> `FUN_1402f84b0`, else return
+false. The leaves are:
+
+- `FUN_1402f84f0` (A=2, B=0): calls `FUN_1403ca1d0(DAT_141c7a050,
+  *(uint *)(frame + 0x140), 1)` then `FUN_1403e6450(B, frame, ...)`, and
+  **unconditionally returns 1** - no arithmetic at all;
+- `FUN_1402f84b0` (A=2, B=2): guards `B != A` and `*(int *)(frame + 0x34) < 0x40`
+  (a **64-contact-per-object cap**), then `FUN_1402fc360(B, frame, 0, ...)` and
+  returns 1;
+- `thunk_FUN_1429e5d7e` (A=2, B=1) is an **empty `LOCK()/UNLOCK()` stub** - that
+  pair does nothing and its return value is whatever the flag registers hold.
+
+So the "contact test" is a **contact registration/dispatch**, not a geometric
+predicate. The shape filter happens upstream (each shape's own vtable `+0x10` test
+plus the broadphase); once a pair reaches these leaves it is *recorded*, and the
+geometry we would need to supply is consumed by the shape objects themselves, not
+by this code.
+
+`FUN_1403ca1d0(manager, id, flag)` is the shared recorder, and it decodes a second
+id space. `id >> 16` is a **type/bucket selector**:
+
+- `< 0x80` - direct-indexed table at `manager[2]` with **stride 0x230**, entry
+  validity checked by comparing the stored id at `*puVar2`;
+- `== 0x80` - linked list at `manager[0]`, next-link at `puVar2 + 0x88` uints
+  (byte offset `0x220`);
+- anything else - returns without acting.
+
+On a hit it writes a **single byte at `entry + 0x195`** to the caller's flag. Its
+five call sites are `FUN_1402f84f0`, `FUN_140420a20`, `FUN_140420b30`, and two
+self-referential sites `FUN_14031d939` / `FUN_14031da5d`. The manager is
+`DAT_141c7a050`, immediately adjacent to the record pool `DAT_141c7a048`.
+
+Note the two id encodings are **different**: the record-set key is
+`(type << 28) | payload`, while the contact-manager id is `(type << 16) | index`.
+Do not assume one can be reinterpreted as the other.
+
+## Re-scope: an HP write is not the gate
+
+29 Oct, user direction: *"HP write not required if collisions can be produced
+properly, game will handle damage and if need be we tweak the game not rewrite
+damage system."* Lane B's blocker is therefore no longer "find the HP write". The
+deliverable is: **produce a genuine native contact** - get our own geometry into
+the shape objects so the existing dispatch registers it and the game's own damage
+path runs. The static trace to an HP write stays closed as a negative result and
+is not to be reopened as a blocker.
+
+What that needs, from the evidence above: a shape object whose vtable `+0x10`
+returns a kind the dispatch accepts, registered in the contact manager
+`DAT_141c7a050` under an id whose `id >> 16` selects a live table slot (stride
+0x230) or the `0x80` list, with the per-object contact count at `+0x34` under 64.
+The flag byte at `entry + 0x195` is the state the game's own consumer reads.
+
+## `frame+0x130` is a resolved handle, and the resolver shares the record-key tag
+
+Mapping the frame back: `FUN_1403c4020`'s `param_1 + 0x130` and `+0x138` are
+`FUN_1403c7520`'s `local_d8` and `local_d0`, and those are assigned
+`lVar6 = FUN_1402c4870(param_1[0x10])` and `param_2`. So the **A shape is a handle
+resolved from an id stored in the attacker object at byte offset 0x40**, and the
+**B shape is the target object passed straight in** - not a pair of independently
+allocated shapes.
+
+`FUN_1402c4870(id)` (83 B) is a global handle resolver keyed on **`id >> 28`**, the
+same top-nibble tag as the record-set key:
+
+| `id >> 28` | registry | resolver |
+|---|---|---|
+| 0 | `DAT_141c7a0b0` | `FUN_1403ed0f0` |
+| 1 | `DAT_141c77e50` | `FUN_1403714b0` |
+| 2 | `DAT_141c75dd8` | `FUN_14030c320` |
+| 3 | `DAT_141c7a488` | `FUN_14042a7e0` |
+| other | - | returns `0` |
+
+`FUN_14030c320(DAT_141c75dd8, id)` is the **same resolver** `FUN_1403c4500` used to
+filter type-2 keys out of the `+0x1e8` set, so the record-set tag and the handle
+tag are one encoding - `(type << 28) | payload` names an object in one of four
+registries. That contradicts nothing about the contact manager, which uses a
+different `(type << 16) | index` space; the two encodings coexist and are not
+interchangeable.
+
+15 call sites resolve through this one function, including `FUN_1403c6850` (twice),
+`FUN_1403c7460`, `FUN_1403c7d30`, `FUN_1403c6e70` (twice), `FUN_1403c6030`,
+`FUN_140420957`, `FUN_140423540`, `FUN_140421620`, `FUN_140423850`, `FUN_140426fa0`,
+`FUN_14042a1c0`, `FUN_1403c5190`.
+
+Actionable consequence for the re-scoped gate: producing a native contact does not
+require inventing geometry - it requires the attacker's handle id at `+0x40` to
+resolve in one of these four registries, and the pair's shape kinds to land on a
+dispatch cell that is not the empty stub. The next probe is therefore which
+registry holds the weapon/attack shape and who writes the attacker's `+0x40` id.
+
+## All four resolvers opened: the id is a paged handle, per-type layout
+
+Each registry has its own id bit layout below the `id >> 28` type tag. `0xffffffff`
+is the null id in every one of them.
+
+| type | resolver | registry | id bits below the tag | container | object stride |
+|---|---|---|---|---|---|
+| 0 | `FUN_1403ed0f0` | `DAT_141c7a0b0` | bank `id >> 20 & 0xff`, slot `id & 0xfffff` | two-level paged array: bank count `reg+0x28`, bank array `reg+0x30`, bank stride `0x98`; slot count `bank+0x48`, slot array `bank+0x50` | `0xC8` (200) |
+| 1 | `FUN_1403714b0` | `DAT_141c77e50` | bank `id >> 14 & 0x3f` (64 banks), slot `id & 0x3fff` (16384) | pointer array at `reg+0x440` stride 8, bank count at `reg+0x10` field `+0x18`; slot lookup through `FUN_14033ec30(bank, slot)` then **returns `*result`** - the object is stored indirectly | indirect |
+| 2 | `FUN_14030c320` | `DAT_141c75dd8` | bank `id >> 20 & 0xff`, slot `id & 0xfffff` | same two-level paged shape as type 0, bank stride `0x160` | `0x120` (288) |
+| 3 | `FUN_14042a7e0` | `DAT_141c7a488` | **`id & 0xff`** is the slot: `< 0x80` direct table at `reg[0]`, `== 0xfe` overflow list at `reg[1]` | flat table, entry id verified at `entry+8`, list next-link at `+0x348` | `0x360` (864) |
+
+Two independent bounds checks per lookup (bank index against the bank count, slot
+index against that bank's own count) mean a malformed id returns `0` rather than
+reading out of page - these are validated handles, not raw pointers.
+
+Type 3's `id & 0xff` scheme is structurally the same idiom as the contact-manager
+resolver `FUN_1403ca1d0` (`id >> 16 < 0x80` direct table stride `0x230`,
+`== 0x80` linked list next-link `+0x88`): a small slot byte selecting a flat table
+with a special value for an overflow list. Same design, different mask, stride and
+sentinel (`0xfe` vs `0x80`) - the two must not be conflated.
+
+Registry fan-out, from xref counts on the four globals: type 1 `141c77e50` **1112
+xrefs** (by far the broadest, and the only one whose lookup dereferences an extra
+level - consistent with a main entity/character table), type 2 `141c75dd8` 172,
+type 0 `141c7a0b0` 47 with exactly 2 writes (`1403ce3b0`, `1403cb87f`), type 3
+`141c7a488` 25 with exactly 2 writes (`14027b281`, `14027b691`). The melee
+shape-pair dispatch observed kinds 1 and 2, so the A handle at attacker `+0x40` is
+a type-1 or type-2 id, and the empty stub sits on the A=2/B=1 cell specifically.
+
+Still not recovered: which registry the weapon shape lives in, and who writes the
+attacker's `+0x40` id. The two write sites on each small registry are the next
+probe - a registry with exactly two writers has an identifiable owner.
+
+## `FUN_1403c6e70` is the per-frame attack-shape update, and it calls the shape's own `vtable+0x468`
+
+Found by following the other two `FUN_1402c4870` call sites in `FUN_1403c6e70`.
+This 815-byte function is the strongest actionable seam found so far: it is where
+the game **builds a contact frame from a live attack object and hands it to the
+shape object's own method**. `param_1` is that attack object; offsets below are
+bytes (`param_1` is an `undefined4 *`, so Ghidra's index `N` is byte `4N`).
+
+Gate: `*(param_1 + 0x118) != 0` **and** `byte[param_1 + 0x10C] & 0x20`. The object
+carries a pointer at `+0x118` to a *handle holder*, and a flag bit at `+0x10C`
+selects whether the update runs at all.
+
+Handle resolution happens twice, and neither is a raw pointer:
+
+```
+plVar8 = FUN_1402c4870(*(u32 *)(*(param_1 + 0x118) + 0x10));  // the shape's own id
+lVar10 = FUN_1402c4870(param_1[0x10]);                        // attacker id at +0x40
+```
+
+The holder at `+0x118` stores its own handle id at its `+0x10` and a 4-float
+transform at its `+0x00`. A weapon shape is reached by **two chained handle
+lookups**, and `FUN_1402c4870` returning `0` aborts the whole update.
+
+Shape kind is a vtable call used three times: `(**(plVar8 + 0x10))(plVar8)`.
+`== 1` selects the branch that calls `FUN_140321b70(plVar8, local_58)` and takes
+the returned 4 floats as a **local offset added to the holder transform** to get
+the world point. `(kind & 0xfffffffd) == 0` (kinds 0 and 2) selects the
+travel-distance branch.
+
+Frame construction: `thunk_FUN_1424b219b(&local_218)` then a straight copy of the
+attacker's region from byte `0x44` upward into the frame, plus `local_d8 =
+*param_1`. This is a different frame from `FUN_1403c7520`'s `local_208` - the two
+sites do not share one frame layout, so do not transfer offsets between them.
+
+Direction vector: `(shapeOffset + holderTransform) - param_1[0x5c]` (bytes
+`0x170-0x17C`, a 4-float position), normalized with `sqrtps`/`divps` and an
+explicit `INFINITY` guard that substitutes `0x7fc00000` - the same degenerate-delta
+handling our `combat_math.h` capsule code already implements.
+
+Velocity, confirming the fixed 60 Hz assumption already recorded for contact
+`+0x150`:
+
+```
+local_c8 = (param_1[0x5c] - param_1[0x60]) * 60.0;   // bytes 0x170 - 0x180
+```
+
+so `+0x180` is the previous-frame position and the velocity is a per-frame delta
+scaled by 60, not a time-based derivative.
+
+Travel accumulator at byte `0x1B0`: if `>= 0`, add the distance from the stored
+point at bytes `0x1A0-0x1AC` to the current position; otherwise set `-1.0`
+(`0xbf800000`), then write the current position back into `0x1A0-0x1AC`. A
+negative value is therefore the "no contact yet" sentinel, and the field is a
+cumulative penetration/travel distance.
+
+Guard: `FUN_1403c7900(param_1, plVar8[1])` - if it returns nonzero the whole frame
+build is skipped, so the shape holder's second dword is a filter key.
+
+The submission itself:
+
+```
+if ((**(code **)(*plVar8 + 0x10))(plVar8) == 1)
+    (**(code **)(*plVar8 + 0x468))(plVar8, 0, &local_218, 0);
+```
+
+`vtable+0x468` on the shape object, called with the frame, is the native "accept a
+contact frame" entry. `FUN_1403c5c90(param_1)` runs unconditionally afterwards
+inside the outer gate.
+
+Consequence for the re-scoped gate: the game already does the geometry. What has to
+be supplied is an object with this layout - a live pointer at `+0x118` whose `+0x10`
+resolves through `FUN_1402c4870`, the `0x20` bit set at `+0x10C`, current and
+previous positions at `0x170`/`0x180` - and the existing per-frame update does the
+rest. That is a *tweak the game* path, not a rewrite of damage.
+
+Not yet recovered: which shape class owns `vtable+0x468`.
+
+## The attack object's owner, its slot pool, and the param row that seeds it
+
+`FUN_1403c6e70` has exactly four xrefs: one `UNCONDITIONAL_CALL` from
+`FUN_1403c9c20` at `1403c9cb5`, and three `DATA` references at `141d5411c`,
+`14179915c`, `14179919c` - so it is itself a table/vtable entry, not a free
+function. `FUN_1403c9c20` (183 B, itself called only from `FUN_14032414b`) is the
+single driver.
+
+`FUN_1403c9c20(manager, paramId_as_float, arg3)` resolves the object from a handle,
+and the resolution is the decisive part:
+
+```
+uVar1 = FUN_1403c9670(param_1, param_2, 0, 0xffffffff, 0);   // returns the handle
+uVar2 = uVar1 >> 0x10;
+if (uVar2 < 0x80) {
+  puVar4 = (uint *)((ulonglong)uVar2 * 0x230 + param_1[2]);  // slot array, stride 0x230
+  if (*puVar4 == uVar1) { ... }                              // handle stored at object+0
+}
+else if (uVar2 == 0x80) {                                    // overflow list via +0x88
+  for (puVar4 = (uint *)*param_1; puVar4; puVar4 = *(uint **)(puVar4 + 0x88)) ...
+}
+```
+
+So the attack object lives in a **slot array at `manager+0x10` with stride `0x230`
+(560 bytes) and at most `0x80` slots**; the handle's bits 16-22 are the slot index,
+the low 16 bits are a generation/serial, and the full handle is stored at object
+`+0x00` and re-validated on every access. Index `0x80` is reserved for a linked
+overflow list walked through object `+0x88`. A raw pointer is therefore never
+enough - a forged object has to live in that array with a matching handle.
+
+Then the per-frame branch:
+
+```
+if (FUN_1403c6da0(obj, arg3) == 0) { FUN_1403c5c90(obj); /* deactivate */ }
+else                                { FUN_1403c6e70(obj); /* shape update */ }
+```
+
+`FUN_1403c6da0` (107 B) is the lifetime/release path: if `arg3 != 0` it releases the
+`+0x118` holder through `DAT_141b68f20`'s `vtable+0x68`, zeroes `+0x118`, then calls
+`FUN_140cc3e10(0x20, 0x10, DAT_141b68f20)`. Ghidra reports "Subroutine does not
+return" and the body ends with `return in_RAX & 0xffffffffffffff00` - the same
+no-return fallthrough cliff as the stereo consumer, so the `char` result is the
+callee's return value, not something this body computes. Do not read the mask as a
+real computation.
+
+`FUN_1403c5c90` (138 B, 8 callers) is the unlink: clamps `int[+0x124]` to `1` when
+negative, calls `FUN_1403c7380`, then unlinks the object from a doubly-linked list
+(`+0x1f0` = owner, `+0x1f8` = next link, owner's tail at `owner+0x200`) and zeroes
+both links. The object is simultaneously a slot-pool member *and* a list node.
+
+`FUN_1403c7900` (91 B, only caller `FUN_1403c6e70`) is the filter, and it names the
+three sibling sets: it tests `+0x1d8`, `+0x1e0` and `+0x1e8` with `FUN_1403c48c0`
+(a *contains* lookup, not find-or-insert) and returns on the first hit. The
+`+0x1d8` set already mapped in this file is one of **three** parallel tagged sets on
+the same object.
+
+`FUN_1403c9670` (557 B) is the creator, and it closes the param link natively:
+
+```
+FUN_140528a30(&rec, (uint)param_2, 0);        // BehaviorParam row by id
+uVar3 = *(uint *)(rec + 0xc);                 // AtkParam row id
+FUN_140528910(&rec2, 0, uVar3);               // AtkParam row
+for (i = 0; i < 8; i++)
+    local_58[i] = (i < 5) ? *(u32 *)(row2 + 0x18 + i*4) : 0xffffffff;
+FUN_140528ce0(local_128, param_2, local_58, &ctx, 1, 0.0, 10000.0);
+```
+
+The registry index is computed, not guessed: `FUN_140528a30` resolves
+`FUN_1405322d0(param_3 + 0xc)` and `FUN_140528910` resolves
+`FUN_1405322d0(param_2 + 7)`. Cross-checked against the name table in
+`FUN_140531bc0` (39 names, indices 1..`0x25`, terminator `0x26`), those are
+**`0xc` = `BehaviorParam`** and **`7` = `AtkParam_Npc`**.
+
+Correction to an earlier note here: the Pc/Npc table selector read from an entity's
+`vtable+0x18` belongs to `FUN_1403c93b0`. `FUN_1403c9670` hardcodes index 7, i.e.
+**`AtkParam_Npc` unconditionally**, with no Pc/Npc branch. Do not generalise the
+selector to every AtkParam consumer.
+
+Independent corroboration of the paramdef tool: the native reads exactly five
+dwords at AtkParam row offsets `0x18, 0x1c, 0x20, 0x24, 0x28`. The field walk in
+`build/dsr-data/AtkParam_layout.json` (from `AtkParam.paramdef`, 71 fields) places
+`spEffectId0..spEffectId4` (all `s32`, count 1) at precisely those offsets. Two
+unrelated sources - a Ghidra field read and a `.paramdef` parse - agree, which is
+the strongest param-layout confirmation in this repo so far. The remaining three
+`local_58` slots are `0xffffffff`, so the request carries five real effect ids plus
+three "none" sentinels.
+
+`FUN_140528910` also confirms the row-fetch mechanism recorded earlier: a binary
+search over an id->index table (count `u16` at `base+0x0a`, 8-byte entries) whose
+value indexes a `0xc`-byte row table at `base+0x34`, reached through
+`registry+0x38`.
+
+Still open: which shape class owns `vtable+0x468`, and who writes `+0x118` /
+`+0x40` on the attack object.
+
+## `FUN_1402c4870` is the four-registry handle dispatcher, and the handle's bit fields are now measured
+
+`FUN_1402c4870` (83 B, 13 callers - all in the `1403c51xx`-`1403c7dxx` contact
+family plus four `14042xxxx` sites) dispatches on the handle's top nibble:
+
+```
+switch (handle >> 28) {
+  case 0: return FUN_1403ed0f0(DAT_141c7a0b0, handle);
+  case 1: return FUN_1403714b0(DAT_141c77e50, handle);
+  case 2: return FUN_14030c320(DAT_141c75dd8, handle);
+  case 3: return FUN_14042a7e0(DAT_141c7a488, handle);
+  default: return 0;
+}
+```
+
+This is the same `key >> 28` type tag already recorded for the sorted-set
+comparators `FUN_1403c4570`/`FUN_1403c4680` (type 0 passthrough, type 2 resolved
+through `FUN_14030c320(DAT_141c75dd8)`), so the tagged-key type and the handle's
+registry selector are **the same field**. Four global registries:
+`DAT_141c7a0b0` (0), `DAT_141c77e50` (1), `DAT_141c75dd8` (2),
+`DAT_141c7a488` (3). `0xffffffff` is the null handle in every resolver.
+
+Two of the four layouts are now measured, and they are **not** the same shape:
+
+Type 0 (`FUN_1403ed0f0`, 61 B) is a two-level page table:
+
+```
+page = (handle >> 20) & 0xff;                 // bits 20-27
+if (page < *(int *)(reg + 0x28)) {            // page count
+  entry = page * 0x98 + *(longlong *)(reg + 0x30);
+  idx = handle & 0xfffff;                     // bits 0-19
+  if (idx < *(int *)(entry + 0x48))           // per-page capacity
+    return idx * 200 + *(longlong *)(entry + 0x50);   // object stride 200 (0xC8)
+}
+```
+
+Type 1 (`FUN_1403714b0`, 86 B) is a bucket table instead:
+
+```
+bucket = (handle >> 14) & 0x3f;               // bits 14-19
+if (bucket < *(int *)(*(longlong *)(reg + 0x10) + 0x18) + 2) {
+  b = *(longlong **)(reg + 0x440 + bucket * 8);
+  if (b && (handle & 0x3fff) < *b)            // bits 0-13, vs bucket occupancy
+    return *FUN_14033ec30(b, handle & 0x3fff);
+}
+```
+
+So the bit split is per-registry, not global: type 0 uses bits 20-27 / 0-19 with a
+200-byte object stride, type 1 uses bits 14-19 / 0-13 with an in-bucket search. Do
+not assume one handle format across registries. Note this type-0 stride of 200 is
+**not** the attack object's `0x230` slot stride - the attack object is allocated
+from its own manager's slot array (`FUN_1403c9c20`), not from a handle registry.
+
+The shape offset getter is now known and trivial: `FUN_140321b70(holder, out)`
+(27 B, 201 callers - a generic accessor) forwards to `FUN_14037a500` (16 B):
+
+```
+sub = *(longlong *)(holder + 0x68);
+out[0] = *(u64 *)(*(longlong *)(sub + 0x28) + 0x10);   // 4 floats
+out[1] = *(u64 *)(*(longlong *)(sub + 0x28) + 0x18);
+```
+
+so the local shape offset lives at `sub->+0x28`'s `+0x10..+0x1F`, reached through
+`holder+0x68`. Two dereferences, no computation, no vtable.
+
+Also corrected: `FUN_1403c48c0` (27 B, 5 callers) is a **singly-linked list scan**,
+not a set lookup - `node = *container; while (node) { if (*node == key) return 1;
+node = *(node + 0x10); }`. The key sits at node `+0x00` and the next link at node
+`+0x10`, matching the pool node layout already recorded. The `+0x1d8`/`+0x1e0`/
+`+0x1e8` siblings are therefore linked lists, distinct from the sorted set that
+`FUN_1403c4460` inserts into.
+
+`FUN_1403c7380` (176 B, only caller `FUN_1403c5c90`) is the child-list teardown: it
+walks the `+0x200` chain and clears each child's `+0x1f0`/`+0x1f8`/`+0x200`, so the
+attack object owns a child list at `+0x200` in addition to being a list node
+itself.
+
+Still open: which shape class owns `vtable+0x468`, and who writes `+0x118` /
+`+0x40`. The three `DATA` xrefs to `FUN_1403c6e70` (`141d5411c`, `14179915c`,
+`14179919c`) are table slots, but neither `get_assembly_context` nor
+`get_xrefs_to` on those addresses returns content, so the owning vtable is not
+reachable by that route - the next attempt should read the containing block through
+the `program` or `datatype` group instead.
+
+## The attack manager singleton is `DAT_141c7a050`, and its per-frame tick is `FUN_1403c8dd0`
+
+The driver chain from the frame loop down to the attack-shape update is now closed
+end to end:
+
+```
+FUN_14024f6b0 (5638 B, the main per-frame game update)
+  -> FUN_1403c8dd0(DAT_141c7a050, dt)      // 611 B, only caller is the frame update
+  -> FUN_1403c9c20(...)                    // per-object driver (see earlier note)
+     -> FUN_14032414b -> FUN_140e25093     // thunk pair, reached from FUN_14294f416
+```
+
+`FUN_14294f416` (50 B) is a thin wrapper that calls
+`FUN_14032414b(DAT_141c7a050, param_2, param_1)` - so the singleton pointer is
+baked into the wrapper, and `FUN_14032414b` (11 B) is just
+`FUN_1403c9c20(...)` followed by `FUN_140e25093()`. The manager object is therefore
+`DAT_141c7a050`, not a member of the frame-update object.
+
+`DAT_141c7a050` has 63 xrefs. Only two are writes (`14027b1e3`, `14027b6fc`), both
+inside teardown paths that null it after `FUN_140cc29c0` (the deleting destructor).
+`FUN_14027b530` (526 B) is the subsystem teardown and fixes the ownership order:
+
+```
+delete *(obj+0x5ac8); delete DAT_141c7a488; delete DAT_141c823a0;
+FUN_1405e4880();
+delete DAT_141c7a050;          // the attack manager
+delete DAT_141c75dd8;          // handle registry type 2
+delete DAT_141c77e50;          // handle registry type 1
+FUN_1402a3ab0(DAT_141c74870);
+delete DAT_141c7a0c8;
+```
+
+So the attack manager and two of the four handle registries are owned by one
+subsystem object (fields at `+0x1a8`..`+0x5ad0`) and destroyed in that order.
+Registry type 0 (`DAT_141c7a0b0`) is deleted elsewhere - `FUN_1403cb600` (796 B,
+only caller `FUN_1403d2910`) is that path, and it is also where the first *named*
+symbol in this area appears: `*param_1 = NS_FRPG::FieldArea::vftable` at
+`0x1413387c8`. `FUN_1403cb600` is `FieldArea`'s destructor, and it deletes
+`DAT_141c7a0b0`, `DAT_141c77e50` (via `FUN_14036e220`), `DAT_141c75dd8`,
+`DAT_141c7a4a8/b8/c8/d8`, `DAT_141c7b1b0`, `DAT_141c7b648`, `DAT_141c81fd0`,
+`DAT_141c82508`. So `NS_FRPG::FieldArea` is the owner class for the registry set.
+
+Useful correction for anyone assuming this binary is fully unnamed: it is not.
+`NS_FRPG::FieldArea::vftable`, `NS_FRPG::BasePad::vftable` and
+`NS_FRPG::DbgMapWalkPad::vftable` are named labels, and the latter two appear in
+`FUN_14024f6b0` as stack objects bracketing `FUN_1401862c0`/`FUN_140185460` pairs -
+those pairs are profiler scopes, so the `FUN_14018xxxx` family is the timing
+instrumentation, not game logic. Do not read them as behaviour.
+
+`FUN_1403c8dd0`'s 11 callees are the attack/contact pipeline top level:
+`FUN_1402afe60`, `FUN_1402aff80`, `FUN_1403c5d20`, `FUN_1403c6030`,
+`FUN_1403c6850` (already known as a caller of the contact evaluator
+`FUN_1403c7520`), `FUN_1403c7ed0`, `FUN_1403c89f0`, `thunk_FUN_1403c4da0`,
+plus `FUN_140cc29c0`, `FUN_140cc4940`, `FUN_140d538f0`. The second manager entry
+`FUN_1403cad20(manager, 15)` (103 B) is called unconditionally every frame while
+`FUN_1403c8dd0` is gated on the in-field flag; `FUN_1403cad20` has exactly one
+callee (`FUN_142f6d5d4`), so it is a small accessor/limiter, not the update.
+
+Still open: which shape class owns `vtable+0x468`, and who writes `+0x118` /
+`+0x40`. Next probe should be `FUN_1403c8dd0`'s own body (not yet opened) plus
+`FUN_1403c89f0` and `FUN_1403c7ed0`, since those are the two pipeline members that
+have not been opened at all.
+
+## `FUN_1403c8dd0` is the manager tick, and `FUN_1403c6030` is where the attack frame is built
+
+`FUN_1403c8dd0(manager, dt)` (611 B) opens with
+`thunk_FUN_1403c4da0(DAT_141c7a048, dt)` - the pool struct already mapped - so the
+contact/record pool is ticked with the same `dt` as the attack list. It then builds
+two local containers through `FUN_140cc4940()`, each guarded by the container
+vtable's `+0x18` slot and the literal `"Tried to create container with incompatible
+heap."`, and reserves 0x20 entries through `FUN_1403c89f0`.
+
+The list walk is the interesting part. `*param_1` is the live list and the link is
+at object `+0x88` (the field earlier notes called an "overflow list" - it is the
+singly-linked next pointer). For each object `FUN_1403c6030(obj, dt, &A, &B)`
+returns a keep flag: keep -> relink at the head of `*param_1`; drop ->
+`FUN_1403c5d20(obj)` then `FUN_1403c7ed0(obj)` and push onto a local free chain.
+After the walk, the two accumulated containers are handed to another subsystem via
+`FUN_1402afe60(*(DAT_141c74870 + 0x28), &A)` and `FUN_1402aff80(..., &B)` - so
+`DAT_141c74870 + 0x28` is the consumer of the manager's per-frame output. Survivors
+then get `FUN_1403c6850(obj)` (the known caller of the contact evaluator
+`FUN_1403c7520`). Finally the dropped chain is recycled: while
+`*(ushort *)(obj + 2) < 0x80` the object is relinked onto `param_1[1]` (a second
+list, i.e. a deferred/retired list), and at exactly `0x80` it goes to
+`FUN_140cc29c0` (deleting destructor). So the u16 at object `+0x02` is a lifetime
+counter with a hard 128-step cap, and the manager holds two lists at `+0x00`
+(live) and `+0x08` (retired).
+
+`FUN_1403c7ed0` (24 B) is **not** a real function: its decompilation is
+bad-instruction garbage over uninitialised registers ending in `halt_baddata()`.
+It is a false boundary inside a data/jump region, so treat the earlier
+"pipeline member" reading of it as void. `FUN_1403c89f0` (234 B) is a container
+reserve helper (calls `FUN_1403c87e0`, `FUN_140d538f0`, and `longjmp` - the same
+heap-mismatch error path).
+
+`FUN_1403c6030` (2011 B, only caller is the manager tick) is the per-object update,
+and it is the writer of the geometry the contact evaluator consumes. Confirmed
+fields on the attack object:
+
+- `+0x08` child/shape pointer; `+0x40` attacker handle, refused when `-1`, resolved
+  through the four-registry dispatcher `FUN_1402c4870` - so `+0x40` is *read* here,
+  and the earlier "who writes +0x40" question is still open, but the consumer is now
+  pinned.
+- `+0xf0` and `+0xf4` are two shape ids passed to
+  `FUN_1403c7b10(obj, shapeObj, id, obj+0x88, byte@+0xf8, &pointVec, +0x198 + 1)`,
+  which returns a count over a `0x30`-stride element vector built by
+  `FUN_1403c8830`/`FUN_1403c8850`. So a shape id resolves to a set of point
+  triplets, and `+0x198` selects which one.
+- `+0x10c & 0x10` is a static flag: when set, the whole geometry recompute is
+  skipped and `+0x170/+0x178` just copy `+0x160/+0x168`.
+- `+0x130..+0x13c`, `+0x140..+0x14c`, `+0x150..+0x15c` are the three basis rows
+  (x/y/z plus a `w` word), each written from a normalised cross product with the
+  full `INFINITY`/zero guard that yields `0x7fc00000` (a NaN) on a degenerate
+  vector. This is the attack's orientation frame, and it is built from the point
+  set, not from an animation.
+- `+0x160..+0x16c` origin + float, `+0x170..+0x17c` previous-frame origin,
+  `+0x180..+0x18c` committed origin guarded by the `+0x194` initialised byte.
+  `+0x180/+0x188` can also be seeded from a *different* object resolved by
+  `FUN_1403ca5c0(DAT_141c7a050, pendingId@+0x1c8)` reading that object's `+0x170`
+  and `+0x178` - which confirms the shape-object origin lives at `+0x170` and that
+  `+0x1c8` is a one-shot pending-handle request cleared to `-1` after use.
+- `+0x120` float timer decremented by `dt` and `+0x124` int countdown decremented
+  once per frame; when `+0x124 < 0` **and** the timer reaches `<= 0` the child list
+  is torn down by `FUN_1403c5c90`. So the object has both a frame countdown and a
+  time countdown, and both must expire.
+- `+0x28` points at the shape object whose `+0x30..+0x3c` and `+0x40..+0x4c` are
+  written with two basis rows, each with `w` copied from that object's own `+0x20`.
+- `+0x30` and `+0x38` are one-shot handle outputs drained into containers A and B
+  (and zeroed) - the mechanism by which an attack object publishes handles to the
+  `DAT_141c74870 + 0x28` consumer.
+
+Net: the contact evaluator's inputs are produced here, and the seam for a manual
+GUI probe is `+0x130` (basis), `+0x160` (origin), `+0x170` (previous origin),
+`+0xf0`/`+0xf4` (shape ids) and `+0x40` (attacker handle). Still open: who writes
+`+0x40`, `+0x118` and `+0xf0`/`+0xf4` - i.e. the attack *creation* path, which is
+upstream of this update. Next probe: `FUN_1403c7b10` (shape id -> point set, the
+owner of the shape lookup) and the manager's create entry, since the writer of
+`+0x40` must be on that side.
+
+## The shape slot is `vtable+0x448` behind a `vtable+0x10` kind test, and the handle's high 16 bits are the slot index
+
+`FUN_1403c7b10` (160 B, callers `FUN_1403c57f0` and `FUN_1403c6030`) is the shape
+dispatch, and it is small and complete:
+
+```
+if (shape) {
+  kind = shape->vftable[0x10 / 8](shape);      // vtable+0x10
+  if (kind == 1) return shape->vftable[0x448 / 8](shape, &outVec, id, obj+0x88);
+  if (kind == 2) return FUN_1402fd8f0(shape, &outVec, id, index);
+}
+return 0;
+```
+
+So the shape class answers a *kind* at `vtable+0x10` and the point-set provider is
+`vtable+0x448`, not `+0x468` - the earlier `+0x468` note should be re-read against
+this before anyone builds on it. Ghidra flags the `+0x448` call site
+(`0x0001403c7b97`) with "Could not recover jumptable ... Too many branches /
+Treating indirect jump as call", so the slot offset is Ghidra's best read of an
+indirect call rather than a recovered table: treat `+0x448` as high-confidence but
+not pinned, and confirm against the disassembly before naming a class from it.
+Kind 2 routes to the free function `FUN_1402fd8f0` instead of a virtual, so at
+least two shape implementations exist and only one is reached through the vtable.
+
+`FUN_1403ca5c0(manager, id)` (68 B, no callees, 4 callers: `FUN_1403b7460`,
+`FUN_1403b8400`, `FUN_1403c5620`, `FUN_1403c6030`) is the whole attack-object
+handle resolution, and it is now fully recovered:
+
+```
+slot = id >> 16;
+if (slot < 0x80) { p = manager[2] + slot * 0x230; return *p == id ? p : 0; }
+if (slot == 0x80) { walk *manager (link +0x88) for *node == id; return node; }
+return 0;
+```
+
+So the handle's **high 16 bits are the slot index** into the `0x230`-stride array
+at manager `+0x10`, the low bits must match the slot's stored handle, and `0x80` is
+a sentinel meaning "this one lives on the overflow list at `*manager`" - which is
+the same list `FUN_1403c8dd0` recycles and where the `+0x02` u16 counts to `0x80`
+before the deleting destructor runs. That closes the slot/overflow mechanism that
+was previously only inferred from `FUN_1403c9c20`.
+
+## The creation path is found, and it is what writes `+0x40`
+
+Two sibling creators sit in the manager's command region, both with signature
+`u32 create(a, b, ctx*)` and **zero recovered callers** (each has exactly one
+`UNCONDITIONAL_CALL` xref from an address Ghidra did not attribute to a function -
+`1420ebfca` and `142fdd4b6`), so they are reached through a table or a split
+function, not a direct call:
+
+- `FUN_1403c9d04` (193 B) -> per-object init `FUN_1403c5620`
+- `FUN_1403c9dfb` (200 B) -> per-object init `FUN_1403c57f0` (1143 B, the other
+  `FUN_1403c7b10` caller)
+
+Both share the identical driver shape, which is the pool protocol in full:
+
+```
+n = FUN_1403ca770(a, b, ctx);                 // how many objects to create
+for (i = 0; i < n; i++) {
+  obj = FUN_1403ca610(manager);               // take one from the pool
+  if (!obj) continue;
+  if (!init(obj, ...)) { FUN_1403ca6e0(manager, obj); continue; }  // give it back
+  obj->next(+0x88) = *manager;  *manager = obj;   // link onto the LIVE list
+  FUN_1403c7e10();
+  if (first) { result = obj->handle(+0x00); first = obj; }
+  else       { FUN_1403c71c0(first, obj); }      // chain the created set
+}
+return result;                                   // the FIRST new handle
+```
+
+So `FUN_1403ca610` is the acquire, `FUN_1403ca6e0` the release, `FUN_1403ca770` the
+count, `FUN_1403c71c0` the chain, and the creator's return value is the handle of
+the first object created. That is the whole create/abort protocol.
+
+`FUN_1403c5620(obj, request, shape, attacker, index, pendingId)` (444 B) is the
+field writer, and it answers the question that has been open since the object
+layout was first mapped:
+
+- Guard: bails unless `shape != 0` **and** (`attacker != 0` **or** bit `0x20` of
+  `request+0xCC` is set) - so a nil attacker is legal only with that flag.
+- `obj+0x08 = shape`.
+- **`obj+0x40 = (attacker == 0) ? -1 : *(u32 *)(attacker + 0x08)`** - the attacker
+  handle is copied from the attacker object's own `+0x08`. The consumer
+  (`FUN_1403c6030`) and the writer are now both pinned.
+- `obj+0x198 = index` (the point-set selector read by `FUN_1403c7b10`).
+- A bulk 24-qword copy: `request[0..0x17]` -> `obj+0x44 .. obj+0x103`. That single
+  copy is where `+0xf0`/`+0xf4` (the two shape ids), `+0x104`, and `+0x10c`
+  (whose `& 0x10` static flag gates the geometry recompute) all come from - they
+  are request-struct offsets `0xB0`, `0xB4`, `0xC0`, `0xC8`.
+- `obj+0x190 = pendingId`, `obj+0x120 = *(u32 *)(request + 0x4C)` (the lifetime
+  float), `obj+0x124 = -1` (the countdown starts at -1, so the `+0x124 < 0` test in
+  the update is true from creation and only the float timer gates teardown until
+  something else sets the countdown).
+- Then `FUN_1403ca5c0(DAT_141c7a050, pendingId)` resolves the pending handle and,
+  if that object's `+0x10` is not `-1`, the new object takes **two refcounted
+  references** from it: `pending->+0x1d8` and `pending->+0x1da*8`, each refcount at
+  sub-object `+0x18` bumped with the `(u+1^u)&0x3fffffff^u` low-30-bit increment,
+  the previous value released through `FUN_1403c8970`, and the results stored at
+  `obj+0x1d8` and `obj+0x1e8`.
+
+Still open after this: who writes `obj+0x118` (not covered by the 24-qword copy,
+which stops at `+0x103`), and who calls the two creators. Next probe:
+`FUN_1403c57f0` (1143 B, the alternate init - it may be the one that fills
+`+0x118`), and the owners of the call sites `1420ebfca` / `142fdd4b6`.
+
+## `FUN_1403c57f0` is the basis-building init, and it delegates the field copy to `FUN_1403c5620`
+
+`FUN_1403c57f0` (1143 B) is not an alternative to `FUN_1403c5620` - it wraps it:
+
+```
+if (attacker == 0) { require bit 0x20 of request+0xCC; attacker stays null; }
+else if (request+0xAC > -1 && request+0x58 > -1) {
+  n1 = FUN_1403c7b10(obj, attacker, request+0xAC, request+0x44, flag, &ptsA, 1);
+  n2 = FUN_1403c7b10(obj, attacker, request+0x58, request+0x44, flag, &ptsB, 1);
+  // build an orthonormal basis from (ptsA, ptsB - ptsA) with the usual
+  // cross/normalise chain, then:
+  *(obj+0x28)->+0x20 = param_3;                     // scalar into the sub-object
+  *(obj+0x28)->+0x30..+0x3c = basisRow0 (w copied from its own +0x20);
+  *(obj+0x28)->+0x40..+0x4c = basisRow1 (w copied from its own +0x20);
+  attacker->vftable[0x10](attacker, &basisRow2);     // push the third row
+  FUN_1403c5620(obj, request, *(obj+0x18), attacker, index, pendingId);
+}
+*(obj+0x20)->+0x20 = param_3;
+FUN_1403c5620(obj, request, *(obj+0x10), attacker, index, pendingId);   // always
+```
+
+So the second `FUN_1403c5620` call runs unconditionally and the two differ only in
+which shape they pass: `obj+0x18` (branch path) versus `obj+0x10`. `obj+0x10` and
+`obj+0x18` are two shape slots that must already be set before init, and
+`obj+0x20`/`obj+0x28` are two basis-holder sub-objects that each take the scalar
+`param_3` at their own `+0x20` - the same field copied back as the `w` component of
+the basis rows written at `+0x30`/`+0x40`. That is the same `+0x28` basis write
+seen from the update side in `FUN_1403c6030`, now with its producer identified.
+
+Two corrections worth keeping. The degenerate-vector fallback here is the global
+`DAT_141608fa0` (a read-only 4-float vector Ghidra warns about: "Read-only address
+... is written" is a decompiler artifact, not a real store), not the literal
+`0x7fc00000` in `FUN_1403c6030` - same NaN semantics, different source, so do not
+assume one shared constant. And `+0x118` is still written by neither init: the bulk
+copy stops at `+0x103` and this function writes only `+0x20`/`+0x28` sub-object
+fields, so `+0x118` has a different owner - most likely the child/attachment path
+reached through `FUN_1403c5c90`, not the creation path.
+
+Still open: who calls the two creators (`1420ebfca`, `142fdd4b6` are unattributed
+call sites), and the owner of `+0x118`.
+
+## The two creator call sites are obfuscated tail-call stubs - the caller chain is not xref-recoverable
+
+`get_assembly_context` on the two `UNCONDITIONAL_CALL` sources resolves them as
+`JMP` instructions, not `CALL`: `1420ebfca: JMP 0x1403c9d04` and
+`142fdd4b6: JMP 0x1403c9dfb`. Both sit in regions Ghidra attributes to **no
+function** (`get_functions(address=...)` reports "no function at or containing
+that address"), and the surrounding instructions are stack-shuffling trampolines -
+`PUSH RBP/RSI/RDI/R13/R14/R15`, `SUB RSP,0x38`, `MOV qword ptr [RSP+0x10],RDX`,
+`JMP qword ptr [RSP + -0x8]`, repeated `LEA RSP,[RSP + -0x8]` /
+`MOV qword ptr [RSP],R9` runs, and sibling `JMP 0x142a65f77` /
+`JMP 0x142892770` hops into other far stubs. That is an obfuscated /
+control-flow-flattened layer, not ordinary compiler output.
+
+So the creators are entered by **tail call from obfuscated stubs**, and no
+xref-based caller chain exists for them. Do not keep chasing these two addresses
+through the function graph - the route is dead. What the stubs do show is argument
+shaping: `MOV RDI,RCX` preserves the first argument, `MOV R8,R9` / `MOV R13,R9`
+copy a third, and `OR R14D,0xffffffff` materialises `-1` in a callee-saved
+register right before the jump, consistent with the `pendingId = -1` the creators
+pass down.
+
+## `FUN_1403c6e70` closes both remaining questions: `+0x118` is the shape pointer, and `vtable+0x468` belongs to the object that handle resolves to
+
+`FUN_1403c6e70` (815 B) is the per-frame attack-shape update. `param_1` is typed
+`undefined4 *`, so every index below is **4 bytes per unit** - the byte offsets
+line up exactly with the fields already recovered, which is what makes the reading
+trustworthy rather than guessed.
+
+```
+if (*(longlong **)(param_1 + 0x46) != 0 && (*(byte *)(param_1 + 0x43) & 0x20)) {
+  shape  = *(param_1 + 0x46);                       // byte +0x118  <-- the open field
+  plVar8 = FUN_1402c4870(*(uint *)(shape + 0x10));  // resolve the handle stored at shape+0x10
+  if (plVar8) {
+    state = plVar8->vftable[0x10](plVar8);          // small int; ==1 means "ready"
+    if (state == 1) { f16..f21 = FUN_140321b70(plVar8, &out); }   // 4-float offset (w included)
+    f2..f5  = *shape;                               // shape's own 4 floats
+    lVar10  = FUN_1402c4870(param_1[0x10]);         // +0x40 = attacker handle  (c5620's write)
+    if (!FUN_1403c7900(param_1, plVar8[1])) {       // eligibility gate
+      // rebuild the request struct from the object's own stored fields:
+      local_d8   = *param_1;                        // +0x00 handle
+      local_218..uStack_150 = *(param_1+0x11)..*(param_1+0x43);   // +0x44 .. +0x10c
+      local_148..fStack_13c = (f16..f21) + (f2..f5);              // combined world position
+      local_b8 = 0; local_a4 = 0; local_138 = 1.0; local_118 = -1;
+      local_10c = param_1[0x6d];                    // +0x1b4
+      local_10b = *(byte *)((longlong)param_1 + 0x1b5);
+      local_128..uStack_11c = normalise(cur - prev) // 0x7fc00000 NaN fallback
+      local_c8..fStack_bc   = (cur - prev) * 60.0;  // +0x170 - +0x180, fixed 60 Hz
+      local_e8 = lVar10; local_e0 = plVar8;
+      if ((plVar8->vftable[0x10](plVar8) & 0xfffffffd) == 0) {   // state in {0,2}
+        if (0.0 <= param_1[0x6c]) param_1[0x6c] += |cur - prev2|; else param_1[0x6c] = -1.0;
+        *(param_1+0x68) = *(param_1+0x5c);          // +0x1a0 = +0x170 (advance contact point)
+        *(param_1+0x6a) = *(param_1+0x5e);
+      }
+      if (plVar8->vftable[0x10](plVar8) == 1) {
+        plVar8->vftable[0x468](plVar8, 0, &local_218, 0);        // <-- the delivery seam
+      }
+    }
+  }
+  FUN_1403c5c90(param_1);                            // always: detach
+}
+```
+
+Three closures from this.
+
+**`+0x118` is a pointer to a shape/offset object**, read as `*(longlong **)(param_1 + 0x46)`,
+and the handle that matters lives at `shape+0x10`. Neither init writes it, which is
+consistent: it is set by whoever attaches the shape, not by the pool creator.
+
+**`vtable+0x468` is not on the attack object at all.** It is called on `plVar8`, the
+object `FUN_1402c4870` resolves from the handle stored at `shape+0x10` - the
+weapon/geometry owner. That ends the search for "which shape class owns
+`vtable+0x468`" on the attack object: the question was asked of the wrong object.
+The same object's `vtable+0x10` is a **state query returning a small int**, tested
+three ways in one function (`== 1`, `& 0xfffffffd == 0` i.e. state in {0,2}), so it
+is a 0..3 phase enum, not a bool.
+
+**The request struct is round-tripped, not re-derived.** The 24 qwords
+`FUN_1403c5620` copied from the request into `obj+0x44..+0x10c` are read straight
+back out here into a stack struct of the same shape and handed to `+0x468`. So the
+attack object is a *staging buffer* for that call, and the only fields this function
+recomputes are the world position (`shape` floats + the `FUN_140321b70` offset),
+the normalised direction, and the `*60.0` velocity.
+
+`FUN_1403c5c90` (138 B, 8 callers including `FUN_1403c6030`, `FUN_1403c6e70`,
+`FUN_1403c9c20`) is a **detach**, not an attach: it forces `+0x124 = 1` when
+negative, calls `FUN_1403c7380`, then unlinks the object from a sibling list whose
+head is `*(obj+0x1f0)+0x200` with the next link at `+0x1f8`. So `+0x1f0` is a parent
+pointer and `+0x1f8` a sibling link - and my earlier guess that `+0x118` came from
+an attach path through this function is wrong.
+
+Still open: who writes `shape+0x10`'s handle and who sets `obj+0x118`; what
+`FUN_1403c7900`'s eligibility actually refuses; and whether `vtable+0x468`'s
+callee reaches an HP write. Next probe: `get_xrefs_to` the `+0x468` slot through
+the vtable of the object `FUN_1402c4870` returns for a weapon handle, and open
+`FUN_140321b70` (the 4-float offset producer).
+
+## The two helpers in that delivery gate are a world-position getter and a self-hit exclusion
+
+`FUN_140321b70` (27 B, **201 callers**) is not attack-specific - it is the
+engine-wide world-position accessor:
+
+```
+FUN_140321b70(obj, out) { FUN_14037a500(*(obj + 0x68), out); return out; }
+```
+
+a thin forward through the transform holder at `obj+0x68`. So the four floats
+`FUN_1403c6e70` adds to the shape's own four floats are the weapon object's world
+position (w included) - the same accessor used by `FUN_14024f6b0` and ~200 other
+sites, which is why it is safe to treat as a stable read.
+
+`FUN_1403c7900` (91 B, exactly **one caller**: `FUN_1403c6e70`) is a **self-hit
+exclusion**, and its polarity is inverted from what the name-like reading
+suggests:
+
+```
+FUN_1403c7900(obj, id) {
+  if (*(obj+0x1d8) && FUN_1403c48c0(*(obj+0x1d8), id)) return 1;
+  if (*(obj+0x1e0) && FUN_1403c48c0(*(obj+0x1e0), id)) return 1;
+  if (*(obj+0x1e8)) return FUN_1403c48c0(*(obj+0x1e8), id);
+  return 0;
+}
+FUN_1403c48c0(head, id) { walk node list: int value at +0, next at +8; return 1 if id found; }
+```
+
+The `id` argument is `plVar8[1]`, i.e. the weapon object's own handle at `+0x08`
+(the same field `FUN_1403c5620` copies into `obj+0x40`). The three slots
+`+0x1d8`/`+0x1e0`/`+0x1e8` are the refcounted attached-shape holders - `FUN_1403c5620`
+fills `+0x1d8` and `+0x1e8`, so `+0x1e0` is a third slot filled elsewhere. Each
+points at an object whose `*` is a singly-linked `int` list.
+
+Because `FUN_1403c6e70` delivers only when the result is **false**
+(`if (cVar6 == '\0') { ... vftable[0x468](...) }`), the rule is: **the attack is
+delivered to the weapon object only when that weapon's handle is not one of the
+attack's own three attached shapes.** That is native self-collision filtering, and
+it is the second independent confirmation (after the `attacker != 0 || bit 0x20`
+requirement in `FUN_1403c5620`) that DSR's attack pipeline carries an explicit
+owner/attachment identity check rather than relying on geometric rejection alone.
+
+Still open: who sets `obj+0x118` and `shape+0x10`'s handle; who fills `+0x1e0`; and
+whether the `+0x468` callee reaches an HP write. Next probe: the vtable of the
+object `FUN_1402c4870` returns for a weapon handle, to reach `+0x468`'s callee.
+
+## The four handle encodings are mutually incompatible - `handle >> 28` selects a *bit layout*, not just a table
+
+`FUN_1402c4870(uint handle)` (83 B) dispatches on `handle >> 28` into four
+resolvers, and each one decodes the **remaining 28 bits differently**. A handle is
+therefore only meaningful together with its type nibble; reusing one across types
+silently indexes a different array with a different stride.
+
+| type | resolver | pool global | page/bucket index | slot index | page stride | object stride | validation |
+|---|---|---|---|---|---|---|---|
+| 0 | `FUN_1403ed0f0` | `DAT_141c7a0b0` | `handle >> 20 & 0xff` | `handle & 0xfffff` | `0x98` | `200` (`0xC8`) | slot `< *(page+0x48)` |
+| 1 | `FUN_1403714b0` | `DAT_141c77e50` | `handle >> 14 & 0x3f` | `handle & 0x3fff` | bucket ptr at `param_1+0x440+idx*8` | indirect | `slot < *bucket`, then `FUN_14033ec30` lookup and **`return *puVar2`** (one deref) |
+| 2 | `FUN_14030c320` | `DAT_141c75dd8` | `handle >> 20 & 0xff` | `handle & 0xfffff` | `0x160` | `0x120` | slot `< *(page+0x48)` |
+| 3 | `FUN_14042a7e0` | `DAT_141c7a488` | - | `handle & 0xff` (`< 0x80`) | - | `0x360` | **`*(obj+8) == handle`**, else miss; `handle & 0xff == 0xfe` walks an overflow list via `obj+0x348` |
+
+Types 0 and 2 are structurally identical (paged pool, count at page `+0x28` for the
+page table and page `+0x48` for the slot bound, slot array at page `+0x50`) and
+differ only in strides - `0x98`/`200` versus `0x160`/`0x120`. Type 1 is a two-level
+bucket table with a lookup helper and an extra pointer dereference on the way out.
+Type 3 is the only one that **validates the stored handle**, which makes it the
+safest to reason about and the one whose objects carry the handle at `+0x08` - the
+same offset `FUN_1403c5620` copies into `obj+0x40` and the same field
+`FUN_1403c7900` compares against the attached-shape lists.
+
+`FUN_140421210` (363 B) is a **spawner** for type-3 objects: it calls
+`FUN_140429ea0(DAT_141c7a488, param_1)` to allocate, hands the new object to
+`FUN_1404241d0(lVar6, param_1+0x68, ...)`, then stores the freshly assigned handle
+back with `param_1[param_1[100] + 1] = *(uint *)(lVar6 + 8)` and increments the
+count at `param_1[100]`, bounded at 99 (`0x62` guard). `FUN_140429e30` is the
+matching release. So type 3 is the spawned-instance pool (the object that owns the
+handle at `+0x08`), and the `0xfe` overflow branch exists because more than `0x80`
+instances can be live.
+
+Consequence for the `+0x468` chase: the object `FUN_1402c4870` returns for
+`shape+0x10`'s handle is whichever pool that nibble selects, and its vtable is set
+by that pool's constructor - so finding `+0x468`'s callee means identifying the
+constructor, not scanning call sites. The two writes to the type-3 pool global
+(`14027b281`, `14027b691`) are themselves in unattributed/obfuscated regions, the
+same dead-route pattern as the attack creators, so the constructor is not reachable
+by xref either.
+
+Still open: which type nibble `shape+0x10` actually carries; the vtable that owns
+`+0x468`; who sets `obj+0x118`; who fills `+0x1e0`. Next probe: read
+`shape+0x10`'s nibble from a live capture rather than statically - a GUI probe on an
+active attack object prints `+0x118`, `*(+0x118+0x10)` and the resolved pointer,
+which resolves the type without needing the constructor.
+
+## `CreateDamage_NoCollision` is reachable statically after all - via the PE string table, not Ghidra's symbol list
+
+The four names the cockpit keeps naming as the HP-write trace targets
+(`CreateDamage_NoCollision`, `OnCharacterHP_CheckAttacker`, `SetAttackRequest`,
+`IsHitAttack`) are **not** Ghidra function names - `find_functions(name_pattern =
+"*Damage*", has_custom_name = true)` returns zero. They are **DLRF event-name
+string literals in `.rdata`**, each with exactly one xref. GhidraMCP advertises no
+string search, so the addresses came from mapping the on-disk PE by hand: parse the
+section table of `DarkSoulsRemastered.exe` (image base `0x140000000`, `.rdata`
+VA `0x14129d000` raw `0x129b800`), `find` the literal in the file, convert
+`file offset -> VA`. All four exist exactly once:
+
+| name | file offset | VA | sole xref site | registration fn |
+|---|---|---|---|---|
+| `OnCharacterHP_CheckAttacker` | `0x13567e0` | `0x141357fe0` | `1400173f8` | `FUN_1400173d0` |
+| `CreateDamage_NoCollision` | `0x135af10` | `0x14135c710` | `1400200e8` | `FUN_1400200c0` |
+| `SetAttackRequest` | `0x1389fb0` | `0x14138b7b0` | - | - |
+| `IsHitAttack` | `0x138a568` | `0x14138bd68` | - | - |
+
+Each registration function is 78 B and identical in shape:
+
+```c
+plVar1 = DAT_141c7b478;                       // the DLRF registrar singleton
+if (plVar1 == 0) plVar1 = FUN_1404c78e0(...); // lazy-create
+(**(code **)(*plVar1 + 0x58))                 // registrar vtable slot +0x58 = register
+    (plVar1, &PTR_vftable_141a2fd10,          // the event's invoker descriptor
+     "CreateDamage_NoCollision", L"CreateDamage_NoCollision", 0xfffffffffffffffe);
+atexit(FUN_141292840);                        // unregister on exit
+```
+
+`PTR_vftable_141a2fd10` -> vtable `0x14135c4d8`, which Ghidra already **names**:
+`DLRF::DLMethodInvoker<DLRF::DLMethodInvokeContext>::vftable`. Its first six slots
+are `1404a5a20 / 1404a5f30 / 1404a5b10 / 1404a5b80 / 1404a5c10 / 1404a5d00`, and
+slot +0x08 (`FUN_1404a5f30`, 43 B) is the destructor - it writes that same named
+vftable into `*param_1` and `free()`s when `param_2 & 1`. So these are C++
+method-invoker objects registered by name, not Lua callbacks.
+
+`CreateDamage_NoCollision`'s invoker slot +0x00 is `FUN_1404a5a20` (82 B):
+
+```c
+if (param_2 != 0 && *(char *)(param_2 + 0x458) == 6) {   // entity kind 6 = character
+    if (FUN_1404bb4b0(...)) FUN_1404b2280(param_1, param_2);   // then invoke
+}
+```
+
+`FUN_1404bb4b0` (561 B) is a **bitmask dispatcher over nine registered
+pointer/handle pairs on the entity**, not damage math. `uVar1 = *(u16 *)(entity +
+0x45a)` is the mask; bits 0-2 use `FUN_1404b1cd0` over pairs `(entity+0x110,
+entity+0x118)`, `(0x120, 0x128)`, `(0x130, 0x138)`; bits 3-5 use `FUN_1404b1eb0`
+over `(0x140, 0x148)`, `(0x150, 0x158)`, `(0x160, 0x168)`; bit 15 walks a list at
+`entity+0x580` (terminator `entity+0x588`). Any bit set whose pair does **not**
+match makes the whole call return 0, i.e. the event is refused. `FUN_1404b1cd0`
+(80 B) is the membership test: `if (pair.handle != 0 && (obj =
+FUN_140d55e50(...)) != 0) for (n = pair.ptr; n; n = *(n+8)) if (n == obj) return
+pair.handle;` - a linked-list identity check, returning the handle on a hit.
+
+`FUN_1404b2280` (225 B) is where the **damage parameters are assembled**, and it is
+the concrete finding this lane has been missing. Each of six arguments has an
+inline value and an override pointer, selected by the same `entity+0x45a` mask:
+
+| arg | inline (as `double -> float` / raw u32) | override (deref a pointer stored on the entity) |
+|---|---|---|
+| u32 #1 | `entity+0x210` | `**(u32 **)(entity + 0x118)` when bit 0 |
+| u32 #2 | `entity+0x238` | `**(u32 **)(entity + 0x128)` when bit 1 |
+| u32 #3 | `entity+0x260` | `**(u32 **)(entity + 0x138)` when bit 2 |
+| float #1 | `entity+0x278` | `**(float **)(entity + 0x148)` when bit 3 |
+| float #2 | `entity+0x2a0` | `**(float **)(entity + 0x158)` when bit 4 |
+| float #3 | `entity+0x2c8` | `**(float **)(entity + 0x168)` when bit 5 |
+
+and the sink is `(**(code **)(invoker + 8))(*(entity + 0x588), u32, u32, u32, f, f,
+f)` - a **bound method pointer stored at invoker `+0x08`**, called with the target
+handle from `entity+0x588`. That is why no static callee exists: `callees` for
+`FUN_1404b2280` is empty, and the target is written at invoker construction time.
+
+Net: the trace now runs name string -> registrar -> named `DLMethodInvoker` vtable
+-> kind-6 guard -> nine-pair refusal mask -> six-argument damage assembly -> an
+indirect call through invoker `+0x08` with the target handle. The HP write is one
+indirection past a stored function pointer, so it is **still not proven**, and the
+honest statement is that the last hop is data-dependent. `OnCharacterHP_CheckAttacker`
+is the same shape with `FUN_1404c48d0` / `FUN_1404b8840` in place of
+`FUN_1404bb4b0` / `FUN_1404b2280`.
+
+The other invoker vtable slots are now opened, and two of them explain the guard:
+
+- `FUN_1404a5b10` (6 B, slot +0x10) is `return 6;` - the invoker **declares its
+  target entity kind**, which is exactly the `*(char *)(entity + 0x458) == 6` test
+  in `FUN_1404a5a20`. So kind 6 is not an inferred constant; it is published by the
+  event's own descriptor. Any `CreateDamage_NoCollision` / `OnCharacterHP_...`
+  handler only ever runs against a kind-6 entity.
+- `FUN_1404a5c10` (73 B, slot +0x20) is a **call-context factory**: it zeroes a
+  0x80-byte block, sets the first six qwords to `&DAT_141b67cf9` (a shared empty
+  sentinel), leaves `+0x38..+0x70` zero, and stores `param_1` at `+0x78`. That is
+  the `DLMethodInvokeContext` the six damage arguments are packed into.
+
+Next probe (static, cheap): find the writer of invoker `+0x08` - it is not any slot
+of `0x14135c4d8` (all six are now accounted for: invoke / dtor / kind / +0x18 /
+context factory / +0x28), so the bound method pointer is stored by the **registrar's
+`+0x58` register path** when an entity subscribes. Start from the registrar
+singleton `DAT_141c7b478` and its vtable, not from the invoker. Do not re-derive
+the string addresses: `build/dsr-data/exe_pe.json` holds the section table for the
+offset->VA conversion.
+
+## Attack-manager root, and the read-only live probe `tools/dsr_live_probe.py`
+
+29 October 2026, directed by the user to stop doing static work and capture a live
+attack object instead. `FUN_1403c9c20` (183 B, the handle->slot resolver) publishes
+the manager layout outright:
+
+- `manager+0x00` - head of the overflow object list; next link is `obj+0x88`.
+- `manager+0x10` - base of the slot array, **stride `0x230`**, `slot index == handle >> 16`,
+  valid while `handle >> 16 < 0x80`; a slot is live only when `*(u32 *)obj == handle`.
+- The manager itself is passed in as `param_1`; its only code xref is the 11-byte
+  thunk `FUN_14032414b`, so there is **no static global root to read** - the root has
+  to come from a live process. `DAT_141c7a050` (the value handed to
+  `FUN_1403cad20` at every call site) is the candidate singleton pointer at
+  `image+0x1c7a050`; the probe reads it and prints what it finds rather than assuming it.
+
+`tools/dsr_live_probe.py` is the capture harness: it pins the on-disk EXE to
+`a45aaa36...98d7b`, computes the ASLR slide from the module base, then walks slots
+`0..0x7f` plus the overflow list and prints, per live object, `obj+0x08`, `obj+0x118`,
+and for each of those `shape+0x10`'s handle with its **type nibble `handle >> 28`** and
+low-16 slot. That is exactly the three values that resolve the shape type and the
+vtable owner without needing any constructor.
+
+Read-only by construction: `PROCESS_VM_READ | PROCESS_QUERY` only, no debugger, no
+`WriteProcessMemory`, no input injection. 29 Oct live probe follow-up: process discovery
+works for the user's running `DarkSoulsRemastered.exe` (PID 10236); the prior missing
+process report was a malformed `PROCESSENTRY32W` layout (now fixed). The next failure
+was a permissions constant typo: `PROCESS_VM_READ` is `0x0010`, not `0x0400`; with the
+latter OpenProcess succeeded but ReadProcessMemory failed `ERROR_ACCESS_DENIED` (5).
+Corrected to `0x0010`; observed successful reads. The candidate singleton at
+`image+0x1c7a050` is confirmed in this run: it points to `0x0e753c50`, whose
+`+0x10` slot array is `0x0de0e180` and `+0x00` overflow head also `0x0de0e180`.
+Observed array records at slots 0..2 and filtering now excludes zero low-word/free
+entries and deduplicates the shared array-head object. This capture did NOT yet show
+an active shape at `obj+0x118` (all observed values there were null); `obj+0x08` was
+non-null for some slots and its `shape+0x10` value equalled the containing record pointer.
+Static follow-up of `FUN_1403c5620` resolves this discrepancy: it assigns `param3` to
+record+0x08, copies qwords only through record+0x10c, then writes a dword at +0x120;
++0x118 is not an assigned shape pointer. `FUN_1403c57f0` calls it twice with shape-like
+arguments from its +0x18 and +0x10 members; `FUN_1403c9d04` is the pool creator and
+forwards the same initializer. Updated `tools/dsr_live_probe.py` to inspect `record+0x08`
+as the candidate object, print its first qword as the vtable and +0x10 as a qword
+(back-reference), and report record+0x118 as raw data rather than dereferencing it as a
+pointer. A follow-up live run could not be captured because the game had closed; the
+prior 20 samples remain the evidence. The user's follow-up live sample now supplies that vtable: record+0x08 = `0x0e70ffb0`, first qword/vtable = `0x14130baa8`, and qword at object+0x10 = `0x0ddca180`, exactly the owning record address. Ghidra xrefs to vtable `0x14130baa8` resolve its destructor `FUN_1402aa4b0` to the PDB-named `NS_FRPG::FrpgPhysShapePhantomIns::vftable`; constructor `FUN_1402aa170` sets the same vtable, stores its `param_2` in object+0x38, and retains it. This resolves the captured object's type: **FrpgPhysShapePhantomIns**, not a tagged handle. Its `record+0x118` remains zero and is unrelated. The capture verifies the shape-like object's vtable/back-reference; it does not establish this phantom instance is the weapon hit-volume shape. Follow-up while game still open (PID 33204): manager exposes live records at slot 0 and 1. Both `record+0x10` and `record+0x18` point to `NS_FRPG::FrpgPhysShapePhantomIns` objects (vtable `0x14130baa8`, each +0x10 back-refers to record); `record+0x28` points to objects with vtable `0x14141bf58`. Ghidra's `FUN_1408841e0` names that vtable `hkpCapsuleShape::vftable` and lays out its radius at +0x20, endpoints at +0x30/+0x40. Live capture of both records: radius 1.0, endpoints `(0,0,0)`→`(1,0,10)`; record+0x118 remains zero. This identifies a real capsule geometry object, not the PhantomIns references. `FUN_1403c57f0` writes its scalar `param3` to `*(param_1+0x28)+0x20` and constructs endpoint transforms at the capsule object's +0x30/+0x40, consistent with the captured layout. Still open: trace which parent input (`param_1+0x10` vs `+0x18`) drives the capsule endpoints for the player weapon attack and whether these live 1×10 coordinates are defaults or active attack geometry; need a labelled strike capture to establish that link. New 29 Oct user-supplied `--watch 20 --interval 0.2` run (game PID 33204, during attack activity) and probe's live capsule-field decode: slot 0 capsule starts at radius 1 / endpoint `(1,0,10)`, then by sample 9 changes to radius `0.35` / endpoint `(0.35,0,1.0302426)`; samples 10-20 remain around `(0.35,0,1.03024)` with small z drift (`1.0302374`..`1.0302438`). Slot 1 capsule changes from radius 1 / `(1,0,10)` to radius 0.35 / `(0.35,0,1.0302374)` by sample 16. Handles advance over the same window (slot0 `0x545`→`0x54a`, slot1 `0x10544`→`0x10549`), confirming pooled-record churn. This rejects the previous suspicion that the 1×10 values were the only/live geometry: the capsule is reconfigured into a narrow ~1.03-unit capsule during the run. Capture does not independently label the event as a player strike or a hit, so no direct player-weapon attribution yet. User requested automatic receipts/clear timing: tools/dsr_live_probe.py now writes a unique Markdown receipt to build/native-live-probes on every successful run, with UTC, PID, image base/slide, pinned EXE hash, sample settings, label/notes, attack-during-capture guidance and the complete snapshot transcript; it never overwrites existing receipts. --once is explicitly baseline only. Initial receipt smoke exposed a stale probe_once call signature (`TypeError`); corrected and reran successfully. Receipt build/native-live-probes/dsr-live-probe-20261029T185129.985889Z-pid33204.md was read back. After adding actual completed/requested counts and partial-capture handling, the final smoke `python tools/dsr_live_probe.py --once --label baseline-smoke` succeeded and created build/native-live-probes/dsr-live-probe-20261029T185223.879005Z-pid33204.md; header/transcript read back, status complete 1/1. `--once` only establishes baseline, not strike timing. Watch guidance is now explicit: start immediately before a deliberate swing, attack DURING first few samples, never only afterward. Ctrl+C now writes a partial receipt and reports completed/requested count rather than emitting a traceback. Countdown added: visible 3,2,1, then ASCII `GO - STRIKE NOW - capture window is live.`; it runs BEFORE sampling, so strike on GO, not during countdown or after capture. `--watch 1` is refused because one sample is not a window; default countdown 3 s, configurable with `--countdown`. A 1-second/two-sample smoke displayed `1...`, GO, then samples 1/2 and 2/2; receipt build/native-live-probes/dsr-live-probe-20261029T185518.099305Z-pid33204.md read back with countdown 1s and complete 2/2. The prior `--watch 1` smoke exposed that one-sample watch was mislabeled as baseline and non-ASCII GO punctuation rendered incorrectly; fixed by requiring at least two samples and ASCII output. One smoke attempt first exposed an outdated probe_once call signature (TypeError); fixed and rerun successfully. User report for receipt `build/native-live-probes/dsr-live-probe-20261029T185604.811229Z-pid33204.md`: one deliberate player strike clipped the floor at the end of its animation. This is user-observed outcome, not a probe measurement. Receipt has 40/40 samples after the 3s countdown; parser summary: capsule local radius/length changed from 0.2/~0.566 to 0.35/~1.030 in some slots (slot 5 by sample 3, slot 2 by sample 9), then remained essentially constant; endpoint Z only drifts at ~1e-5. The probe records local capsule geometry only, not world transforms, rendered weapon pose or floor-contact events, so it cannot explain the clip. Treat floor clip as a separate presentation/collision symptom; do not change capsule math from this receipt alone. Next evidence: exact animation/weapon, whether the visible blade or controller/hand crossed the floor, and whether the strike still produced native contact/damage; capture world-space weapon/hand trajectory or a labelled floor/hit observation.
+
+The engine's own param-name list (`Bullet`, `Magic`, `QwcChange`, `QwcJudge`,
+`ShopLineupParam`, `LevelSyncParam`) do not match the extracted file names
+exactly, which is why 29 defs looked unpaired - the engine's name is a stem,
+the bundle file carries a suffix. Ghidra reports the program saved
+(unsaved_changes false, modification 475) as of this probe.
+
+The 29 unpaired defs are named, not missing: the bank tables (FogBank,
+DofBank, LightBank, EnvLightTexBank, LensFlare*, ShadowBank, ToneMapBank,
+ToneCorrectBank, LodBank, PointLightBank, Qwc*, MenuParamColorTable,
+LevelSyncParam) live in per-map `.param` bundles that are not in
+`GameParam.parambnd`, and AtkParam / BulletParam / AiStandardInfo /
+EnemyStandardInfo pair with suffixed files (`AtkParam_Pc`, `AtkParam_Npc`,
+`BulletParam_Npc` is absent from this bundle).
+
+### Param table format cracked for 144/185 params; BehaviorParam -> AtkParam link measured (29 Oct, offline)
+`tools/dsr_param.py` header/row-table parse corrected after probing more than
+AtkParam_Pc. Three earlier assumptions were wrong and are now replaced by
+byte evidence:
+
+1. The struct name is at **0x0C**, not 0x08 (0x08 is a version/flags word;
+   reading it returned `\x01`/`\x04` for 185 files).
+2. The row table starts at **0x34** and its first `rowOffset` is NOT
+   `dataStart`. EquipParamWeapon rows begin at 14988 while `dataStart` reads
+   80524, so anchoring the scan on `dataStart` silently rejected most tables.
+3. A trailing entry with `rowId == 0` still occupies a row slot: AtkParam_Pc's
+   last entry is `(0, 195500, 225261)` and `195500 + 128 == dataEnd`. Treating
+   `rowId == 0` as a terminator dropped a real row.
+
+The stride check is now `lastRowOffset + stride == dataEnd` plus constant
+rowOffset deltas, not `(dataEnd - dataStart) / rows`. Result:
+`python tools/dsr_param.py` -> **144 params parsed, 0 refused** (was 136 with
+the broken anchor). Measured: `ATK_PARAM_ST` 128 (AtkParam_Pc 1397 rows,
+AtkParam_Npc 2164), `EQUIP_PARAM_WEAPON_ST` **272** (1245 rows),
+`BEHAVIOR_PARAM_ST` **32** (2401 rows).
+
+Weapon -> AtkParam is NOT a field in EquipParamWeapon. Scanned all 68 u32 slots
+of all 1245 weapon rows against the AtkParam_Pc id set: no offset links them
+(`sortId` at +0x04 matches only 44/1245, and the earlier "400/400 match at
+0x0D0" was an artifact of id 0 being in the set). The real link is the one the
+Ghidra trace already pinned in `docs/NATIVE_MELEE_CONTRACT.md`:
+`1403C93B0` -> BehaviorParam via `140528A30`, read refId, select AtkParam via
+`140528910` (binary-search row lookup). Confirmed against the data: in
+BehaviorParam's 32-byte rows, `u32 @+0x08` is the selector and `u32 @+0x0C` is
+the row id, and grouping by selector gives
+
+  selector 2   n=1899  -> 1783 ids present in AtkParam_Npc, 0 in AtkParam_Pc
+  selector 0   n= 208  -> 207 in AtkParam_Npc, 48 in SpEffectParam, 1 in Pc
+  selector 258 n= 253  -> 161 Npc, 161-ish mixed, 4 SpEffect
+  selector 512 n=  29  -> 29 SpEffect, 13 Pc, 5 Npc
+
+So the behavior table drives **AtkParam_Npc**, not AtkParam_Pc. AtkParam_Pc
+selection is still unexplained by data and is the named next probe; do not
+claim the player path from these numbers.
+
+Geometry consequence, measured over both attack tables (offline, no game run):
+`hit0_DmyPoly1 >= 0` on 1320/1396 PC rows and **2163/2163** NPC rows;
+`hit0_DmyPoly2 >= 0` on 823 PC and 1632 NPC rows, i.e. 823 PC / 1632 NPC rows
+carry BOTH endpoints and are true capsules, the rest are single-point spheres.
+Dummy-polygon ids range 0..220 (PC) and 0..230 (NPC), median 100 and 10.
+NPC radii are much larger than PC: min/median/max 0.050/0.700/12.000 m, p99
+6.500, against PC 0.010/0.350/5.000 m, p99 1.200.
+
+This independently corroborates the Ghidra-side reading in
+`docs/NATIVE_MELEE_CONTRACT.md` that the row carries tip/tail dummy-polygon ids
+at `0x2C..`/`0x34..` as s16: the byte-derived field walk from the paramdef
+lands `hit0_DmyPoly1/2` at exactly those offsets, and the -1 default plus the
+>=0 distribution only make sense for polygon ids. Two independent methods, one
+offset - that is the strongest param-side evidence in this repo so far, and it
+is what `BladeSegmentOverlapsSphere` in `src/core/combat_math.h` should model:
+segment inflated by radius when both ids are present, sphere when one is.
+
+No `src/` change this probe, so no build/ctest/auto_verify and no board cell.
+Next probes, in order: (1) find how AtkParam_Pc rows are selected (player
+motion set, not BehaviorParam selector 2); (2) find the wrong paramdef `count`
+read that makes AtkParam declare 144 bytes against a 128-byte row - every
+def's true stride is now measurable from its paired `.param`, so this is a
+per-def budget check, not a guess; (3) resolve dummy-polygon ids against FLVER
+dummy entries for one equipped weapon.
+
+### Row stride closed: AtkParam_Pc is 1396 rows x 128 bytes, 49 fields byte-validated (29 Oct, offline)
+`tools/dsr_param.py` (new, untracked) parses the `.param` header and row table
+and joins them with the paramdef field list. Header recovered by probing:
+`u32 fileSize | u32 dataStart | u32 version/flags | char[32] struct name |
+u32 @0x2C | u32 @0x30 | u32 @0x34 | u32 dataEnd @0x38 | u32 @0x3C`, then 12-byte
+row entries `(rowOffset, labelStringOffset, rowId)` from 0x34 to dataStart,
+terminated by a zero rowId. The u32 at 0x2C (512) is NOT the row count - the
+count is the entry count and the stride is measured from constant rowOffset
+deltas, then checked with `(dataEnd - dataStart) == stride * (rows + 1)`.
+
+Observed: `python tools/dsr_param.py --param AtkParam_Pc.param --rows 6 --json
+build/dsr-data/AtkParam_Pc_rows.json` -> `rows=1396 stride=128 def=yes
+validated=125/151`. The 128 is not inferred from a divisor: 0x41AC +
+1396*128 = 0x2FC2C = dataEnd exactly. (176 also divides the region, which is why
+the earlier "0xB0 might be the row size" reading was wrong - the constant
+rowOffset delta is what settles it.)
+
+The first 49 fields are byte-validated against real rows and decode
+coherently: `hit0..hit3_Radius` f32 at 0x00-0x0C, `knockbackDist` 0x10,
+`hitStopTime` 0x14, `spEffectId0..4` s32 0x18-0x28, `hit*_DmyPoly1/2` s16 0x2C
+(default -1), the nine `*Correction` u16 at 0x3C (default 100), `atkPhys..
+atkObj` u16 0x50, `guardStaminaCutRate/guardRate/throwTypeId` 0x64,
+`hit*_hitType` u8 0x6A, `hti0..2_Priority` 0x6E. Row 40 reads
+`hit0_Radius 0.4, knockbackDist 1.47, hit0_DmyPoly1 93, atkPhys 100,
+atkStam 40, atkObj 10` - values that only make sense if the offsets are right.
+
+Still open, and the tool refuses to emit these: the remaining 22 paramdef
+fields do not fit. Walking all 71 with bitfield packing declares 144 bytes
+against a measured 128-byte row, and `hti*_Priority` is declared `u8 x5` where
+four-element arrays would land `dmgLevel` at 0x7E and `mapHitType` at 0x7F,
+exactly filling 128 - which then leaves 12 more declared fields with no room.
+So at least one `count` read in the paramdef record is wrong, not just the
+array length. `validated_prefix_bytes` is the honest boundary; nothing past
+offset 125 may be quoted.
+
+Combat-relevant distribution measured over all 1396 PC attack rows (offline,
+no game run): 1197 rows carry at least one hit radius; radii min/median/max =
+0.010/0.350/5.000 m, p90 0.600, p99 1.200; `knockbackDist` present on 1098 rows
+at 0.15/1.00/2.31 m. 649 rows use more than one of the four hit slots, 17 use
+all four. This is the evidence that a single weapon-reach scalar is the wrong
+model for the blade capsule tests in `combat_math.h`: native reach is per
+attack row and per hit slot, and the bulk of real values sit far below the
+arm-reach magnitudes our IK hand placement produces.
+
+No `src/` change, so no build/ctest/auto_verify and no board cell written.
+Next probe: find the wrong `count` read by testing each paramdef record's
+declared element count against the 128-byte budget per def (every def's stride
+is now measurable from its paired `.param`), then re-validate the tail fields.
+
+### Paramdef field tables readable: 51 defs, AtkParam 71 fields named (29 Oct, offline)
+`tools/dsr_paramdef.py` (new, untracked) reads the extracted `*.paramdef` files
+read-only and prints/JSON-dumps their field tables. Observed:
+`python tools/dsr_paramdef.py --summary` -> `51 defs parsed`;
+`--def AtkParam.paramdef --json build/dsr-data/AtkParam_layout.json` -> 71
+fields, first five `hit0_Radius..hit3_Radius, knockbackDist`, last
+`isDisableNoDamage:1, pad[1]`, with Shift-JIS display labels
+(`あたり0 半径`, `無敵無効か`).
+
+Record layout recovered by byte-probing, then confirmed structurally: header
+`u32 fileSize | u16 0x30 | u16 version | u16 fieldCount | u16 0xB0`, 32-byte
+struct name at 0x0C, then field records at stride 0xB0 from 0x2C with
+`+0x04` label, `+0x44` type, `+0x48` printf format, `+0x58/+0x60` f64 max/min,
+`+0x64` element count, `+0x68` element size, `+0x90` field name. The stride was
+not assumed: locating every type-name string gave 120 hits with deltas of only
+44, 132 and 176, which is exactly two type slots per record 176 bytes apart.
+
+Two numbers are NOT closed, and the tool refuses to emit a byte-offset column
+because of them:
+- the u16 at 0x0A reads 0xB0 for all 51 defs, so it is the record stride, not
+  the row size; the real row size lives in the paired `.param` header, which is
+  still unparsed (`AtkParam_Pc.param` starts `0x2FC30, 0x41AC, 0x05750001`,
+  name `ATK_PARAM_ST`, then a 12-byte-entry table whose first column steps by
+  0x80 - a name table, not a field-ID table).
+- declared `count*size` sums do not reach 0xB0 either (AtkParam 151/176,
+  BulletParam 167/176, CharaInitParam 235/176 over). Bitfield runs
+  (`disableGuard:1` x8) explain part of the shortfall, not all of it, and the
+  over-shooting defs prove some `count` reads are wrong for array fields.
+So the field NAMES and TYPES are byte-supported; the OFFSETS are not, and they
+must not be pasted into `docs/SOULSMODDING_REFERENCE.md` to replace the
+wiki-derived AtkParam table until the `.param` header is parsed and the two
+tables cross-check. Next probe: the `.param` header/field-ID table, then
+reconcile per-def declared bytes against the real row size.
+
+Tooling only, no lane evidence, no `src/` change, so no build/ctest/auto_verify
+and no board cell written this entry.
+
+### Data-side unpacker landed: DCX + BND3 cracked, 1073 param/script files extracted (29 Oct, offline)
+DSR ships no `DSRegulation.sfb`; the data lives in per-directory `*.dcx`
+bundles. `tools/dsr_unpack.py` (new, untracked) now reads them read-only and
+writes under `build/dsr-data` (disposable, never a verification receipt).
+
+Container layers recovered by direct byte probing, not by copying a wiki
+layout - the first two attempts failed because they assumed BND4 habits:
+- DCX v19: 0x24-byte header, `DCS` container, `DCP`/`DFLT` packets, and the
+  real zlib stream behind a `DCA\0` marker (offset 76 for `paramdef`). The
+  packet size fields are NOT a stream boundary, so the reader scans for
+  `DCA\0` and consumes exactly one stream per chunk via `decompressobj`
+  (a whole-buffer `zlib.decompress` fails on any multi-packet file).
+- BND3 (`07D7R6`): little-endian header, `count` at 0x0C, file count at 0x10,
+  `foffset` at 0x14. Entries are 24 bytes at 0x20:
+  `(flags, size, offset, id, name_offset, size)`. Offsets and name offsets are
+  ABSOLUTE in the inflated payload, not `foffset`-relative - the name strings
+  sit between the entry table and the file data, which is why a
+  `foffset + name_offset` read decoded garbage for three attempts. Names are
+  author-side absolute paths (`N:\FRPG\data\INTERROOT_x64\...`); the leaf is
+  kept. Entry data tiles contiguously except one 14-byte alignment gap before
+  `CoolTimeParam.paramdef`.
+
+Observed: `python tools/dsr_unpack.py --game "C:\Program Files (x86)\Steam\
+steamapps\common\DARK SOULS REMASTERED" --out build/dsr-data` wrote 1073
+files. `paramdef` 51 defs (incl. `AtkParam`, `EquipParamWeapon`, `SpEffect`),
+`param/GameParam` 41 row-tables (`AtkParam_Pc` 225,281 B, `AtkParam_Npc`
+382,360 B, `SpEffectParam` 341,621 B, `CalcCorrectGraph`), 11 `DrawParam`
+bundles, 19 Lua bundles plus `script/talk` ESDs. Nothing was written to the
+game directory.
+
+Next probe (unstarted): the `.paramdef` record layout. `AtkParam.paramdef`
+starts `d03c0000 30000100 4700b000` then a 32-byte padded `ATK_PARAM_ST`, then
+repeated per-field records whose strings are type (`f32`), printf format
+(`%f`), field name (`hit0_Radius`) and a trailing group tag (`ATAE`, `Hit`,
+`SFX`, `BSCE`, `pad`). `0x47`/`0xb0` are the candidate field-count/row-size
+pair - `0xb0`=176 divides `AtkParam_Pc`'s 225,281 bytes as 176*1280+1, so the
+`.param` header size must be pinned before either number is claimed. Do not
+publish a field table off a guess; the point of parsing defs is to replace
+wiki-derived `AtkParam` layouts in `docs/SOULSMODDING_REFERENCE.md` with
+byte-verified ones.
+
+This is tooling, not lane evidence. It does not touch lane B's blocker: the
+LAB health-setter observer plus one labelled natural hit still gates B, and no
+Param row substitutes for a concrete HP write. No `src/` file was touched, so
+no build/ctest/auto_verify ran and no board cell was written this entry.
+
+### Architecture pass: XInput bridge detours collapsed to one body (29 Oct, offline)
+
+Architecture review (improve-codebase-architecture) found `src/core/xinput_bridge.cpp`
+shallow: four WINAPI entry points carried two near-identical bodies each, one per
+route (MinHook export detour and the patched-IAT thunk), so the merge/validation
+rule for "what the saved original returned vs what we may overwrite" existed twice
+per export. The deletion test passed: collapsing them concentrates the rule in one
+place without moving it across a seam.
+
+Change: one `MergeRoute` template body per export, called by both routes; the four
+extern-signature WINAPI entry points remain (they are passed as function pointers
+to `MH_CreateHook` and the IAT patch, and `tests/test_xinput_iat.cpp` drives them
+through the real IAT, so their signatures and call order are the test surface).
+The saved-original slots became `std::atomic<void*>` so one body serves both
+function-pointer types. Behavior is unchanged: the pointer argument is still
+checked and forwarded last, and the leading args are forwarded unchanged.
+
+Evidence: `cmake --build build --config Debug --parallel` exit 0;
+`ctest --test-dir build -C Debug --parallel --output-on-failure` 113/113;
+`cmake --build build --config Release --parallel` exit 0;
+`ctest --test-dir build -C Release --parallel --output-on-failure` 113/113;
+`pwsh -File tools/auto_verify.ps1` PASS (Release 113/113, doctor PASS). The only
+warnings on the touched translation unit are the pre-existing C4459 shadowing in
+`FindXInputIat`/`InstallXInputIat`, present before this change.
+
+Remaining candidates from the same scan are boundary-blocked, not absent:
+`src/core/combat_math.h` (`BladeOverlapsSphere` vs `BladeSweptOverlapsSphere`,
+96% similar - the swept form repeats the static validation instead of reusing it),
+`src/core/combat_atkparam.h`, `src/core/input.h`/`input.cpp` (`RoomscaleMotion`
+vs a 94%-similar neighbour) and `src/core/xr.cpp` sit in lanes C/E/D ownership and
+in the live "Core combat features" tab. Next probe for whoever owns them: collapse
+the swept overlap onto the static predicate plus one arc sampler, and keep
+`tests/test_combat_math.cpp`'s existing wall/fast-arc cases as the oracle.
+
+### Retained combat evidence reused; GhidraMCP access restored (28 Oct, in progress)
+
+Operator correction: ordinary combat was already recorded in several runs.
+Do not request another generic hit/block/parry/dodge recording. Reuse those
+captures; request new gameplay only for a precisely named missing observation.
+Task: reuse retained contact comparisons, then expose one precisely missing
+field: the native HP setter caller nested in a natural contact. Baseline d2fd048
+plus preserved dirty checkout. Source-only LAB observer added; no game-memory
+write or native invocation.
+
+The earlier tooling blocker was overstated. The native contract already
+documents an inline MCP SDK route to the installed stdio bridge. Confirmed it
+with tools/list before read-only get_metadata/get_functions/get_assembly_context/
+read_memory against DSRFull PID 13564. No reusable shim, headless instance,
+Ghidra script, primary-database repair/save or application configuration edit.
+Program revision 1793151129646:1da370ad:3, unsaved_changes=false.
+
+Retained iteration-5-20261027/analysis-run2.json is valid, capture_integrity and
+combat_observation_integrity PASS, 6,891 paired samples. It has 32 kind-before-2
+records, including four paired HP-change samples. Thus old statements that a
+new kind-2 encounter is required are superseded for this recording. Raw labels
+and return bits still do not establish successful block/parry or an attack ABI.
+
+Static progress: 142D5F79F is a return-shaped epilogue, not a recovered gameplay
+jumptable. Prologue saves RBX/RBP/RSI/RDI/R14 and reserves 0x38 below its entry
+RSP; epilogue restores them, places BL in EAX and ends at entry RSP+8 with
+JMP [RSP-8], reading the original return address. Caller 14031D953 resumes at
+14031D958. Six Ghidra raw windows (148 bytes) match pinned EXE SHA-256
+a45aaa36dd2f6cc151670a639ea5547043cf38ea79ff4178b963c6ed71f98d7b.
+
+Followed the non-null continuation instead: an R8+10 scalar lookup, actor
+virtual +4B8 (PlayerIns 140360440 / EnemyIns 140339C60, identifier reads),
+12-byte payload construction, three dword fields and insertion via 140494420
+into global 141C7B1B0's +58 list. No HP write has been observed on this path;
+the list consumer and its gameplay meaning remain unproven. Allocation's
+no-return decompiler warning does not erase the real call fallthrough.
+
+The HP setter candidate at RVA 0x322910 is pinned to the installed EXE. Its
+19-byte prologue and six-byte epilogue match raw disk bytes. The PE exception
+directory has three contiguous ranges (322910-32296C, 32296C-3229A8,
+3229A8-3229EF); both trailing unwind records chain back to the entry range.
+GhidraMCP shows RCX actor / EDX requested HP and the known direct callsite
+14028E823 -> 14031F6B2 passes RBX and dword [RAX+14]. Function return remains
+undefined; the detour forwards once and preserves raw RAX.
+
+Implemented optional LAB-only native_combat_health_write records scoped to
+admitted detailed natural ContactDetour calls. They share the contact's
+capture/thread/seq/object key and its atomic batch; fixed four-call storage marks
+overflow. Header schema/hook and image base are explicit. Analyzer retains raw
+caller/actor/request and legacy unknown; it never upgrades a request into a hit
+or damage attribution. No production physical-damage or shield binding changed.
+
+Verification: full Debug build + CTest 113/113 PASS; full Release build + CTest
+113/113 PASS; opt-in Release LAB build + CTest 111/111 PASS. Focused observer/
+analyzer suite 4/4 PASS. The LAB binary is not deployed. Only one new natural
+hit observation is needed after candidate sealing; do not repeat broad combat
+cases.
+
+Evidence is local-only outside the distributable source tree:
+C:\Tools\DarkSoulsRemaster_De\combat-evidence\trace-reuse-20261028\.
+An initial candidate manifest and LAB binary hash matched the source, but the
+protected runner's read-only Check stopped before staging because the Steam
+Offline preference is not set. No save/config/install files changed. Finalize
+the immutable candidate after this log update; then the operator can switch
+Steam Offline/log off and rerun Check. Current next probe is one 20-second
+natural_hit window, then resolve its emitted caller in GhidraMCP and compare
+actor/context with retained Run 2 evidence.
+No game launch, input injection, native function invocation, game-memory write,
+deployment, prior receipt rewrite, backup-vault access or commit.
+
+Re-seal and operator precondition (29 Oct): the sealed manifest went stale
+because docs/VERIFICATION_RUNBOOK.md was edited after sealing, so the runner
+would have refused with "Source changed since qualified build". Independent
+re-hash of candidate-sealed.json found exactly one mismatch (the runbook) and
+both binary hashes equal; wrote build/verification/combat-health-writer-20261028/
+candidate-sealed-2.json (289 files, 1 mismatch = the runbook itself). Lesson: a
+seal must be the LAST write of a turn, because MODLOG.md and the runbook are both
+inside the manifest. Resealed forward as candidate-sealed-3.json after all
+documentation edits; LAB core d3bc5f3917835d39dec377dd7f7d273c4c26de0ab89e6393b39979bf536b0cc1
+and loader f9adff97179dfdc58ac73b0a694d469844b3840ccabfb2313cdfd747bfeb5830 are
+identical in every seal, and no seal file is rewritten or deleted. Read-only Check
+against the new candidate stops only at "Steam Offline preference is not set":
+only at "Steam Offline preference is not set": game closed, no finish marker, no
+stale trace-stop request, active account 76561199803506767, Steam PID 16416
+running, exact-game outbound block present, pinned EXE hash equal. The seed-vault
+read is refused to agent sessions by the cockpit guard, so the runner owns that
+check. Next: operator sets Steam Go Offline, reruns Check for CHECK PASS, then
+Run/Finish for one 20-second natural_hit window.
+
+### Core combat continuation: whole-blade source sweep fixed; native binding blocked (28 Oct)
+
+Task / objective: reproduce gaps between fast blade samples in both contact
+classification and selected-slot qualification; replace endpoint-only checks
+with a shared continuous whole-segment query. Baseline d2fd048; checkout already
+contains extensive source/docs/test changes, including all four combat files.
+Preserve those changes. No commit, installation or runtime mutation planned.
+
+Operator contract: fast continuous sword sweeps; silent sparks while dragging
+stone/walls; direct wall impacts cost extra stamina without attack interruption
+or stun; naturally held geometric shields; fast shield motion toward an incoming
+attack for parry; continuous dodge direction. Native contact/damage, effects,
+cost/reaction and dodge-motor bindings remain prerequisites, not inferred APIs.
+
+Hypothesis: four rotation samples omit between-sample shaft/arc contacts;
+the slot qualifier's endpoint paths omit the blade interior. Reproduce through
+ClassifyWeaponContact and QualifyContact, then build and run the full ladder.
+Expected distinction: analytic in-path targets hit, out-of-path targets miss,
+repeat visits retain their existing per-target gate. Rollback: task-owned
+edits only; retain existing refusal guards and unrelated unfinished work.
+
+Discovery: no source-graph/harness tools are advertised in this chat; direct
+source fallback used. GhidraMCP DSRFull GUI PID 13564 connected. Function/xref/
+program groups load and check_tools reports callable, but their methods remain
+absent from the chat tool interface (typeof get_functions is undefined).
+No native analysis or outcome claim follows from tool-group readiness.
+
+Result (source): reproduced all three targeted regressions before the fix.
+SweepBladeContact now shares conservative whole-segment advancement across
+BladeSweptOverlapsSphereArc and BladeSweptOverlapsHitSlot. Grip/length interpolate
+linearly; direction follows the shortest arc. Bound = grip travel + absolute
+length change + max(length)*angle. Tolerance 1e-4 caller units; budget 256.
+Near-half-turns and exhausted work return Unresolved, not certified Clear;
+boolean diagnostic adapters accept only Hit. No invented intermediate plane.
+Eight analytic-path partitions cover translation, rotation, length change,
+thin targets, out-of-plane misses and identical-query determinism. Actual
+ClassifyWeaponContact and QualifyContact regressions preserve rehit refusal
+and sphere/capsule slot attribution. An old test incorrectly rejected overlap
+with the previous blade pose during translation; corrected that expectation.
+
+AnalogDodgeRequest exercises InputPollFrame -> InputLatestPad at five angles
+on B tap/release. Initial fixture incorrectly expected immediate B delivery;
+the existing theater chord intentionally defers a lone tap until release.
+Updated fixture to honor that policy (no input implementation changed).
+Both analog axes retain their angle. This does NOT implement or qualify native
+360-degree rolling. The post-XInput roll-direction/root-motion owner is unknown.
+
+Verification (all commands from repo root):
+- cmake --build build --config Debug --target test_combat_math
+  test_combat_contact test_combat_atkparam --parallel: exit 0.
+  ctest --test-dir build -C Debug -R
+  "^(combat_math|combat_contact|combat_atkparam)$" --output-on-failure:
+  before fix 0/3 FAIL (tool exit 1), after fix 3/3 PASS, exit 0.
+- cmake --build build --config Debug --target test_input --parallel: exit 0;
+  focused combat+input CTest after corrected fixture: 4/4 PASS, exit 0.
+- cmake --build build --config Debug --parallel: exit 0. Initial full Debug
+  CTest 112/113 (tool exit 1): trace_sink_failure_cleanup failed at its expected
+  external-writer header failure, line 57. Immediate isolated rerun 1/1 PASS,
+  exit 0; no trace code/test change or assertion suppression. Full repeat
+  ctest --test-dir build -C Debug --parallel --output-on-failure: 113/113 PASS,
+  exit 0, retained build/combat-sweep-debug-ctest.txt. Header-race flake remains
+  unexplained; do not erase it from this receipt.
+- cmake --build build --config Release --parallel: exit 0; full Release CTest
+  113/113 PASS, exit 0, build/combat-sweep-release-ctest.txt.
+- pwsh -File tools/auto_verify.ps1 -SkipDoctor -SkipPackage: exit 0, Release
+  build + 113/113 PASS, build/combat-sweep-auto-verify.txt. Doctor, dist refresh,
+  protected preflight, installation and native/headset runs NOT performed.
+  No shared-header struct layout change; no forced full-Rebuild trigger.
+Release build core SHA-256:
+778dd5ee60349d6cf16f8e268f969bb5575be9bed2304e1154600a00a421bab1.
+
+README/ENGINEERING/runbook and existing C/E/G lanes now carry the operator's
+continuous blade, silent stone/wall sparks, extra direct-impact stamina without
+wall stun, natural shield surface, toward-attack motion parry and full-angle
+dodge requirements. No checkbox closed. Replaced plan section 5 next task in
+place: regain callable native analysis methods, then recover the first unknown
+contact-to-outcome consumer, skipping the already documented kind selector.
+
+Gate: source regression PASS; native B/C/E/G BLOCKED/UNVERIFIED. Production
+physical_damage_bound and shield_contact_bound remain false. These classifiers
+are diagnostic/contact qualification only; no new native hit, block, parry,
+effect/audio/cost/reaction or roll-motor binding was added. Existing current-
+candidate body/attachment qualification is also still open. No install, launch,
+input injection, game-memory write, primary-DB mutation, backup-vault access,
+commit or push. No running command/process remains from this task.
+
+Next exact action: expose GhidraMCP function/xref/program methods at bridge
+startup and refresh the calling chat's tool catalog. Use the existing melee
+contract to choose the first unresolved outcome edge; if computed/runtime-only,
+name its precise protected-capture discriminator rather than repeat mapped
+builders. Then recover the native seam before enabling physical outcomes.
+
+### Exact-candidate F2/C2 qualification blocked; B static trace next (29 Oct)
+
+Followed section 5: read-only inventory at 01:54:56Z finds installed core
+B493BDCE… and Setup 52141547…, while dist verification from 01:52:58Z names
+core 9CE2A7EF… and the same Setup hash. Installed package is stale, so the
+corrected core has no native evidence. Game and vrserver absent; Steam PID
+16416; SteamVR runtime registered. Current log/config are the prior session;
+no protected preflight/transaction was run, and old readiness receipts are not
+current permission to deploy. Agent performed no install, launch, input or
+memory write, and did not inspect/touch the backup vault.
+
+No headset rendering evidence available; do not claim F2 closure. Next task
+replaced in section 5 with a bounded read-only B trace at the known kind-
+assignment continuation 1405290C0 -> 140529670, avoiding already mapped
+builders/generic resolvers. Need stop if the continuation requires kind-2 live
+elicitation or unresolved indirect targets. Lane F and completion ledger keep
+the exact-candidate F2 task blocked and gates open.
+
+### F2/C2 reader interleaving reproduced and fixed (29 Oct)
+
+Root cause demonstrated at the actual adapter seam: input/bench readers read
+tracking before g_hands_mutex; a natural copy commits newer hands before the
+lock, and PublishedHandsCurrent treats the older local sample as invalid and
+permanently clears the new verified receipt. Added deterministic natural-copy
+interleavings for both readers plus actual positive-sequence rollback refusal.
+Refresh only an older nonzero snapshot once under the existing hand mutex;
+camera identity, epoch, calibration, freshness and provisional-copy guards
+remain unchanged. Does not prove this explains every retained native symptom.
+
+Red: cmake --build build --config Debug --target test_arm_pose_native --parallel
+then ctest --test-dir build -C Debug -R "^arm_pose_native$" --output-on-failure:
+build PASS; CTest 0/1, exit 8 at accepted && after.verified (job-96).
+Green: same commands after fix: build PASS; CTest 1/1, exit 0 (job-97).
+Full ladder job-98 exit 0: cmake --build build --config Debug --parallel;
+ctest --test-dir build -C Debug --parallel --output-on-failure = 113/113
+PASS; same build/test for Release = 113/113 PASS. pwsh -File
+tools/auto_verify.ps1 = Release build PASS, CTest 113/113 PASS, doctor PASS
+(1 PASS + 4 OK + 4 INFO, no FAIL), dist\DSVR-latest-x64.zip 1,584,277 bytes.
+Manifest built_utc 2026-10-29T01:52:58Z; packaged core SHA-256
+9ce2a7ef6f95abaf86e59e13b2a97def70e0d4c1e6a8fdbea2ad880f9cf27ed1.
+No shared-header struct change; no full-Rebuild requirement triggered.
+No shared-header layout change, install/deploy, launch, input injection or
+live game-memory write. Native final skinning/attachments/alignment unverified.
+Replaced section 5's current next task with exact-package native publication
+and rendered-attachment qualification; A/F remain open.
+
+### CamGate retained evidence probe complete; publication read is next (29 Oct)
+
+Task: inspect latest installed logs and pin current identity before another
+native session. Retained log SHA-256 F91E129C…2458C06, latest header 28 Oct
+20:20:52, demonstrates applied camera at 20:21:17.360, distinct verified CPU
+copy at 20:21:17.443 and verified=2100/refused=0 at 20:21:55.277. Input still
+reports no-committed-hands after the first verified copy. Exact observations,
+line numbers, full hashes and candidate limits: docs/ARM_IK_EVIDENCE.md.
+
+Read-only Get-FileHash/process/runtime inventory: installed core B493BDCE,
+loader F9ADFF97 and Setup 52141547 match dist; game/vrserver absent, Steam
+PID 16416, SteamVR registered. Log predates current core/Setup and config;
+no current-candidate native or final-render acceptance inferred. No protected
+preflight/doctor, build, CTest, verifier, deployment, launch, injected input,
+game-memory writes or backup-vault access. Previous test counts not rerun.
+
+Evidence probe complete; A/F gates remain open. Replaced section 5's old next
+block in place with one successor: reproduce verified-copy / hand-getter
+invalidation ordering in arm_pose_native, preserving sequence/freshness and
+lifecycle refusals. Lane A/F and completion ledger synchronized. Do not repeat
+CamGate instrumentation or ask for another blind camera session.
+
+### Immersion-first execution order; true stereo last (29 Oct, planning only)
+
+Operator direction: determine the next best step and plan the full conversion
+in MODDING_PLAN.md with true stereo last. Section 5 now starts with retained
+CamGate/refusal evidence, current candidate identity and one protected natural
+observation if needed, then F2/C2 publication. Source corroboration:
+camhook.cpp ReportCamGate names pre-apply predicates; arm_ik.cpp gates committed
+poses on XrAppliedCameraSequence()==targets.sequence. Exact runtime predicate
+is still UNVERIFIED; no speculative source fix made.
+
+Order: A/F2/C2, B/C with H essentials, E/remaining F, G/remaining H, I/J
+non-stereo cases, D1-D7 as last feature, stereo integration rechecks and K.
+Lane A next, lane D priority hold and lane G entry now match; no checkbox or
+acceptance gate closed. Documentation validation: all 11 lane counts match
+their checkboxes (69 open, 0 closed); task-path git diff --check PASS.
+project(check, MODDING_PLAN.md) initially invoked ctest --test-dir build
+without -C: exit 8, 0 executed, 113 Not Run (configuration selection error).
+Corrected test-only commands: ctest --test-dir build -C Debug --parallel
+--output-on-failure = 113/113 PASS, exit 0; same with -C Release = 113/113
+PASS, exit 0. Existing binaries only: no fresh build/candidate qualification.
+No build, verifier, doctor, deployment, launch, input or game-memory write run.
+Next probe: inspect the latest candidate-matched CamGate and Camera refusal
+interval; correlate applied-camera/hand epochs and verified-copy counters.
+If unavailable, resolve current protected preflight before operator capture.
+
+### MODDING_PLAN.md is now the cockpit orchestration plan (29 Oct, uncommitted)
+
+Operator direction: "Overhaul cockpit and take modding plan and use that as
+the orchestration/cockpit plan." Done:
+
+- `MODDING_PLAN.md` rewritten (65→372 lines): the former `.empryo/cockpit/PLAN.md`
+  protocol (authority, working loop, task record, native protocol, milestone
+  order + 29 Oct steering, ladder, 26 Oct work package, completion ledger,
+  starting prompt) merged with the research index (evidence owners, DSRFull
+  static workspace + ghidra-mcp playbook, soulsmodding reference, retained
+  leads). Section 9 adds the locomotion/interaction contract owners.
+- `.empryo/cockpit/PLAN.md` deleted; AGENTS.md forbids recreating it.
+- Cockpit morph: `PLAN` var default and plan-changed trigger now point at
+  `MODDING_PLAN.md`; instructions updated. Morph JSON re-validated after the
+  edits (valid).
+- All 11 lane footers and the live references in AGENTS.md, README.md,
+  docs/ENGINEERING.md, docs/TESTING.md, docs/VERIFICATION_RUNBOOK.md,
+  docs/history/README.md and the three native contract notes repointed to
+  MODDING_PLAN.md. Earlier MODLOG entries keep the old path as evidence.
+- No code changed; the ladder results above (29 Oct, 113/113 both configs)
+  still stand. Next probe unchanged: the lane A CamGate headset session.
+
+### The cockpit is now the sole plan; superpowers tree retired (29 Oct, uncommitted)
+
+Operator direction: "Revise the cockpit and sole plan via cockpit, superpowers
+is dropped and deleted after converting." Done:
+
+- `.empryo/cockpit/PLAN.md` created: shared protocol (authority, working loop,
+  task record, native investigation protocol, milestone order + consolidated
+  29 Oct steering, verification ladder, 26 Oct work-package status, completion
+  ledger, starting prompt). The lane files under `.empryo/cockpit/lanes/` now
+  carry their own gate checkboxes (A1-A5 … K1-K6 plus D1a-D2b = 69 gates) and
+  are the source of truth; each lane footer says so.
+- `docs/superpowers/plans/2026-10-21-native-conversion-execution.md` moved to
+  `docs/history/2026-10-21-native-conversion-execution.md.txt`; the empty
+  `docs/superpowers/` tree deleted. Live references updated in AGENTS.md,
+  README.md, MODDING_PLAN.md, docs/ENGINEERING.md, docs/TESTING.md,
+  docs/VERIFICATION_RUNBOOK.md, docs/history/README.md and the three native
+  contract notes. History files and old MODLOG entries keep their old paths as
+  evidence. Do not recreate a superpowers plan.
+- Cockpit morph (`.empryo/morphs/dsvr-cockpit.json`): `PLAN` var now defaults
+  to `.empryo/cockpit/PLAN.md`, the plan-changed trigger watches that file,
+  and the instructions state the cockpit is the plan.
+- Stale package test fixed: `test_attribution_ships_and_names_the_texture_mod`
+  expected ATTRIBUTION.md to name "DSR 2020 Textures" + the nexus link, which
+  contradicts the 29 Oct operator decision recorded above. Renamed to
+  `test_attribution_ships_and_keeps_textures_out_of_scope`; it now asserts the
+  out-of-scope sentence ships and that no texture mod or nexusmods.com link is
+  named. `ctest -R "^package$"` PASS.
+- Ladder re-run this session: Debug build PASS, Debug ctest 113/113, Release
+  build PASS, Release ctest 113/113, `auto_verify` PASS (Release 113/113,
+  doctor PASS, `dist\DSVR-latest-x64.zip` 1,573,383 bytes + verification
+  json). Next probe unchanged: the lane A CamGate headset session.
+
+### Body hiding is a setting; Setup now exposes it (29 Oct, uncommitted)
+
+Operator report: the player body is invisible, the right stick sends no input,
+the left hand "does not calibrate the same", and it is unclear whether the
+texture replacement is installed.
+
+- Invisible body is a **setting**, not a bug: the installed `DSVR.toml` holds
+  `hide_head = true`, `hide_torso_and_legs = true`, `hide_second_model = true`
+  (`hide_player_model = false`). Those three fields were only reachable from the
+  in-game menu. `src/setup/gui.cpp` now has one `My own body` combo (`CTL_BODY`)
+  over all three: show all / hide head / hide head+torso+legs / hide whole model.
+  `ReadControls` writes exactly the combination the label names, and
+  `PopulateControls` selects the index that describes the file, so the panel can
+  never show "show all of it" while the file hides the head.
+  `tests/test_setup_theme.cpp` round-trips all four indices both ways.
+- Right stick silence is **by design**, not a fault: `MapVrPad`
+  (`src/core/pad_math.h`) deliberately leaves `thumb_rx/thumb_ry` at zero because
+  `turn_math` owns VR turning; `kPadRightThumb` (the click) does pass through,
+  which matches "every other button worked". No code change; the next probe is
+  whether the operator wants a camera-control route for it, which would need a
+  new config field and a decision about who owns turning.
+- Left/right asymmetry is not visible in the retained log: the 20:20:58 session
+  shows both hands tracked valid (`Input: left hand tracking valid … right hand
+  tracking valid`) and one shared fit (`CalibrationFit: 0.82954 native units/m …
+  shoulders 0.341 native`). The same session also shows
+  `InputBridges … attack=no-committed-hands defence=no-committed-hands hands=0
+  hands_epoch=0`, i.e. the IK body never received the hands at all — so an
+  apparent "left arm fits badly" reading is more likely the camera-apply gate
+  still closed (lane A) than a per-side calibration error. Next probe: one
+  session with `hands_epoch != 0`, then compare per-side
+  `native_reach / physical_reach` before touching any per-side gain.
+- Texture replacement is **out of scope** by operator decision (29 Oct): "ignore
+  any texture replacement stuff, a separate mod will handle it". `docs/ATTRIBUTION.md`
+  no longer recommends or names any texture mod and states that DSVR writes no
+  `.tpf`/`.tpfl`/`.dds`/`.bhdtr` file. It also dropped the sentence claiming DSVR
+  "records which texture replacements are present at startup" — no such code ever
+  existed. Do not re-add texture guidance to this repo.
+- Focus: the game now asks for foreground once when its window is found
+  (`src/core/mod_menu.cpp` `Initialize`, with the `AttachThreadInput` pair around
+  `SetForegroundWindow`) and logs `Focus: startup foreground request raised=…`;
+  `DSVR-Setup.exe` grants the right with `AllowSetForegroundWindow(pid)` after
+  `CreateProcessW`. Background input was already live — `MergeXInputState` merges
+  regardless of foreground and only logs the state — so an unfocused game still
+  gets motion input; this fixes the case where the game never had focus to begin
+  with.
+
+Verification for this change: `cmake --build build --config Debug --parallel`
+then `ctest --test-dir build -C Debug --parallel --output-on-failure` = 113/113
+PASS; same pair for Release = 113/113 PASS (`mod_menu_render` passed 1.20 s, the
+27 Oct Release-only SEGFAULT did not reproduce). `pwsh -File tools/auto_verify.ps1`
+= Release 113/113 PASS + doctor PASS. Deployed to the game root:
+`DSVR.dll` / `dinput8.dll` / `DSVR-Setup.exe`, core SHA-256 prefix `B493BDCE`,
+previous core kept as `DSVR.dll.<stamp>.bak`.
+
+Next probe: one headset session on `B493BDCE` and read the new
+`Focus: startup foreground request raised=…` line plus
+`InputBridges … hands_epoch=` — if `hands_epoch` stays 0 while both hands report
+valid tracking, the left/right question is the camera-apply gate, not calibration.
+
+### Black desktop + black headset: the game's resize never applied (28 Oct, uncommitted)
+
+Report: the game opens to a black window, stays black on the desktop and in the
+headset, and SteamVR shows the session as paused. Log comparison of the two
+failing 28 Oct sessions (19:45, 19:47) against the last good 27 Oct session:
+
+- Failing: `Render: ResizeBuffers 1920x1080` is followed by
+  `Render: swapchain 3440x1440` — the re-describe after the resize reports the
+  OLD size. Good sessions report `swapchain 1920x1080`.
+- Failing: the depth probe's main colour pair stays 3440x1440 and the staging
+  texture is never re-created at the game's render size, so our mono copy samples
+  a backbuffer the game never drew into.
+- Failing: the game never leaves the title screen — `theater=1 gameplay=0`
+  forever, `sanctuary open (state=2 gen=1)` never closes, no `CameraTrace` lines
+  (the follow-camera detour never ran), no calibration samples. The XR session
+  state flapped 4->5->4, which is SteamVR restarting it — that is the "pauses in
+  SteamVR" symptom, not its cause.
+- Config drift versus the working 27 Oct run: `play_style = seated`,
+  `render_scale = 100`, `frame_limit_fps = 72`, and the new
+  `XR: auto frame cap 72 -> 90 FPS` line appears only in the failing sessions.
+
+One cause explains both black screens: the game asked for 1920x1080 and the
+swapchain kept 3440x1440, so the game's own drawing went somewhere the window
+never shows, and our headset copy reads the same stale buffer. Code review found
+no retained backbuffer reference on our side (`depth_probe.cpp` has no `AddRef`;
+the Present detour releases `GetBuffer` immediately; `RenderHost` stores integer
+identities only), so `DXGI_ERROR_STILL_DRAWING` caused by our host is not
+supported by the source.
+
+Probe added at the real seam: `src/core/render.cpp:313-333` `ResizeDetour` now
+logs the original call's HRESULT and the post-call re-described size
+(`ResizeBuffers result=0x… afterwards=WxH buffers=N`). Next launch decides
+between "the game's ResizeBuffers failed" (and which HRESULT) and "the resize
+succeeded but our copy used a stale size".
+
+Follow-up 20:14 run: the operator's machine had no free RAM/GPU for the game, so
+that session is not evidence about the resize. It shows `game_fps=0.2` with one
+Present every ~6.1 s (`native frame boundary … avg=6037ms`) and
+`XR: xrCreateInstance failed: result=-2` (runtime unavailable) on every retry —
+`vrserver` only started at 20:17:15, after the run. The game never called
+`ResizeBuffers`, so the new probe line never fired there. The probe build
+(`763ED712…`, 3,166,720 bytes) is now installed in the game folder; the previous
+file is retained as `DSVR.dll.193952.bak`. The 20:11 stale re-describe remains
+open and needs one resource-free session to resolve.
+
+Verification for this change: `cmake --build build --config Debug --parallel`
+then `ctest --test-dir build -C Debug --parallel --output-on-failure` = 113/113
+PASS; `cmake --build build --config Release --parallel` then
+`ctest --test-dir build -C Release --parallel --output-on-failure` = 113/113
+PASS. No headset run yet, so the black screen itself is UNVERIFIED.
+
+### One supported-build table shared by the gate, Setup and doctor (28 Oct, uncommitted)
+
+Portability review: the pinned identity lived as four loose constants, so the
+loader gate, `DSVR-Setup --doctor` and the install path each re-derived "is this
+the right exe" differently, and a refusal never told the player which build they
+actually had. `src/common/version.h` now carries `SupportedBuild` rows
+(size + PE timestamp + image size + sha256 + player-facing label) plus
+`FindSupportedBuild`, which matches all four facts as one tuple or returns -1.
+A Steam patch moves the hash, timestamp and image size together, so a partial
+match is exactly what turns a clean refusal into a memory-safety bug; adding a
+row is a re-qualification task, not a relaxation. `src/core/gate.cpp` logs the
+detected identity and the supported list on refusal, `src/setup/setup.cpp`
+`VerifyExe` reports the same list, and the `PASS: pinned build supported (...)`
+line that `tools/verify_preflight.ps1` greps is preserved. New
+`tests/test_supported_builds.cpp` (CTest `supported_builds`) pins the row shape,
+the legacy-constant agreement and every single-fact drift.
+
+Verification: full Rebuild Debug then Debug CTest 113/113; full Rebuild Release
+then Release CTest 113/113 (the shared-header change required the forced
+Rebuild before the doctor was trustworthy); `DSVR-Setup --doctor` PASS against
+App 1.03.1 / build 10943698; `tools/auto_verify.ps1` Release 113/113, doctor
+PASS, `dist\DSVR-latest-x64.zip` 1,569,833 bytes. Installed from
+`dist\DSVR-latest` with the game closed; `tools/verify_preflight.ps1` now
+reports both DLLs matching the packaged build, OK=10 WARN=6 BLOCKED=0,
+"HEADSET RUN: READY TO START THE RUNBOOK". Next probe: a headset session on
+this build (A lane) — the two WARN lines about `frame_limit_fps=72` and live arm
+IK still need an explicit route decision before that run.
+
+### Orphan epochs, pad timing metadata and empty epochs (28 Oct, uncommitted)
+
+Iteration 8 review flagged two gaps; both were reproduced at the real seam first.
+An index whose segments name an epoch with no `epoch_start`/`epoch_end` was
+reported complete, and a pad-clear transition lost XR timing metadata. The
+analyzer now requires every segment epoch to have both lifecycle bounds and to
+lie inside them (`tools/vr_trace.py:1158-1166`); `PublishPad` and
+`RecordPadTelemetry` carry the frame's `predicted_ns`/`space_epoch`, so a
+control-capture clear and `InvalidateInputFrame` still emit XR-timestamped
+pad/hand records (`src/core/input.cpp:508-591`, `src/core/input.cpp:906-946`).
+Regressions: three orphan-epoch boundary variants, segment-outside-epoch,
+duplicate epoch end, and the pad/hand XR-metadata assertions in `test_input`.
+
+Iteration 9 review returned no verdict (PARTIAL), so the review was re-derived
+from the current code instead of patching reviewer text. The remaining hole was
+an epoch that opens and closes with zero captured segments: the session stayed
+`complete=true` because only the whole-session segment count was checked. The
+analyzer now adds `session epoch N has no captured segments`
+(`tools/vr_trace.py:1243-1246`), and `tests/test_autonomous_session_report.py`
+raises an empty epoch 3 and requires exit 2 with that error.
+
+Commands/results:
+- `python tests/test_autonomous_session_report.py tools/vr_trace.py` — expected
+  red (empty epoch reported complete) before the gate, then PASS.
+- `ctest --test-dir build -C Debug -R "autonomous_session_report|vr_trace|trace_sink" --output-on-failure` — PASS, 7/7.
+- `cmake --build build --config Debug --parallel && ctest --test-dir build -C Debug --parallel --output-on-failure` — PASS, Debug 112/112.
+- `cmake --build build --config Release --parallel && ctest --test-dir build -C Release --parallel --output-on-failure` — PASS, Release 112/112.
+- `pwsh -NoProfile -File tools/auto_verify.ps1` — PASS, Release 112/112; Doctor PASS (pinned App 1.03.1/build 10943698); package refresh PASS (`dist\DSVR-latest-x64.zip`, 1,566,721 bytes).
+
+No game launched; native acceptance remains open. Next probe: a headset session
+whose index exercises the producer's own epoch/segment lifecycle, since every
+analyzer gate so far was fed by a synthetic index.
+
+### Epoch-scoped continuity, contention and lifecycle validation (28 Oct, uncommitted)
+
+Iteration 7 reproduced three reviewer failures: a menu interval between player epochs appeared as a 999900-QPC gameplay gap; `loss` omitted contention; and an array-valued epoch crashed with `TypeError`. The producer now resets the prior-segment baseline when an epoch closes. The analyzer compares handoffs only within the same epoch, ignores a stale first-segment cross-epoch `gap_qpc`, and preserves same-epoch gap detection. Session loss reports dropped and contended counts, conservatively reconciles index/footer health, retains known index health for an unclosed segment, and refuses degraded epochs or index I/O errors. Lifecycle fields are validated before indexing, arithmetic or path use; a 296-mutation JSON field probe produced zero exceptions.
+
+Commands/results:
+- `python tests/test_autonomous_session_report.py tools/vr_trace.py && python tests/test_vr_trace.py` — PASS.
+- `cmake --build build --config Debug --target test_diagnostics_mode --parallel && ctest --test-dir build -C Debug -R ^diagnostics_autonomous_session$ --output-on-failure` — expected red 0/1 before the epoch reset, then PASS 1/1.
+- `ctest --test-dir build -C Debug -R "diagnostics_autonomous_session|autonomous_session_report|vr_trace" --output-on-failure` — PASS, 5/5 after rebuilding the target.
+- `cmake --build build --config Debug --parallel && ctest --test-dir build -C Debug --parallel --output-on-failure` — PASS, Debug 112/112.
+- `cmake --build build --config Release --parallel && ctest --test-dir build -C Release --parallel --output-on-failure` — PASS, Release 112/112.
+- `cmake --build build/combat-lab --config Release --parallel && ctest --test-dir build/combat-lab -C Release --parallel --output-on-failure` — PASS, LAB Release 110/110 (`DSVR_ENABLE_LAB=ON`).
+- `pwsh -NoProfile -File tools/auto_verify.ps1` — PASS, Release 112/112; Doctor PASS (pinned App 1.03.1/build 10943698); package refresh PASS (`dist\\DSVR-latest-x64.zip`, 1,565,917 bytes).
+
+No game launched; native acceptance remains open. Next: independent review of the session lifecycle and health boundary against the approved capture spec.
+
+### Lifecycle records scoped to the session identity (28 Oct, uncommitted)
+
+Iteration 6 reviewer finding reproduced: with a valid local session/segment start but foreign `segment_end` and `epoch_end` carrying the same numeric IDs, `analyze_session_index` returned `complete=true` and used the foreign UTC end bounds. The analyzer now builds a session-scoped lifecycle stream, requires a nonempty `session_start.session_id`, rejects missing/foreign IDs on lifecycle records, and derives segment/epoch/session closures, stop reasons and UTC bounds only from matching records. `BeginAutonomousSegment` now tags `segment_failure` with the owning session ID too. Regression pins foreign ends cannot close or timestamp the local session.
+
+Commands/results:
+- `python tests/test_vr_trace.py` — PASS.
+- `ctest --test-dir build -C Debug -R "vr_trace|autonomous_session_report" --output-on-failure` — PASS, 4/4.
+- `cmake --build build --config Debug --parallel && ctest --test-dir build -C Debug --parallel --output-on-failure` — PASS, Debug 112/112.
+- `cmake --build build --config Release --parallel && ctest --test-dir build -C Release --parallel --output-on-failure` — PASS, Release 112/112.
+- `pwsh -NoProfile -File tools/auto_verify.ps1` — PASS, Release 112/112; Doctor PASS (pinned App 1.03.1/build 10943698); package refresh PASS (`dist\\DSVR-latest-x64.zip`, 1,565,167 bytes).
+
+No game launched; native acceptance remains open.
+
+### Non-object indexes and empty sessions rejected (28 Oct, uncommitted)
+
+Iteration 5 review caught two remaining analyzer boundary gaps. Reproduced both before editing: a valid session/closed epoch/session_end with no `segment_start` returned `complete=true`; `null` raised `AttributeError` at `r.get`. The index parser now reports and skips non-object JSON records, `_is_session_index` guards its first parsed value, and zero matching segment starts adds an error. Regressions cover null, arrays, booleans, strings, numbers, no-segment analysis and CLI exit 2.
+
+Commands/results:
+- `python tests/test_vr_trace.py` — PASS.
+- `ctest --test-dir build -C Debug -R vr_trace --output-on-failure` — PASS, 3/3.
+- `cmake --build build --config Debug --parallel && ctest --test-dir build -C Debug --parallel --output-on-failure` — PASS, Debug 112/112.
+- `cmake --build build --config Release --parallel && ctest --test-dir build -C Release --parallel --output-on-failure` — PASS, Release 112/112.
+- `pwsh -NoProfile -File tools/auto_verify.ps1` — PASS, Release 112/112; Doctor PASS (pinned App 1.03.1/build 10943698); package refresh PASS (`dist\\DSVR-latest-x64.zip`, 1,564,754 bytes).
+
+No game launched; native acceptance remains open.
+
+### Session completeness, UTC bounds, and input-free startup (28 Oct, uncommitted)
+
+Closed the three reviewer gaps offline:
+- `analyze_session_index` now treats any `capture_stopped` record and any non-`player_unload` epoch-end reason as incomplete, returns `stop_reasons`, and keeps ordinary player unload complete. New tests cover low-disk and operator stops.
+- Session index writes UTC end timestamps for segments, epochs and sessions (and UTC start for segments); the combined analyzer reports QPC/UTC bounds. `test_diagnostics_mode` asserts each lifecycle record carries its bound.
+- Removed XR input from the startup refusal message; `core_start_session_no_input` proves LAB normal-VR capture still installs the session observer while the XInput bridge remains off.
+
+Verification: full Debug CTest 112/112 PASS; full Release CTest 112/112 PASS after Release Rebuild; `pwsh -NoProfile -File tools/auto_verify.ps1` Release 112/112, Doctor PASS (pinned App 1.03.1/build 10943698), package refresh PASS (`dist\DSVR-latest-x64.zip`, 1,564,104 bytes). Game not launched; native gates remain unqualified.
+
+### XR input absence is a capability gap, not a startup veto (28 Oct, uncommitted)
+
+Reviewer reproduced an over-restrictive `ConfigAutonomousSessionCaptureAllowed`
+gate. Removed only the `xr_input_enabled` requirement: capture still requires
+opt-in, LAB, normal VR, and neither observer nor combat-trace-only mode. Setup
+already records XR capabilities; a missing input runtime now permits available
+non-XR telemetry as the capture spec requires. `tests/test_config.cpp` changed
+the no-XR-input case from refused to allowed while preserving the other refusal
+assertions. Regression first failed 0/1 at the no-input case, then passed 1/1.
+
+Commands/results:
+- `cmake --build build --config Debug --parallel && ctest --test-dir build -C Debug --parallel --output-on-failure` — PASS, 110/110.
+- `cmake --build build --config Release --parallel && ctest --test-dir build -C Release --parallel --output-on-failure` — PASS, 110/110.
+- `pwsh -NoProfile -File tools/auto_verify.ps1` — PASS, Release 110/110; Doctor PASS (pinned App 1.03.1/build 10943698); package refresh PASS (`dist\DSVR-latest-x64.zip`, 1,563,206 bytes).
+No shared struct change, game launch or native gate closure. Next probe: none offline; headset/native acceptance remains open.
+
+### Per-event-type counts carried through session reports (28 Oct, uncommitted)
+
+Reproduced reviewer finding offline: `analyze_session_index` returned no top-level
+`event_counts`; segment-end records only stored `events`. Added a synthetic session
+assertion that failed with `KeyError: 'event_counts'`, plus C++ checks for trace
+health and serialized segment-end counts. `VrTraceHealth` now carries event-type
+counts for header, each drained record, and footer. `autonomous_capture.cpp`
+serializes them in each `segment_end`; `tools/vr_trace.py` aggregates each parsed
+segment report into the combined `event_counts` and checks it against the indexed
+segment counts when the segment has no I/O error. Legacy indexes without counts
+remain readable. Segment total `events` and loss/acceptance semantics unchanged.
+
+Commands/results:
+- `cmake --build build --config Debug --parallel && ctest --test-dir build -C Debug --parallel --output-on-failure` — PASS, 110/110.
+- `cmake --build build --config Release --target ALL_BUILD -- /t:Rebuild /m` — PASS; `ctest --test-dir build -C Release --parallel --output-on-failure` — PASS, 110/110.
+- `pwsh -NoProfile -File tools/auto_verify.ps1` — PASS, Release 110/110; Doctor PASS after the full rebuild (pinned App 1.03.1/build 10943698); package refresh PASS (`dist\DSVR-latest-x64.zip`, 1,562,827 bytes).
+Next probe: none offline. No game, headset or native outcome claim; no acceptance gate closed.
+
+### Session analyzer reuses each parsed segment (28 Oct, uncommitted)
+
+Final architecture revision: `analyze_session_index` previously called
+`read_capture(seg_file)` and then reopened/reparsed the same segment with
+`read_text` + `json.loads`. Added `check_session_segments_are_loaded_once` to
+`tests/test_vr_trace.py`; the focused test reproduced two reads, then passed
+after factoring one internal segment reader that returns the report and parsed
+records together. Public `read_capture(path, cases_path)` remains report-only.
+One parse now owns decoding, line numbering, JSON validity and event checks;
+session correlation reuses the parsed records. This removes duplicate disk I/O
+and parser work without changing acceptance claims. No game or native trace.
+
+Verification: Debug CTest 110/110 PASS; Release CTest 110/110 PASS;
+`pwsh -NoProfile -File tools/auto_verify.ps1` Release 110/110, Doctor PASS
+(pinned App 1.03.1/build 10943698), package refresh PASS
+(`dist\DSVR-latest-x64.zip`, 1,559,968 bytes). No native gate closed.
+
+### Autonomous session policy localized (28 Oct, uncommitted)
+
+Continued the architecture review's second candidate. Moved autonomous session
+state, disk-reserve checks, epoch/segment transitions, index writes, close reasons
+and restart policy from `diagnostics.cpp` into `autonomous_capture.cpp`. The
+small writer-thread interface is `AutonomousCaptureRequestStop()` before
+`VrTracePump()`, then `AutonomousCapturePump()` after it; shutdown uses the same
+pump with `shutdown=true`. The module now owns its capture state and lifecycle;
+`diagnostics.cpp` retains foreground/config/hotkey orchestration. Existing
+`diagnostics_autonomous_session` integration test crosses that same interface
+and still covers session/epoch identity, rotation, brief unload debounce, drop
+recovery and interrupted shutdown. No game or headset used.
+
+Verification: full Debug build + CTest 110/110 PASS; full Release build + CTest
+110/110 PASS; `pwsh -NoProfile -File tools/auto_verify.ps1` Release 110/110,
+Doctor PASS (pinned App 1.03.1/build 10943698), package refresh PASS
+(`dist\DSVR-latest-x64.zip`, 1,559,590 bytes). No acceptance gate closed.
+
+### Hidden setup-theme regression window (28 Oct, uncommitted)
+
+`tests/test_setup_theme.cpp` no longer calls `ShowWindow`, `UpdateWindow`, or
+runs a message loop. The same control-state/layout/command/keyboard/DPI test
+logic runs with the top-level test window hidden; child `WS_VISIBLE` style bits
+still feed the visibility/layout assertions, and the test asserts the parent is
+not actually visible. Removed the `--preview` branch so neither normal nor
+special invocations expose the setup window. No game or setup executable launch.
+
+Verification after the TraceSink cleanup and setup-test changes: full Debug
+build + CTest 110/110 PASS; full Release build + CTest 110/110 PASS;
+`pwsh -NoProfile -File tools/auto_verify.ps1` Release 110/110, Doctor PASS
+(pinned App 1.03.1/build 10943698), package refresh PASS (`dist\DSVR-latest-x64.zip`,
+1,560,096 bytes). Doctor confirmed game not running; no game launch. Native
+acceptance gates remain unchanged.
+
+### TraceSink cleanup on header/flush failure (28 Oct, uncommitted)
+
+Root cause reproduced offline: `BeginTrace` directly `fclose`d after a failed
+header write/flush without `TraceSink::Close`, retaining its process/ack handles;
+`VrTracePump` also short-circuited `TraceSink::Close` when footer write or
+checkpoint flush failed. A subsequent `BeginTrace` was refused by the stale
+`process_` guard. Added `tests/test_trace_sink_failure.cpp` with a deliberately
+broken external-writer adapter: header failure and a later checkpoint-then-final
+flush failure both recover to a fresh capture through the real `VrTraceBegin`
+path. Initial regression result: 0/1 (recovery refused); after fix 1/1 PASS.
+
+Fix: close the sink on header failure; during normal finalization evaluate flush
+and close separately so close/reset runs regardless of the flush result. Capture
+state remains `IoError` on either failure. No gameplay, hooks, install, save
+files or native evidence involved.
+
+Verification: full Debug build + CTest 110/110 PASS; full Release build + CTest
+110/110 PASS; `pwsh -NoProfile -File tools/auto_verify.ps1` Release 110/110,
+Doctor PASS (pinned 1.03.1/build 10943698), package refresh PASS
+(`dist\\DSVR-latest-x64.zip`, 1,559,566 bytes). The earlier WinError 32 package
+lock did not recur. Next probe: none for this offline seam; native gates remain
+unchanged and require their separately protected evidence.
+
+### Doctor rerun after Release Rebuild (28 Oct, uncommitted)
+
+Required fresh Release objects before trusting Setup doctor after the shared
+header change. Command: `cmake --build build --config Release --target
+ALL_BUILD -- /t:Rebuild /m` — PASS (full rebuild; warnings only).
+Command: `build\src\setup\Release\DSVR-Setup.exe --doctor` — PASS:
+pinned App 1.03.1/build 10943698, game not running, installed DLLs present,
+SteamVR runtime manifest found, firewall block active. No game launch or config
+change. Debug/Release CTest and auto_verify were not rerun for this doctor-only
+request; last observed counts remain 109/109 both configs, and auto_verify's
+package step remains blocked by WinError 32. Next probe: identify/release the
+locked package file; no native game session until separately requested.
+
+### Offline trace-writer polish (28 Oct, uncommitted)
+
+Found a self-test receipt inconsistency: `DSVR-TraceWriter.exe --self-test`
+reported `bytes: 0` while writing three JSONL records. Added a client-path
+integration case to `tests/test_trace_sink.cpp` and an assertion tying the
+self-test receipt byte count to the emitted file size; reproduced FAIL, then
+changed the self-test receipt to calculate bytes from the exact records.
+No game, hooks, save files, install or deployment involved.
+
+Verification: Debug build + ctest 109/109 PASS; Release build + ctest 109/109
+PASS. `pwsh -NoProfile -File tools/auto_verify.ps1` also completed Release
+109/109 and Doctor PASS (pinned 1.03.1 / build 10943698), then FAILED during
+`tools/package.py` refresh with `PermissionError: [WinError 32]` copying a
+locked file; package verification is not green. Next probe: identify the locked
+`dist/DSVR-latest` file or retry after its owning process releases it. No game
+run.
+
+### Setup honesty + immersive-by-default (28 Oct, uncommitted)
+
+Operator request: Setup must never report a change that is never applied, every
+setting must reach `DSVR.toml`, unnecessary keys consolidated, and gameplay must
+be immersive first person by default with theater only manual or during menus.
+
+Audit result (one `code_script` pass over every `Config` field, cross-checked
+against `ConfigLoad`/`ConfigSave` and all consumers): four keys looked dead
+(`desktop_present`, `reach_quiet_max`, `reach_press_ms`, `thrust_enabled`,
+`swing_damage_gain`) and removing them broke the build, which is the proof they
+are live — `render.cpp:300` (Present skip), `input.cpp:667/669/1323` (reach
+intent + thrust gate), `arm_ik.cpp:998` (contact damage gain). No key was
+removed; the apparent dead-key list was a grep-scope artifact, recorded here so
+the next reader does not repeat it.
+
+Real gaps found and fixed:
+- `Config::headlook_enabled` defaulted **false** in the struct, so
+  `ConfigSaveDefaults` wrote a file that could never go immersive
+  (`FactorySafeDefaults` set it true, the plain default did not). Now true.
+- Nothing in Setup or the in-game menu could turn immersive on/off, and the
+  manual theater choice existed only as the live F8 override
+  (`g_sanctuary_override`), never persisted. Added `[vr] gameplay_theater`
+  (default false): parsed, saved, validated, round-trip tested.
+- `xr.cpp:1490` was `g_immersive = cfg.headlook_enabled && !menu`. Now
+  `cfg.headlook_enabled && !cfg.gameplay_theater && !menu`, so gameplay is
+  immersive unless the operator asks for theater; menus, title, loading and
+  cutscenes still force theater by the existing debounce rule
+  (`xr.cpp:1434-1441`) — unchanged, because a lost camera sample must not turn
+  locomotion into item selection.
+- Setup gained one `Gameplay view` combo (`CTL_VIEW`, `gui.cpp:1170-1173`) that
+  owns both fields it can produce: populate shows Theater when
+  `gameplay_theater || !headlook_enabled`, read writes
+  `headlook_enabled = true` plus `gameplay_theater = (sel == 1)`. One control,
+  no combination the core would not apply, and a hand-edited
+  `headlook_enabled = false` now displays as Theater instead of falsely
+  claiming Immersive.
+- In-game menu gained `Keep theater during gameplay` next to the theater
+  sliders (`mod_menu.cpp:662`) and the panel text now states gameplay is
+  immersive by default.
+
+Working loop: Debug build clean + `ctest -C Debug --parallel` 109/109 PASS;
+Release build clean + `ctest -C Release --parallel` 109/109 PASS; focused
+`config|mod_menu_render|setup_theme` PASS in both configs; `pwsh -File
+tools/auto_verify.ps1` Release 109/109 then `DSVR-Setup.exe --doctor` PASS
+(pinned 1.03.1 / build 10943698) after deploying the new bytes — no
+stale-object crash this time. Deployed to the install: `DSVR.dll 10BE09CC`,
+`dinput8.dll 6D5DFC06`, `DSVR-Setup.exe EA93B433`; `DSVR.toml` gained
+`gameplay_theater = false` under `headlook_enabled = true`.
+
+Next probe: one bounded headset session on these bytes. The single expected
+line pair is still `CamGate: …` plus any `Camera: first-person apply refused
+(…)`; with `headlook_enabled = true` now shipped as the default, a session that
+shows theater during play must name a reason in the log rather than being
+inferred from silence.
+
+### run6 recovery complete + Release gate re-verified (28 Oct, uncommitted)
+
+run6 (`build/verification/iteration-5-20261027/run6-receipt.json`, vault
+`build/native-transactions/combat-observer-20261027-131932-ce57888c…`) was stuck
+`RecoveryBlocked` with `recovery_error = Unexpected installed-file change retained:
+…\DSVR.dll`. The base receipt reads `Preparing`; the authoritative state lives in
+the journal (rev 18). Installed bytes were a third, unattributed set — neither the
+recorded originals nor the iteration-5 candidate: dinput8 `708897f6` vs original
+`f4a17138` / expected `c87827c2`; DSVR `6183b3fa` vs `63fc7f6f` / `f0870a4f`;
+DSVR.toml `30575bff` vs `56dbdf7a` / `f4602193`.
+
+Recovery: quarantined the foreign bytes to
+`build/quarantine/run6-foreign-installed-20261028/`, copied the three vault backups
+over the installed files and hash-verified each against the recorded `originalHash`
+(all three matched), then ran `pwsh -File tools/run_combat_capture.ps1 -Mode Restore
+-Receipt build\verification\iteration-5-20261027\run6-receipt.json` with no game and
+no SteamVR live. Result: `Restored and hash-verified original save roots and install
+files`, journal rev 25 `state=Restored`, both roots `moved=False`. Both save roots
+now hold all three profiles again (167771512 / 1843241039 / 880676681) in
+`Documents\NBGI\DARK SOULS REMASTERED` and `%APPDATA%\DarkSoulsRemastered`; the
+disposable session saves were preserved into the vault's `test-root-0`/`test-root-1`
+(`personal-root-*` now absent). One warning stands: `DSVR-trace-20636-356443062-1.jsonl`
+has no closing footer, so it stays incomplete evidence. Receipts were not rewritten;
+the historical `recovery_error` field remains as recorded.
+
+Working loop re-run this session (no source change): Debug build clean +
+`ctest -C Debug --parallel` 109/109 PASS; Release build clean +
+`ctest -C Release --parallel` 109/109 PASS — the 27 Oct Release-only
+`mod_menu_render` SEGFAULT did not reproduce (focused run 0.15 s, full suite 0.22 s,
+auto_verify 0.26 s); `pwsh -File tools/auto_verify.ps1` Release 109/109 then doctor
+PASS (pinned 1.03.1 / build 10943698). The crash is therefore not currently
+reproducible on these bytes; treat it as an open unknown, not a fixed defect.
+
+Next probe: the install now holds pristine originals, so a fresh candidate must be
+sealed and deployed before any protected session; then run the bounded A capture.
+
+### Iteration-6 candidate sealed; protected Check BLOCKED on Steam Offline (28 Oct, uncommitted)
+
+Provenance correction to the entry above: the quarantined installed `dinput8.dll`
+(`708897f6…`) is byte-identical to the loader this tree now builds
+(`build/src/loader/Release/dinput8.dll`), so the "third, unattributed set" was a
+DSVR deploy from a prior session, not a foreign binary. No dinput8 slot collision.
+
+LAB Release qualification for the candidate: `build/combat-lab` cache holds
+`DSVR_ENABLE_LAB=ON`, `DSVR_BUILD_RESHADE_ADDON=OFF`; build clean (warnings only),
+`ctest --test-dir build/combat-lab -C Release --parallel` 107/107 PASS. Together with
+this session's Debug 109/109 and Release 109/109 that is the full offline gate.
+
+Sealed `build/verification/iteration-6-20261028/candidate.json` (final SHA-256
+`196975032a8de6e72b60ff5e6ddd46e1358260eee95c88ea5b6512626b33c930`, 273 sources,
+4 binaries x2 path spellings; LAB core `9f716f2f…`, loader `708897f6…`, regular core
+`6183b3fa…`, Setup exe recorded). The seal was re-minted after this MODLOG edit
+because `MODLOG.md` is itself a sealed source — every prior run hit the same trap,
+so seal last. Post-write manifest verification: 0 mismatches across 273 sources and
+8 binary entries. Note the regular core hash `6183b3fa…` equals the quarantined
+installed `DSVR.dll`, confirming the prior deploy was this tree's build. No existing
+receipt or vault file was modified.
+
+Read-only `run_combat_capture.ps1 -Mode Check` against that candidate is BLOCKED at
+`tools/run_combat_capture.ps1:1005` — `Steam Offline preference is not set`
+(`WantsOfflineMode "0"` for all users in `Steam\config\loginusers.vdf`, `steam.exe`
+PID 16572 online). The operator must set Steam Offline; an agent must not flip the
+user's Steam client state unasked.
+
+### CamGate: every silent pre-apply return now names itself (28 Oct, uncommitted)
+
+Follow-up to the entry below: the apply-side predicates are named in
+`camera.cpp`, but `camhook.cpp` had five more returns that close the same path
+before the apply is ever reached, and all five were silent. One gate explains
+the whole symptom set, because `XrRecordCameraSequence(0)` on those returns
+holds shut, at once: the IK body (`arm_ik.cpp:429/:795/:1172/:1280` require
+`XrAppliedCameraSequence()==g_targets.sequence`), the physical attack/defence
+bridges, head-directed locomotion, and the immersive screen rect
+(`xr.cpp:1488` `g_immersive = headlook_enabled && !menu`, and the immersive
+branch at `xr.cpp:1497` prefers `camera_frame_at_entry.vfov_rad`).
+
+Added `ReportCamGate` in `src/core/camhook.cpp` (same once-per-change shape as
+`LogBridgeReadiness` in `input.cpp`), logging gate ids: 1 headlook disabled,
+2 XR menu presentation active, 3 no fresh XR tracking frame, 4 native
+model/stature revisions disagree, 5 calibration mapping refused, 6 apply
+refused (camera.cpp names the predicate), 0 applied. Gate 0 also logs once, so
+a session can prove the path opened rather than inferring it from silence.
+
+Debug build clean, `ctest -C Debug` 109/109 PASS. Release build clean,
+`ctest -C Release` 109/109 PASS.
+
+Deployed core `C35C9B88…` (loader unchanged `708897F6…`). Also raised two
+quality levers in the deployed `DSVR.toml` (previous file kept as
+`DSVR.toml.stale-<stamp>`): `render_scale_percent` 100 -> 130 (eye-buffer
+resolution; restart required, swapchains size once at session creation) and
+`mono_screen_fov_deg` 60 -> 100 (theater panel width, live-adjustable in-headset
+with trigger + right stick). The remaining quality ceiling is the game's own
+backbuffer, which that session had at `ResizeBuffers 1920x1080` — raise the
+game's resolution setting too.
+
+Next probe: one bounded headset session, then read the single `CamGate:` line
+plus any `Camera: first-person apply refused (…)` line. That pair names the
+exact predicate. Stereo remains refused until the native eye renderer is bound
+(`docs/NATIVE_STEREO_CONTRACT.md`); no stereo claim is possible from a mono
+diagnostic host.
+
+### Immersive path is gated at the camera apply, and that refusal was silent (28 Oct, uncommitted)
+
+Operator symptom: headset works, mod menu/calibration/theater work, but gameplay is
+a low-quality panel "stuck to my face", with no first-person body and no IK arms.
+Reading the retained 27 Oct 21:29 session explains all three symptoms at once, and
+they are one cause plus one shipped limitation:
+
+- Mono panel: `Render: Present+ResizeBuffers hook installed (mono diagnostic host)`
+  and `XR: mono frames submitted=… (same centered scene image in both eyes; native
+  stereo renderer unbound)`. `stereo_enabled=false` is enforced because no native eye
+  renderer is bound. The panel is `mono_screen_fov_deg=60` inside a 94x99 deg eye
+  frustum, and its source is the game backbuffer, which that session had at
+  `ResizeBuffers 1920x1080` (desktop swapchain 2560x1440). So "low quality" is the
+  1080p mono source on a 60-degree panel, and "stuck to my face" is the 60-degree
+  panel itself. Neither is a regression; both are the render-host-preview state.
+- No body / no IK: `InputBridges: attack=no-committed-hands … hands=0 hands_epoch=0`
+  for the whole gameplay stretch, while hand tracking itself was healthy
+  (`left/right hand tracking valid`) and calibration reached `pose_ready=1 hands=1`.
+  `XRTiming: camera_applied_seq_at_entry=0 camera_tid=0` for every sampled frame, and
+  `Input: no fresh camera locomotion basis (never published)`. `arm_ik.cpp` refuses to
+  commit unless `XrAppliedCameraSequence()==g_targets.sequence`
+  (`src/core/arm_ik.cpp:429`, `:795`, `:1172`, `:1280`), so a camera that never applies
+  closes the IK body, the physical attack/defence bridges and head-directed
+  locomotion together. That single gate explains "no immersive first person and no IK".
+- The refusal itself was invisible: `DSVR.log` contains **zero** `Camera:` lines in any
+  retained session, while `camhook.cpp:162` returns silently when
+  `CameraApplyFirstPerson` fails. So the closed predicate was unnameable from evidence.
+
+Fix (diagnostic, not behavioural): `src/core/camera.cpp` now names the first failing
+predicate once per change, following the existing `LogBridgeReadiness` pattern —
+gate ids 1 calibration mapping invalid, 2 null follow camera, 3 player position
+unreadable, 4 follow-camera matrix unreadable, 5 title camera, 6 native render facing
+unreadable at anchor bind, 7 VR heading seed refused — cleared on the first frame that
+writes. Debug build clean, `ctest -C Debug` 109/109 PASS; Release build clean,
+`ctest -C Release` 109/109 PASS.
+
+Deployed the new core to the game root (`DSVR.dll` `3587F7C6…`, loader unchanged
+`708897F6…`; previous core kept as `DSVR.dll.stale-<stamp>`). Next probe: one bounded
+headset session, then read the single new `Camera: first-person apply refused (…)`
+line. That names which predicate to fix; the immersive/IK gates stay closed until the
+apply succeeds, and no stereo claim is possible until the native eye renderer is bound.
+
+### VR restore: the loader had been reverted to stock, not broken by the retexture (28 Oct, uncommitted)
+
+Root cause of "VR stopped working" is now demonstrated, and it is not the retexture
+pack: the run6 recovery (above) restored the install to the vault's *pristine*
+originals, which means `dinput8.dll` went back to the stock Valve copy
+(`F4A17138…`) and `DSVR.dll` back to a stale core (`63FC7F6F…`). With a stock
+`dinput8.dll` in the game root, nothing loads `DSVR.dll`, so the mod is simply not
+installed — no refusal, no log line, no VR. The last real session in `DSVR.log`
+(27 Oct 21:30) predates that recovery and shows DSVR running normally: OpenXR
+session live at 90 Hz, `RateEvidence game_fps=25.2 effective=90`,
+`VRSubmissionHealth submitted=1 pose_published=1`, ending with
+`XR: session state -> 4` (normal session exit). So the retexture pack did not stop
+DSVR from loading or rendering.
+
+Deployed the sealed candidate's own bytes into the game root (a normal mod deploy,
+not a protected transaction — no launch, no input, no game-memory write):
+`dinput8.dll` -> `708897F6…` and `DSVR.dll` -> `6183B3FA…`, matching the candidate
+manifest exactly. The stock loader copy was preserved at
+`dinput8.dll.stock-original` and the previous core at `DSVR.dll.stale-<stamp>`.
+`DSVR.toml` (`56DBDF7A…`) and the calibration sidecar were left untouched.
+
+Second, separate fact that must not be confused with a regression: the installed
+`DSVR.toml` carries `stereo_enabled = false` with
+`Experimental: no native eye renderer bound yet; stereo logs a refusal and stays
+mono`, and the 27 Oct session logged `VRPerformance: mode=mono … eyes=2 copies=1`.
+Headset-tracked mono is the shipped state of `0.16.0-render-host-preview`; true
+stereo is an open gate under `docs/NATIVE_STEREO_CONTRACT.md`, not something that
+"broke". Restoring VR therefore means mono headset mode, and any claim of restored
+immersive stereo would be false.
+
+Next probe: the operator launches the game in the headset and confirms the loader
+attaches (a fresh `DSVR.log` with `RateEvidence`/`VRSubmissionHealth` lines). If the
+log appears and mono tracking works, the only remaining VR question is the native
+stereo owner, which is a Ghidra gate, not an install gate.
+
+Operator-reported environment change worth pinning before any capture: a 2020 DSR
+retexture (upscaled texture) pack is installed. Game-root inventory shows no
+ModEngine/CMOE/SoulMask loader artifact and no `.ini`, so nothing is competing for
+the `dinput8.dll` slot; the stock `texs/` folder is absent and `chr`/`obj` carry
+27 Oct 16:54 write times, consistent with direct file replacement. The pinned
+executable hash still matches (`a45aaa36…98d7b`), so the runner's identity gate is
+unaffected. Consequence: any native observation from this install is evidence from a
+retextured game and must be labelled as such, and a texture-replacement regression is
+a plausible cause for the reported loss of immersive VR mode that DSVR's own logs
+would not show. Next probe if VR remains broken: compare a stock-texture install
+(Steam file verification into a separate copy, not this install) against this one
+with the same candidate, and read `DSVR.log` for loader/staging refusals.
+
+### Iteration 7 — re-derived test path, readiness still BLOCKED (27 Oct, uncommitted)
+
+Re-derived current release path instead of patching test files or adding a fake `tests/build` directory. `project(action:test,file=tests/test_setup_theme.cpp)` fails before test discovery because the tool sets CWD to `tests` but passes `--test-dir build`, resolving to nonexistent `tests/build` (exit 1). Supported root command `cmake --build build --config Debug --parallel && ctest --test-dir build -C Debug --parallel --output-on-failure` ran the actual suite: 109/109 PASS. Lane verified the supplied Release/auto_verify receipts: Release 109/109, doctor/package PASS.
+
+Readiness did not change: no production caller for `XrBeginNativeStereoFrame`/`XrEndNativeStereoFrame`; `SubmitHostMono` still refuses stereo and submits mono. Native combat/interactions, exact-candidate 90/90, and public-package gates remain open. Latest preflight still reports stale installed DLLs and SteamVR active; no install or launch performed. Next exact action remains recover a natural per-view producer and prove single-simulation/resource lifetimes before wiring an eye renderer; then resolve native gameplay bindings and qualify the exact candidate under VDXR. No fake test directory, renderer replay, or gate closure.
+
+### H1/H2 resume 27 Oct cont.137 — footer-valid trace adds raw callbacks, H1/H2 still BLOCKED (uncommitted)
+
+Read-only `tools/vr_trace.py` parse of `build/verification/iteration-5-20261027/DSVR-trace-51904-348727796-1.jsonl`: `valid: true`, no errors, capture-integrity PASS; `complete: false`, combat-case coverage NONE (no declared window overlaps this capture). Three `native_interaction_activation` events, each flags `0xF`: row indices 1/27/0, raw PARAM ranges 70/60/70, raw return limbs 1/1/1. The trace has no dummy coordinates or LOS observations and does not establish target generation, prompt visibility, or activation semantics. H evidence and contract updated; receipts untouched; no code/build/test changes. H1/H2 remain BLOCKED; next is case-aligned row/dummy/LOS+generation capture and per-class range semantics.
+
+### H1/H2 resume 27 Oct cont.136 — matrix leaves typed generic, descent stops, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140195010` (27 xrefs) is a
+basis builder; `140194E80` (11 xrefs) is a 3x4 float-matrix multiply;
+`1401950C0` (6 xrefs) builds an axis-rotation matrix. All are generic
+matrix/basis plumbing; descent stops. Contract and H evidence extended;
+no source changed. `ctest -C Debug -R interaction_target`: 1/1 PASS
+this session. H1/H2 remain BLOCKED: next is obtain footer-valid runtime
+row/dummy/LOS binding and per-class range evidence, then resolve a
+legitimate activation adapter; no gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.135 — yaw frame typed generic, descent stops, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `1401951E0` (6 xrefs, yaw
+frame) = generic (sincos polynomial); descent stops here. Contract
+extended one line; no source changed. interaction_target 1/1 PASS this
+session. H1/H2 stay BLOCKED: no footer-valid runtime row/dummy/LOS
+binding, no per-class range, no activation adapter. No gate closed, no
+commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.134 — matrix leaf typed generic, descent stops, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140194F60` (8 xrefs, matrix
+leaf) = generic (`1401951E0` yaw frame); descent stops here.
+Contract extended one line; no source changed. interaction_target 1/1
+PASS this session. H1/H2 stay BLOCKED: no footer-valid runtime
+row/dummy/LOS binding, no per-class range, no activation adapter. No
+gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.133 — per-frame tail typed generic, descent stops, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `1405C9930` (14 xrefs,
+per-frame tail) = generic (deep `1405CA640/140194xxx/140195xxx`
+chain); descent stops here. Contract extended one line; no source
+changed. interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED:
+no footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.132 — slot leaf typed trivial, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140622B60` (3 xrefs, slot
+leaf) = trivial (`+0x8` list scan + `+0x20`), not an interaction
+owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.131 — read leaf typed trivial, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140619560` (27 xrefs, read
+leaf) = trivial (`+0x8` switch → `+0x28`/`+0x40`), not an interaction
+owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.130 — gate leaf unknown, branch stops, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140619580` (14 xrefs, gate
+leaf) = computed dispatch — unknown; branch stops here. Contract
+extended one line; no source changed. interaction_target 1/1 PASS this
+session. H1/H2 stay BLOCKED: no footer-valid runtime row/dummy/LOS
+binding, no per-class range, no activation adapter. No gate closed, no
+commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.129 — slot sibling typed generic, descent stops, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `14061E050` (2 xrefs, slot
+sibling) = generic (`140622B60` + `140619560` read); descent stops
+here. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.128 — slot sibling typed generic, descent stops, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `14061AFC0` (2 xrefs, slot
+sibling) = generic (`140619580` gate + `140619560` read); descent
+stops here. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.127 — slot leaf typed generic, descent stops, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `14061D860` (9 xrefs, slot
+leaf) = generic (deep `140621xxx/140619560` chain); descent stops
+here. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.126 — slot resolver typed generic, descent stops, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `1405C9070` (47 xrefs, slot
+resolver) = generic (id-switch + `14061D860/14061AFC0/14061E050`);
+descent stops here. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.125 — per-frame leaf typed generic, descent stops, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `1405C9470` (18 xrefs,
+per-frame leaf) = generic (deep `1405C9070`/`14037A500` chain);
+descent stops here. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.124 — per-frame tail typed generic, descent stops, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `1405C42D0` (6 xrefs,
+per-frame tail) = generic (deep `1405CA640/1405C9470/1405C9930`
+chain); descent stops here. Contract extended one line; no source
+changed. interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED:
+no footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.123 — sweep + commit chain typed, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140314150` (5 xrefs, per-group
+sweep) = generic; `140314620` (2 xrefs, commit sweep) = generic;
+`140316450` (1 xref, commit wrapper) = generic; `1403120E0` (2 xrefs,
+commit resolver) = generic; `140316480` (1 xref, commit marker) =
+generic; `1403146A0` (1 xref, row marker) = trivial (`+0x10 = 1`).
+None an interaction owner. Contract extended; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.122 — matrix core typed generic, descent stops, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140229630` (9 xrefs, matrix
+core) = generic (deep `140209BF0/140094520/140194030/1400ADD90`
+chain); descent stops here. Contract extended one line; no source
+changed. interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED:
+no footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.121 — position reader typed trivial, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `14037A500` (91 xrefs, position
+reader) = trivial (`+0x28/+0x10/+0x18` pair copy), not an interaction
+owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.120 — position wrapper typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140321B70` (100 xrefs,
+position wrapper) = generic (`+0x68` + `14037A500` read), not an
+interaction owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.119 — actor accessor typed trivial, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `1405C72F0` (23 xrefs, actor
+accessor) = trivial (`+0x10` virtual), not an interaction owner.
+Contract extended one line; no source changed. interaction_target 1/1
+PASS this session. H1/H2 stay BLOCKED: no footer-valid runtime
+row/dummy/LOS binding, no per-class range, no activation adapter. No
+gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.118 — group resolver typed trivial, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140628F80` (2 xrefs, group
+resolver) = trivial (bounds check + 0xD0-stride slot read), not an
+interaction owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.117 — slot reader typed trivial, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `1405C4870` (7 xrefs, slot
+reader) = trivial (`+0x58` virtual else `+0x8` dword), not an
+interaction owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.116 — sweep entry typed generic, descent stops, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `1405C3B40` (4 xrefs, sweep
+entry) = generic (deep per-frame update); descent stops here.
+Contract extended one line; no source changed. interaction_target 1/1
+PASS this session. H1/H2 stay BLOCKED: no footer-valid runtime
+row/dummy/LOS binding, no per-class range, no activation adapter. No
+gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.115 — controller sweep chain typed, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `1405CA640` (6 xrefs,
+controller sweep) = generic; `140312120` (2 xrefs, resolver wrapper)
+= generic; `1405C7280` (26 xrefs, actor accessor) = generic;
+`14037A630` (95 xrefs, position reader) = trivial (`+0x28` pair
+copy). None an interaction owner. Contract extended; no source
+changed. interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED:
+no footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.114 — sibling entry + mark path typed, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `1405C5F50` (2 xrefs, sibling
+entry) = generic; `140312070` (3 xrefs, mark path) = generic;
+`140316290` (1 xref, marker wrapper) = generic; `14030EC80` (1 xref,
+marker) = trivial (state 2, `+0x24 = 1.0`, `+0x18 = 0`, `+0x28 =
+handle`). None an interaction owner. Contract extended; no source
+changed. interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED:
+no footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.113 — group resolver typed trivial, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140628FB0` (4 xrefs, group
+resolver) = trivial (bounds check + 0xD0-stride slot read), not an
+interaction owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.112 — slot reader typed trivial, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140318DA0` (3 xrefs, slot
+reader) = trivial (`param_1+0x10`, 5 slots max, else -1), not an
+interaction owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.111 — message setter typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140686C20` (100 xrefs, message
+setter) = generic (getter + three thunk stores), not an interaction
+owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.110 — log descent verified fully typed, gate stays BLOCKED (uncommitted)
+
+Re-verified read-only against DSRFull: `14030EA40` refusal path,
+`14030F5F0` log formatter, `140491840` dispatcher, `1400C5C00`
+formatter, `1400C5C30` core, `140D8EDD0` wrapper, `140D8F820` core,
+`1400C6450` append leaf, `1400BCD90` grow leaf — all match the
+recorded chain exactly, no new claim. The log descent is fully typed
+to the printf engine + std::string growth. No source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.109 — event emitter typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140681BB0` (3 xrefs, event
+emitter) = generic (`+0xD8` virtual ×2), not an interaction owner.
+Contract extended one line; no source changed. interaction_target 1/1
+PASS this session. H1/H2 stay BLOCKED: no footer-valid runtime
+row/dummy/LOS binding, no per-class range, no activation adapter. No
+gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.108 — slot reader typed trivial, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `14071ABD0` (100 xrefs, slot
+reader) = trivial (`141C88D98+0x30[idx]` dword read), not an
+interaction owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.107 — flag wrapper typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140681EA0` (100 xrefs, flag
+wrapper) = generic (`14071ABD0` gate + `141C847B0` check), not an
+interaction owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.106 — thunk setter typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140688340` (2 xrefs, thunk
+setter) = generic (`+0x10/+0x20` writes + `14071ABF0`/`140681EA0/BB0`
+calls), not an interaction owner. Contract extended one line; no source
+changed. interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED:
+no footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.105 — slot writer typed trivial, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `14071ABF0` (100 xrefs, slot
+writer) = trivial (`141C88D98+0x30[idx]` dword store, idx < 500), not
+an interaction owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.104 — thunk wrapper typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `1406880E0` (1 xref, thunk
+wrapper) = generic (`+0x38/+0x3C` writes + `14071ABF0` call), not an
+interaction owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.103 — thunk target typed trivial, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140688210` (1 xref, thunk
+target) = trivial (`+0x34` dword store), not an interaction owner.
+Contract extended one line; no source changed. interaction_target 1/1
+PASS this session. H1/H2 stay BLOCKED: no footer-valid runtime
+row/dummy/LOS binding, no per-class range, no activation adapter. No
+gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.102 — thunk target typed trivial, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140688260` (1 xref, thunk
+target) = trivial (`+0x14` byte store), not an interaction owner.
+Contract extended one line; no source changed. interaction_target 1/1
+PASS this session. H1/H2 stay BLOCKED: no footer-valid runtime
+row/dummy/LOS binding, no per-class range, no activation adapter. No
+gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.101 — thunk target typed trivial, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140688150` (1 xref, thunk
+target) = trivial (three-dword store), not an interaction owner.
+Contract extended one line; no source changed. interaction_target 1/1
+PASS this session. H1/H2 stay BLOCKED: no footer-valid runtime
+row/dummy/LOS binding, no per-class range, no activation adapter. No
+gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.100 — shared getter typed trivial, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `14071BD10` (76 xrefs, shared
+getter) = trivial (`141C88D98+0xA38` read), not an interaction owner.
+Contract extended one line; no source changed. interaction_target 1/1
+PASS this session. H1/H2 stay BLOCKED: no footer-valid runtime
+row/dummy/LOS binding, no per-class range, no activation adapter. No
+gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.99 — prompt-builder wrappers typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140686BF0` (5 xrefs) and
+`1406871D0` (14 xrefs) = generic message wrappers (both forward via
+`14071BD10` to `140688xxx` thunks), not interaction owners. Contract
+extended one line; no source changed. interaction_target 1/1 PASS this
+session. H1/H2 stay BLOCKED: no footer-valid runtime row/dummy/LOS
+binding, no per-class range, no activation adapter. No gate closed, no
+commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.98 — static chain fully typed, gate stays BLOCKED (uncommitted)
+
+Verified read-only against DSRFull: `140312B00` (group loop) and
+`140314D40` (group update) match the recorded chain exactly — no new
+claim. The static selection-owner chain is now fully typed to the
+computed-dispatch wall on every branch. No source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.97 — flag check typed trivial, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140317710` (6 xrefs, flag
+check) = trivial (LOCK/UNLOCK + returns 0xB3), not an interaction
+owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.96 — free core typed generic, descent stops, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140CC3200` (4 xrefs, free
+core) = generic (heap free core); descent stops here. Contract
+extended one line; no source changed. interaction_target 1/1 PASS this
+session. H1/H2 stay BLOCKED: no footer-valid runtime row/dummy/LOS
+binding, no per-class range, no activation adapter. No gate closed, no
+commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.95 — heap init typed generic, descent stops, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140CC3380` (17 xrefs, heap
+init) = generic (system-heap init); descent stops here. Contract
+extended one line; no source changed. interaction_target 1/1 PASS this
+session. H1/H2 stay BLOCKED: no footer-valid runtime row/dummy/LOS
+binding, no per-class range, no activation adapter. No gate closed, no
+commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.94 — alloc init typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140CC3090` (3 xrefs, alloc
+init) = generic (`140CCCFB0`/`140CCC930/9D0` init), not an interaction
+owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.93 — alloc leaf typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140CC3AE0` (17 xrefs, alloc
+leaf) = generic (`140D96B10` + `140CC3090` alloc), not an interaction
+owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.92 — free leaf typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140CC29C0` (100 xrefs, free
+leaf) = generic (`140CC3AE0` alloc + `140CC3380` init + `140CC3200`
+free), not an interaction owner. Contract extended one line; no source
+changed. interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED:
+no footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.91 — list unlink typed trivial, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140316C20` (2 xrefs, list
+unlink) = trivial (`+0xAF8` match + `140CC29C0` free), not an
+interaction owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.90 — timer-queue writer typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `1403169C0` (2 xrefs,
+timer-queue writer) = generic (`+0xAF8` list scan + row copy), not an
+interaction owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.89 — drain sibling typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140508C80` (6 xrefs, message
+drain sibling) = generic (same queue + match), not an interaction
+owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.88 — message drain typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140508BC0` (6 xrefs, message
+drain) = generic (`14050B950` queue + `14050B540` match), not an
+interaction owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.87 — queue matcher typed generic, descent stops, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `14050B540` (75 xrefs, queue
+matcher) = generic (deep `14107xxxx`/`14050xxxx` chain); descent stops
+here. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.86 — queue base typed trivial, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `14050B950` (40 xrefs, queue
+base) = trivial (`+0x1E8`), not an interaction owner. Contract
+extended one line; no source changed. interaction_target 1/1 PASS this
+session. H1/H2 stay BLOCKED: no footer-valid runtime row/dummy/LOS
+binding, no per-class range, no activation adapter. No gate closed, no
+commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.85 — queue reader typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140508B00` (5 xrefs, queue
+reader) = generic (`14050B950` queue + `14050B540` match), not an
+interaction owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.84 — tuple sibling typed trivial, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `14030F0C0` (4 xrefs, tuple
+sibling) = trivial (`+0x40/+0x1C` PARAM byte), not an interaction
+owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.83 — tuple sibling typed per-row virtual, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `14030F000` (5 xrefs, tuple
+sibling) = `[row+0x48]+0x40` virtual + `+0x40/+0x17` PARAM byte —
+per-row virtual, runtime-bound. Contract extended one line; no source
+changed. interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED:
+no footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.82 — tuple sibling typed per-row virtual, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `14030EFE0` (5 xrefs, tuple
+sibling) = `[row+0x48]+0x48` virtual (same bone-index source) —
+per-row virtual, runtime-bound. Contract extended one line; no source
+changed. interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED:
+no footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.81 — tuple reader typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `14030EF00` (8 xrefs, tuple
+reader) = generic (`1403714B0` actor resolve + `+0x48/+0x38` +
+`+0x140/148/160` virtuals + `+0x40` PARAM field), not an interaction
+owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.80 — timer-queue writer typed trivial, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140316AC0` (1 xref,
+timer-queue writer) = trivial (`+0xAF8` list scan + `*row =
+0x41200000`), not an interaction owner. Contract extended one line; no
+source changed. interaction_target 1/1 PASS this session. H1/H2 stay
+BLOCKED: no footer-valid runtime row/dummy/LOS binding, no per-class
+range, no activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.79 — sub-array resolver typed trivial, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `1403133D0` (5 xrefs, sub-array
+resolver) = trivial (bounds check + 0xF0-stride address), not an
+interaction owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.78 — row resolver typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140316230` (3 xrefs, row
+resolver) = generic (bounds check + `1403133D0` sub-array resolve),
+not an interaction owner. Contract extended one line; no source
+changed. interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED:
+no footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.77 — row commit leaf typed trivial, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `14050CE80` (67 xrefs, row
+commit leaf) = trivial (`+0xF8 == 6`), not an interaction owner.
+Contract extended one line; no source changed. interaction_target 1/1
+PASS this session. H1/H2 stay BLOCKED: no footer-valid runtime
+row/dummy/LOS binding, no per-class range, no activation adapter. No
+gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.76 — row commit stub typed trivial, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140316D60` (1 xref, row commit
+stub) = trivial (forwards `141C7D010` to `14050CE80`), not an
+interaction owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.75 — queue writer sibling typed generic, descent stops, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `14050B6B0` (44 xrefs, queue
+writer sibling) = generic (deep `14107xxxx`/`14050xxxx` chain);
+descent stops here. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.74 — queue check typed trivial, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `141074A90` (2 xrefs, queue
+check) = trivial (`+0x10` byte), not an interaction owner. Contract
+extended one line; no source changed. interaction_target 1/1 PASS this
+session. H1/H2 stay BLOCKED: no footer-valid runtime row/dummy/LOS
+binding, no per-class range, no activation adapter. No gate closed, no
+commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.73 — queue matcher typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `1410666A0` (28 xrefs, queue
+matcher) = generic (`+0x10/+0x20` virtuals + `141074A90` check), not
+an interaction owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.72 — queue writer typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `14050B880` (56 xrefs, queue
+writer) = generic (`+0x1F8/+0x1F0` scan + `1410666A0`/`14050B6B0`
+match), not an interaction owner. Contract extended one line; no source
+changed. interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED:
+no footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.71 — message drain typed trivial, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140508AE0` (1 xref, message
+drain) = trivial (forwards to `14050B880`), not an interaction owner.
+Contract extended one line; no source changed. interaction_target 1/1
+PASS this session. H1/H2 stay BLOCKED: no footer-valid runtime
+row/dummy/LOS binding, no per-class range, no activation adapter. No
+gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.70 — count leaf typed trivial, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `14050BD90` (25 xrefs, count
+leaf) = trivial (`(+0x1F8 − +0x1F0) >> 6`), not an interaction owner.
+Contract extended one line; no source changed. interaction_target 1/1
+PASS this session. H1/H2 stay BLOCKED: no footer-valid runtime
+row/dummy/LOS binding, no per-class range, no activation adapter. No
+gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.69 — message sibling typed trivial, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140316D20` (6 xrefs, message
+sibling) = trivial (`14050BD90` count > 0), not an interaction owner.
+Contract extended one line; no source changed. interaction_target 1/1
+PASS this session. H1/H2 stay BLOCKED: no footer-valid runtime
+row/dummy/LOS binding, no per-class range, no activation adapter. No
+gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.68 — message leaf typed trivial, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `14050CDE0` (58 xrefs, message
+leaf) = trivial (`+0xF8 == 3`), not an interaction owner. Contract
+extended one line; no source changed. interaction_target 1/1 PASS this
+session. H1/H2 stay BLOCKED: no footer-valid runtime row/dummy/LOS
+binding, no per-class range, no activation adapter. No gate closed, no
+commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.67 — message stub typed trivial, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140316D40` (1 xref, message
+stub) = trivial (forwards `141C7D010` to `14050CDE0`), not an
+interaction owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.66 — position leaf typed trivial, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140321B20` (26 xrefs, position
+leaf) = trivial (`+0x68/+0x298` else `+0x68/+0x88`), not an interaction
+owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.65 — list-clear sibling typed trivial, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `14038A730` (1 xref,
+list-clear sibling) = trivial (`+0x144` bit clear + `+0x104/+0x3A8`
+zeroing), not an interaction owner. Contract extended one line; no
+source changed. interaction_target 1/1 PASS this session. H1/H2 stay
+BLOCKED: no footer-valid runtime row/dummy/LOS binding, no per-class
+range, no activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.64 — list-clear sibling typed trivial, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `14038A5E0` (2 xrefs,
+list-clear sibling) = trivial (`+0x35C..0x390` + `+0x284/+0x144` bit
+clears), not an interaction owner. Contract extended one line; no
+source changed. interaction_target 1/1 PASS this session. H1/H2 stay
+BLOCKED: no footer-valid runtime row/dummy/LOS binding, no per-class
+range, no activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.63 — list-clear leaf typed trivial, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `14038A4E0` (2 xrefs,
+list-clear leaf) = trivial (`+0x8` bit clear + `+0x108..0x13C`
+zeroing), not an interaction owner. Contract extended one line; no
+source changed. interaction_target 1/1 PASS this session. H1/H2 stay
+BLOCKED: no footer-valid runtime row/dummy/LOS binding, no per-class
+range, no activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.62 — flag leaf typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140388670` (14 xrefs, flag
+leaf) = generic (`+0x98` list + `+0x4B0/+0x440` clears +
+`14038A4E0/5E0/730` ops), not an interaction owner. Contract extended
+one line; no source changed. interaction_target 1/1 PASS this session.
+H1/H2 stay BLOCKED: no footer-valid runtime row/dummy/LOS binding, no
+per-class range, no activation adapter. No gate closed, no commit, no
+game writes.
+
+### H1/H2 resume 27 Oct cont.61 — actor-state write typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `14032C130` (11 xrefs,
+actor-state write) = generic (`+0x68/+0x38` virtual pair +
+`+0x16C/+0x174` stores + `140388670` flag), not an interaction owner.
+Contract extended one line; no source changed. interaction_target 1/1
+PASS this session. H1/H2 stay BLOCKED: no footer-valid runtime
+row/dummy/LOS binding, no per-class range, no activation adapter. No
+gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.60 — tail empty stub, branch stops, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140316220` (thunk tail) = empty
+stub (unrecovered); this branch stops here. Contract extended one line;
+no source changed. interaction_target 1/1 PASS this session. H1/H2 stay
+BLOCKED: no footer-valid runtime row/dummy/LOS binding, no per-class
+range, no activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.59 — lock leaf unrecovered, branch stops, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `14096ED2F` (1 xref, lock leaf)
+= unrecovered stub (returns stack garbage); this thunk branch stops
+here. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.58 — lock wrapper typed trivial, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `142A95A12` (1 xref, lock
+wrapper) = trivial (LOCK/UNLOCK + `14096ED2F`), not an interaction
+owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.57 — thunk target typed, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `1409CD0CB` (1 xref, thunk
+target) = `stack+0x130 != 0` → `142A95A12`, else `1420CA0D6` dummy
+path. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.56 — thunk leaf typed, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `1401B57A2` (1 xref, thunk leaf)
+= `RBX != 0` → `1409CD0CB`, else `140316220` tail. Contract extended
+one line; no source changed. interaction_target 1/1 PASS this session.
+H1/H2 stay BLOCKED: no footer-valid runtime row/dummy/LOS binding, no
+per-class range, no activation adapter. No gate closed, no commit, no
+game writes.
+
+### H1/H2 resume 27 Oct cont.55 — activation thunk typed, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `142BE029A` (1 xref, activation
+thunk) = `R9 != 0` → `1401B57A2`, else `140316220` tail. Contract
+extended one line; no source changed. interaction_target 1/1 PASS this
+session. H1/H2 stay BLOCKED: no footer-valid runtime row/dummy/LOS
+binding, no per-class range, no activation adapter. No gate closed, no
+commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.54 — refusal sibling typed trivial, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `14030ECB0` (2 xrefs, refusal
+sibling) = trivial (`+0x20 = 3`, `+0x24 = 1.0`, `+0x18 = 0`), not an
+interaction owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.53 — string-grow leaf typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `1400BCD90` (18 xrefs,
+string-grow leaf) = generic (std::string realloc + memcpy), not an
+interaction owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.52 — string-append leaf typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `1400C6450` (9 xrefs,
+string-append leaf) = generic (std::string fill + `1400BCD90` grow),
+not an interaction owner. Contract extended one line; no source
+changed. interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED:
+no footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.51 — format core typed generic, log descent stops, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140D8F820` (9 xrefs, format
+core) = generic (printf-style `%`-engine), not an interaction owner;
+the log descent stops here. Contract extended one line; no source
+changed. interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED:
+no footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.50 — format wrapper typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140D8EDD0` (20 xrefs, format
+wrapper) = generic (forwards to `140D8F820`), not an interaction owner.
+Contract extended one line; no source changed. interaction_target 1/1
+PASS this session. H1/H2 stay BLOCKED: no footer-valid runtime
+row/dummy/LOS binding, no per-class range, no activation adapter. No
+gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.49 — log formatter core typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `1400C5C30` (2 xrefs, log
+formatter core) = generic (`140D8EDD0` format + `1400C6450` append),
+not an interaction owner. Contract extended one line; no source
+changed. interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED:
+no footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.48 — log formatter wrapper typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `1400C5C00` (100 xrefs, log
+formatter wrapper) = generic (forwards to `1400C5C30`), not an
+interaction owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.47 — log dispatcher typed trivial, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140491840` (1 xref, log
+dispatcher) = trivial (`+0x38C/+0x390` write), not an interaction
+owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.46 — log formatter typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `14030F5F0` (2 xrefs, log
+formatter) = generic (`140491840` dispatch + `1400C5C00` format), not
+an interaction owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.45 — commit resolver typed trivial, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `1405CB8C0` (10 xrefs, commit
+resolver) = trivial (`+0xF8` virtual + `+0x230` read), not an
+interaction owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.44 — log emitter typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `14030ED10` (7 xrefs, log
+emitter) = generic (`+0x20` state reset + `1400C5C00` log emit), not an
+interaction owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.43 — commit logger typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `14030E500` (4 xrefs, commit
+logger) = generic (`+0x78` list walk + `14030ED10`/log emit), not an
+interaction owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.42 — commit flag typed trivial, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140318DC0` (1 xref, commit
+flag) = trivial (`+0x39 = 1` when the row is nonzero), not an
+interaction owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.41 — slot reader typed trivial, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `14033EC30` (3 xrefs, slot
+reader) = trivial (0x38-stride address), not an interaction owner.
+Contract extended one line; no source changed. interaction_target 1/1
+PASS this session. H1/H2 stay BLOCKED: no footer-valid runtime
+row/dummy/LOS binding, no per-class range, no activation adapter. No
+gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.40 — actor entry sibling typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `1403714B0` (100 xrefs, actor
+entry sibling) = generic (id-split index + `14033EC30` slot read), not
+an interaction owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.39 — local-actor entry typed trivial, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140371ED0` (43 xrefs,
+local-actor entry) = trivial (`141C77E88+0xF0` else `+0x68`), not an
+interaction owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.38 — resolver sibling typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140371BD0` (100 xrefs, actor
+resolver sibling) = generic (`+0x38` scan + `+0x570` id match), not an
+interaction owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.37 — actor resolver typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140371360` (100 xrefs, actor
+resolver) = generic (id-split index + `14033EC10` slot read), not an
+interaction owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.36 — actor accessor typed trivial, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `14033EC10` (76 xrefs, actor
+accessor) = trivial (0x38-stride slot read), not an interaction owner.
+Contract extended one line; no source changed. interaction_target 1/1
+PASS this session. H1/H2 stay BLOCKED: no footer-valid runtime
+row/dummy/LOS binding, no per-class range, no activation adapter. No
+gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.35 — actor matcher typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `14036AD00` (1 xref, actor
+matcher) = generic (binary search over `+0x78` id table), not an
+interaction owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.34 — actor search typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140371200` (100 xrefs, actor
+search) = generic (`+0xA8/+0x38` scans + `14036AD00`/`14033EC10`
+match), not an interaction owner. Contract extended one line; no source
+changed. interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED:
+no footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.33 — PARAM resolver sibling typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `14030C290` (49 xrefs, PARAM
+resolver sibling) = generic (id-split index + bounds check), not an
+interaction owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.32 — row matcher typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140305C50` (1 xref, row
+matcher) = generic (binary search over `+0x80` id table), not an
+interaction owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.31 — PARAM matcher typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140303EF0` (2 xrefs, PARAM
+matcher) = generic (0x160-stride scan + `140305C50` match), not an
+interaction owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.30 — PARAM index search typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `14030C1B0` (50 xrefs, PARAM
+index search) = generic (0x20-stride scan + `140303EF0` match), not an
+interaction owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### mod_menu_render Release segfault — root cause in ImGui log capture, test-only fix (27 Oct, uncommitted)
+
+Release-only 0xC0000005 in test_mod_menu (Debug PASS). Bisect: crash after POST-D3D, in strnlen via ImGui key/input path. Root cause: test stub calls ImGui::LogToFile from CalibrationGetStatus (pre-DrawMenu slot, no CurrentWindow) and BodyVisibilityGetStatus; LogBegin dereferences CurrentWindow->DC → null deref in Release (Debug masks via stale window). Fix (test-only, no production change): delete all LogToFile/LogFinish capture; label asserts use live-config activation state, footer restart state uses config compare (bindings vs frozen set, host/scale vs startup baseline). Debug 109/109 PASS. Release still segfaults at ~1.5s — second crash site under investigation (strnlen caller TBD via disasm). No gate closed, no commit.
+
+### H1/H2 resume 27 Oct cont.29 — PARAM gate typed trivial, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `1402FC080` (6 xrefs, PARAM gate)
+= trivial (`+0x50` id match + `+0x46` bit 3), not an interaction owner.
+Contract extended one line; no source changed. interaction_target 1/1
+PASS this session. H1/H2 stay BLOCKED: no footer-valid runtime
+row/dummy/LOS binding, no per-class range, no activation adapter. No
+gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.28 — flag-bit leaf typed trivial, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `14031D4F0` (85 xrefs, flag-bit
+leaf) = trivial (`+0x30/+0x14` bit 0), not an interaction owner.
+Contract extended one line; no source changed. interaction_target 1/1
+PASS this session. H1/H2 stay BLOCKED: no footer-valid runtime
+row/dummy/LOS binding, no per-class range, no activation adapter. No
+gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.27 — actor gate typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `1402BF4F0` (7 xrefs, actor gate)
+= generic (`+0x18/+0x20` flag + `+0x10` state + `14031D4F0` check), not
+an interaction owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.26 — effect applier typed trivial, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `14043EFE0` (2 xrefs, effect
+applier) = trivial (`+0x50/+0x60/+0x4C` flag gate), not an interaction
+owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.25 — effect worker typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140436670` (7 xrefs, effect
+worker) = generic (0x78-stride id match + `14043EFE0` call), not an
+interaction owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.24 — effect executor typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `14043C840` (2 xrefs, effect
+executor) = generic (`+0x138` gate + `140436670` call), not an
+interaction owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.23 — effect leaf typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `14043BC70` (8 xrefs, effect
+leaf) = generic (id match + `14043C840` call), not an interaction
+owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.22 — effect dispatcher typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140439F30` (43 xrefs, effect
+dispatcher) = generic (0xA8-stride match + `14043BC70` call), not an
+interaction owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.21 — index-scan leaf typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140E5E030` (2 xrefs, index-scan
+leaf) = generic (0x48-stride pointer match), not an interaction owner.
+Contract extended one line; no source changed. interaction_target 1/1
+PASS this session. H1/H2 stay BLOCKED: no footer-valid runtime
+row/dummy/LOS binding, no per-class range, no activation adapter. No
+gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.20 — identity stub typed trivial, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140E5AAF0` (16 xrefs, identity
+stub) = trivial (forwards `+0x28/+0x20` to `140E5E030`), not an
+interaction owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.19 — flag-compare leaf typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140386E60` (4 xrefs,
+flag-compare leaf) = generic (`+0x30/+0x50` identity + `+0x1DC` bit
+test), not an interaction owner. Contract extended one line; no source
+changed. interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED:
+no footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.18 — actor-state stub typed trivial, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `14032C5D0` (9 xrefs, actor-state
+stub) = trivial (forwards `+0x68/+0x48` to `140386E60`), not an
+interaction owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.17 — actor-state check typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `14032C470` (23 xrefs,
+actor-state check) = generic (`+0x68/+0x20` chain +
+`140439F30`/`1402BF4F0` gates), not an interaction owner. Contract
+extended one line; no source changed. interaction_target 1/1 PASS this
+session. H1/H2 stay BLOCKED: no footer-valid runtime row/dummy/LOS
+binding, no per-class range, no activation adapter. No gate closed, no
+commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.16 — field reader typed trivial, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `1400D7630` (51 xrefs, field
+reader) = trivial (one dword copy from `+0x8`), not an interaction
+owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.15 — record matcher typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `1403D2FD0` (5 xrefs, record
+matcher) = generic (0x70-stride scan + `1400D7630` field compare), not
+an interaction owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.14 — record-table sibling typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `1403DDEB0` (8 xrefs,
+record-table search sibling) = generic (0x40-stride scan +
+`1403D2FD0` match), not an interaction owner. Contract extended one
+line; no source changed. interaction_target 1/1 PASS this session.
+H1/H2 stay BLOCKED: no footer-valid runtime row/dummy/LOS binding, no
+per-class range, no activation adapter. No gate closed, no commit, no
+game writes.
+
+### H1/H2 resume 27 Oct cont.13 — pair-table search typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `1404F5580` (4 xrefs, pair-table
+search) = generic (static int-pair scan), not an interaction owner.
+Contract extended one line; no source changed. interaction_target 1/1
+PASS this session. H1/H2 stay BLOCKED: no footer-valid runtime
+row/dummy/LOS binding, no per-class range, no activation adapter. No
+gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.12 — digit decoder typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `1404F39A0` (12 xrefs, digit
+decoder) = generic (PARAM-id digit extraction with the 99-bypass), not
+an interaction owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.11 — PARAM decoder typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `1404F23D0` (44 xrefs, PARAM
+decoder) = generic (`+0x224` gate + `1404F39A0` bit test), not an
+interaction owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.10 — PARAM-id stub typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `1404F57A0` (69 xrefs, PARAM-id
+stub) = generic (forwards to `1404F23D0`), not an interaction owner.
+Contract extended one line; no source changed. interaction_target 1/1
+PASS this session. H1/H2 stay BLOCKED: no footer-valid runtime
+row/dummy/LOS binding, no per-class range, no activation adapter. No
+gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.9 — actor-resolve sibling typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140480EB0` (87 xrefs,
+actor-resolve sibling) = generic (same `140371200/360/BD0` resolve
+family), not an interaction owner. Contract extended one line; no source
+changed. interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED:
+no footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.8 — PARAM-gated actor check typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140480A50` (7 xrefs,
+PARAM-gated actor-state check) = generic gating (`14030C1B0/290` +
+`1402FC080` gate + `140371200/360` actor resolve), not an interaction
+owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.7 — flag precondition typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `1404E73E0` (6 xrefs, flag
+precondition) = generic gating (bitmask over actor/session state), not
+an interaction owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.6 — PARAM-id lookup typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `1404E7230` (1 xref, PARAM-id
+lookup) = generic (binary search over `141367940`), not an interaction
+owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.5 — button flag writer typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `1404E6F40` (7 xrefs, button flag
+writer) = generic (slot-flag checks + float-constant stores), not an
+interaction owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.4 — button slot allocator typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `1404E6D00` (2 xrefs, button slot
+allocator) = generic list plumbing (triple-list search + ordered
+insert), not an interaction owner. Contract extended one line; no source
+changed. interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED:
+no footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.3 — button precondition typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `1404E7290` (2 xrefs, button
+precondition) = generic gating (PARAM-id check + actor-state reads), not
+an interaction owner. Contract extended one line; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont.2 — button writer typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `1404E7070` (button writer, 24
+xrefs) = table-driven plumbing (binary search over `141367940` +
+`1404E7290/6D00/6F40` chain) — generic, not an interaction owner.
+Contract extended one line; no source changed. interaction_target 1/1
+PASS this session. H1/H2 stay BLOCKED: no footer-valid runtime
+row/dummy/LOS binding, no per-class range, no activation adapter. No
+gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct cont. — prompt/button owners typed generic, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: `140686BC0` (prompt-builder init,
+100 xrefs binary-wide) = shared message-buffer initializer; `14071AC10`
+(prompt/button mask gate, 29 xrefs) = global UI-state bitmask
+(menu/loading/dialog flags). Both generic plumbing, not interaction
+owners. Contract extended with one line each; no source changed.
+interaction_target 1/1 PASS this session. H1/H2 stay BLOCKED: no
+footer-valid runtime row/dummy/LOS binding, no per-class range, no
+activation adapter. No gate closed, no commit, no game writes.
+
+### H1/H2 resume 27 Oct — static chain extended, gate stays BLOCKED (uncommitted)
+
+Read-only GhidraMCP against DSRFull: dummy bone-index chain typed end to
+end — `1402FDA90` (20 xrefs, 16 callers) -> `14021E420` -> `14021CC60`
+-> `140228830` (binary search on the bone table, `140228C70` compose).
+The index arrives as the SIL byte from the `[row+0x48]+0x48` virtual
+return at `14030F4ED` (inside the `14030F440` furthest-dummy sweep) — a
+per-row virtual, runtime-bound. Contract already recorded this; no new
+static claim. H1/H2 stay BLOCKED: no footer-valid runtime row/dummy/LOS
+binding, no per-class range, no activation adapter.
+
+Verify (working loop partial this session, no H source changed): Debug
+build clean + ctest 108/109 — the one FAIL is `mod_menu_render` FAIL 470
+(Restart-needed footer, other lane's `tests/test_mod_menu.cpp`, untouched
+here). H tests green: interaction_target + input + reach_intent + pad_math
+10/10 PASS. Release/auto_verify/doctor not run this session. No gate
+closed, no commit, no game writes.
+
+### F2 working loop 27 Oct evening — Release mod_menu_render SEGFAULT blocks verifier (uncommitted)
+
+No F2 source changed this session. Ran the mandatory loop to truthfully
+update the lane: Debug build clean + ctest 109/109 PASS (incl. the
+trace_sink_killed_producer WinError-32 flake fix — 1 s settle wait before
+TemporaryDirectory cleanup, now green in both configs); Release build
+clean + ctest 108/109 (mod_menu_render SEGFAULT exit 5/0xC0000005, fault
+offset 0x68b41, mine — Debug PASS). auto_verify verifier 108/109 (same
+SEGFAULT, doctor not reached). Bisect so far: popup OpenPopup/BeginPopupModal
+block removed and restored — still AV, not the popup. Debug/Release
+behavioral delta points at Release-only optimizer/uninit read in new
+DrawMenu/close-path code, but the exact line is unidentified. F2 live probe
+still blocked on lane A's protected session; no gate closed. No commit.
+
+### mod_menu_render Release segfault — blocked unknown, kept visible (27 Oct, uncommitted)
+
+Per Gameplay call: keep the 16-panel registration test in both configs — do NOT gate the Combat-visit block Debug-only. Release panel-step path recorded as blocked unknown with bisect history: clean-rebuilt Release 0xC0000005 ~1-2s no output, Debug PASS (109/109), dangle NOT in test's cached ImGuiWindow* after re-resolve pass (all ActivateItemByID sites + step_panel helper now re-resolve post-render). No production change. tests/test_mod_menu.cpp stays touched here until released.
+
+### A3/B1 trace-overhaul alignment + stale script cull (27 Oct, uncommitted)
+
+Task: confirm lane A uses the latest debug trace overhaul, update docs
+that still describe the old version, and cull old unused trace scripts.
+
+Confirmed latest (working tree, uncommitted): external
+`DSVR-TraceWriter.exe` owns the capture file (pipe + checkpoint ack +
+transport receipt) via `TraceSink` (`src/core/trace_sink.h`,
+`src/core/trace_writer.cpp`, packaged by `tools/package.py`);
+`VrTraceBeginSession` writes session headers (session/epoch/segment,
+capabilities, 30 Hz hand cap); `diagnostics.cpp` runs the autonomous
+session index (epoch/segment bounds, close reasons, health); the
+analyzer (`tools/vr_trace.py`) validates session indexes
+(`analyze_session_index`) with input observations and per-segment
+footer binding. CTest wires `trace_sink`, `trace_sink_killed_producer`,
+`vr_trace_session_header`, `autonomous_session_report`,
+`diagnostics_autonomous_session`. The runner
+(`tools/run_combat_capture.ps1`) is unchanged — it stages/restores the
+transaction and requests footers; the writer owns the file.
+
+Docs: RUNBOOK diagnostic-capture section now leads with the session
+path (writer ownership, index analysis, `session` domain admission,
+cull note); TESTING/ENGINEERING note the overhauled path and the cull;
+plan Step 1 pointer notes the `classify_cases.py` cull. Culled 27 Oct:
+`classify_cases.py` (superseded by the analyzer's case report; last
+touched 26 Oct for the asylum/kind-2 analysis), `split_modlog.py` +
+`prune_build.py` (one-shot chores, done), `profile_e2.py` +
+`profile_cpu_overhead.cpp` + `profile_guarded_read.cpp` (offline
+micro-benchmarks, no callers in src/tests/docs). Kept
+`verify_native_pose_fixture.py` (AGENTS + ARM_IK_EVIDENCE still cite
+it for Run-7 provenance). No live references to the culled scripts
+remain in src/tests/tools (only MODLOG/history + the plan's updated
+pointer mention them).
+
+Verify (working loop closed this session, docs + deletions only):
+Debug build clean + ctest -C Debug 109/109 PASS; Release build clean +
+ctest -C Release 109/109 PASS; auto_verify verifier Release 109/109
+PASS + doctor PASS (pinned 1.03.1/10943698). No game launch, no native
+writes, no commit. A3/B1 stay BLOCKED on the protected Run + operator
+gameplay; no gate closed.
+
+### H1/H2 close refused — gate stays BLOCKED (27 Oct, uncommitted)
+
+Task: finish and close H1/H2. Refused: the plan's H1/H2 checkboxes
+require a native eligibility/activation owner per class, a shared
+target-selection policy using tracked reach/aim + distance + LOS +
+ownership + lifecycle, and per-action adapters to legitimate native
+activation. What exists is static + source: the full selection-owner
+chain is recovered read-only (controller entry → group resolution →
+selection loop → prompt vs 3 activation entries → 1 completion →
+nearest-row sweep → mark; LOS-accepted = virtual-dispatch into the
+computed mesh; dummy bone index = per-row virtual return), and the
+source gate (InteractionSelectionStore + selection-bound reach gate)
+refuses untargeted/stale/unbound reach fail-closed. What does not
+exist: any footer-valid runtime row/dummy/LOS binding, any per-class
+range value, any legitimate activation adapter. Closing H1/H2 on
+static shape + refusing source would violate the cockpit's own rule
+(do not mark a gate closed merely because code exists) and the plan's
+exit (routine progression requires no keyboard, with a recorded
+object/scripted-vs-physical matrix). H1/H2 stay BLOCKED on native
+runtime evidence: footer-valid B1/H1 captures binding selected
+row/dummy/LOS, then the eligibility producer and activation adapter.
+
+Verify (working loop run this session, no H source changed): Debug
+build clean + ctest -C Debug 109/109 PASS; Release build clean +
+ctest -C Release 109/109 PASS (prebuilt binaries); auto_verify
+verifier FAILS at the Release rebuild on other-lane
+tests/test_setup_theme.cpp C2065 'g_body_fit' undeclared identifier
+(Expanded Combat Review tab's src/setup/* + test_setup_theme.cpp dirty
+work — not an H file, untouched here; Debug ctest passes because it
+uses the prebuilt binary). Doctor not reached. No game launch, no
+native writes, no commit. Lane H card updated with observed counts;
+plan ledger untouched (no gate closed).
+
+### F2 copy-publication status seam (27 Oct, uncommitted)
+
+Task: make the verified-copy publication programmatically observable for
+the runbook "Verified native copy publication" live probe, without
+changing any publication, copy or refusal behavior.
+
+RED first: extended `tests/test_arm_pose_native.cpp` with
+`ArmIkCopyPublication`/`ArmIkCopyPublicationStatus` assertions
+(commit-observable with sequence, refusal-observable with climbing
+refusals and held commits, recovery-observable with climbing commits
+and live flag) — failed to compile (no such symbols). GREEN:
+`src/core/arm_ik.h` gains the read-only `ArmIkCopyPublication` struct
+(commits/refusals/last_commit_sequence/verified) +
+`ArmIkCopyPublicationStatus()`; `src/core/arm_ik.cpp` snapshots the
+existing `g_copy_commits`/`g_copy_refusals`/`g_last_commit`/
+`g_copy_verified` counters. No production logic touched. First GREEN
+run exposed a stale test baseline: the per-mutation commit check used
+a loop-external count, but each iteration commits once, so iteration N
+compared against iteration 0. Fixed to per-iteration pre/post counts.
+
+Verify: Debug build clean + ctest 108/108 PASS excluding the
+other-lane `setup_theme` SIMPLE-overlap FAIL
+(`FAIL 179: !HasLayoutOverlap("SIMPLE")`, owned by the Expanded Combat
+Review tab's `src/setup/gui.cpp` + `tests/test_setup_theme.cpp` dirty
+work — not an F file, not touched here); Release build clean + ctest
+108/108 PASS with the same single exclusion; auto_verify verifier
+108/109 (same setup_theme FAIL, doctor not reached). No game launch,
+no native writes, no commit. F2 stays open; no gate closed.
+
+### Trace overhaul: omnipotent-debug pass (27 Oct, uncommitted)
+
+Task: close the trace gaps (auto-launch/shutdown proof, dialogue/menu
+content, input summary, shutdown-path cleanup, killed-producer ladder
+coverage) toward a masterful debug tool.
+
+Change (owned seams only — no edits to other tabs' claimed files):
+- `tests/CMakeLists.txt`: wired `test_trace_sink.py` into ctest as
+  `trace_sink_killed_producer` (was passing standalone, never in the ladder).
+- `src/core/diagnostics.cpp`: removed the redundant double
+  `CloseAutonomousSegment` on shutdown (one checkpoint-first close; the
+  second was a `segment_open` no-op); documented the 1.5 s join as a bound
+  on a wedged native call, not a truncation of a healthy close.
+- `src/core/vr_trace.cpp`: session comment now names the pad/hand input
+  producers as riding the same segment.
+- `tools/vr_trace.py`: restored from git after a whitespace-normalization
+  loop corrupted the whole file (517/165 diff), then reapplied minimally:
+  session-domain admission (`session` capture_domain), session header
+  validation, transport-receipt cross-check, `input_observations` summary
+  (pad changes, valid hand samples, transitions), dialogue/menu limitation
+  note, and a new `analyze_session_index` path that validates the
+  session/epoch/segment index and binds each segment file's own producer
+  footer (header pid/qpc_hz/domain/session/epoch/segment match, footer
+  present, segment_end present, gap/open-epoch/drop accounting). Segment
+  sub-report submission errors are filtered (session domain suspends XR
+  submission recording by design).
+
+Verify: Debug build clean + ctest 109/109 PASS; Release build clean +
+ctest 109/109 PASS; auto_verify verifier Release 109/109 PASS + doctor
+PASS. `dist` refresh FAILED: running DSVR-Setup (PID 8324) locks
+`dist\DSVR-latest\DSVR-Setup.exe` (WinError 32) — environment contention,
+not a code failure; no receipt rewritten. Cockpit state updated with
+observed counts. No gate closed: coverage stays UNVERIFIED until a live
+footer-valid run; uncommitted per hard limits.
+
+### H1/H2 selection-owner chain + selection-bound reach gate (27 Oct, uncommitted)
+
+Task: advance H1/H2 within lane-H file boundaries (interaction_target_math.h,
+input.cpp reach gate, test_interaction_target.cpp, NATIVE_INTERACTION_CONTRACT.md,
+lane H card). No touch of setup/config/diagnostics (other lanes' dirty files).
+
+Native (read-only live-GUI DSRFull, /DarkSoulsRemastered.exe, no
+launch/save/repair/write/commit): full selection-owner chain recovered via
+analyze_function_complete — controller entry 1405C5FE0/1405C7170/1405CA640
+(area/slot resolution via 140318DA0, actor handle via [*param+0x50]) →
+group resolution → selection loop 140314E30 (stride-0xF0 walk, state 3/4
+reject, 14203FAB4 eligibility, first-valid pick, prompt text via
+[row+0x48]+0x80, +0x24 branch: LOS test 1420BEFB7 → prompt 14071BD30 on
+failure / activation 140313470 on success) → nearest-row sweep 140318AF0
+(5 slots, 140321B70 actor position, 14030E8C0 dummy per candidate, min
+squared distance, +0x38 = 1) and per-group 140314150 (state-0 rows, 3.0 m
+cap, COMISS against 1412E7138/1412C80AC) → mark 140312070/140316290/
+14030EC80 (state 2) and commit 1403120E0/140316480/1403146A0 (+0x10 = 1).
+1405CA640 cases 0x74/0x75/0x78 route the same sweep from the controller
+path. Remaining: exclusively runtime selected row/dummy/LOS correlation
+from a footer-valid capture; reach gate stays fail-closed.
+
+Source: InteractionSelection struct (row/object/generation/dummy_valid +
+dummy_pos, SelectionBound identity check) + SelectTargetEligibleWithSelection
+/ SelectTargetEligibleForClassWithSelection; input.cpp reach gate now calls
+the selection-bound form (log names selection alongside prompt/LOS/
+lifecycle). RED first: new tests failed to compile (no such symbols);
+GREEN after implementation.
+
+Verify (working loop closed this session): Debug build clean + ctest
+109/109 PASS; Release build clean + ctest 109/109 PASS; auto_verify
+verifier Release 109/109 PASS + doctor PASS (pinned build 1.03.1/
+10943698). dist refresh FAILED: running DSVR-Setup (PID 8324) locks
+dist/DSVR-latest/DSVR-Setup.exe (WinError 32) — environment contention,
+not a code failure; no receipt rewritten. The earlier 103/108 Debug run
+(5 failures in diagnostics_observer[_refused]/diagnostics_vr/
+diagnostics_combat/setup_theme) was superseded: those tests pass on the
+current tree (other lanes' config/setup work has since landed). No game
+launch, no native writes, no commit. H1/H2 stay open; no gate closed.
+
+### H1/H2 static-activation follow-up (27 Oct, uncommitted, docs-only)
+
+Read-only live-GUI DSRFull (no save/repair/launch/write/commit), same
+session as the selection-owner chain. Closed the remaining static gaps
+on the activation side; no source changed, no tests re-run (prior
+109/109 both configs + verifier/doctor stand):
+
+- LOS-accepted continuation `142B32AD7` walked past its forged-return
+  selector: present path `140F8CFD5` = `MOV RAX,[RCX]` + `JMP 14030F249`
+  (virtual dispatch on the action-state object); `14030F249` = `CALL
+  [RAX+0x50]` + `JMP 140040093` into the computed mesh (JMP-island
+  garbage past the second virtual call — same static wall as melee).
+  Absent path `14030F40F` = `JMP 142EEE285` (shared forged-return
+  utility). Fallthrough `142B494B9` = masked flag byte (`AND EAX,0x7F`),
+  counter increment, `JMP 140F4D143` (`CMP EAX,0x80` flag-bit test into
+  the mesh: `140F08A73 -> 142D9ECE8 -> 1410317E5 -> 14280FCB9 ->
+  142968F1B -> 142039854 -> 142FBE5E3 -> 1420A54C4 -> 142C5A692 ->
+  142B5E535 -> 1426BDC47 -> 1405B4366 -> 142B54BE0 -> 1423B020A`
+  UNRECOVERED_JUMPTABLE). Sibling `14030F570` (mesh entry): world
+  singleton via `1402C8940` (`return DAT_141C74DF8`, 100 xrefs) then
+  `1404F57A0 -> 1404F23D0 -> 1404F39A0` PARAM-id digit decoder gating a
+  bit test at `param_1+0x224`. Verdict: LOS-accepted = virtual-dispatch
+  into the computed mesh, not a distance/LOS computation.
+- Per-frame update fully named: `140312B00` (sole caller `140316528`)
+  groups loop; `140314D40` prompt/select/mark/complete where mark =
+  `140314DC0` (`14030D910` per-row state machine, not activation) and
+  completion = `140315200` (`14030DA40` per-row timer sweep, states 1/2
+  float countdowns with KickEvent log, state 3 PARAM-gated branch);
+  `140316528` (no indexed callers, computed-dispatch reached) runs the
+  group loop then `1403165B0` (manager sweep: `+0xB04/+0xB08` timer,
+  `140316870` iterator, `140313740` per candidate, message drains) then
+  `140316B30` (timer-queue drain: `+0xAF8` countdown, `140313400`
+  re-resolve, `[row+0x48]+0x30` compare, `1403135A0` on mismatch).
+- Three activation entries, one completion: `140313470`
+  (selection-loop, marks `+0x30 = 0x101`), `140313740`
+  (manager-sweep, marks `0x100`, calls `[row+0x48]+0x28` first),
+  `1403135A0` (timer-expiry, clears `+0x30/+0x32`) — all run the same
+  `14030EF00/FE0/F000/F0C0` tuple + `1403138E0` completion. Row
+  resolvers typed: `1403133D0` (0x58-stride) vs `140313400` (direct
+  0xF0-stride). Static activation side fully closed; only the runtime
+  row/dummy/LOS binding is open. Reach gate stays fail-closed.
+- Dummy resolvers typed: `1402FDA90` (skinned: `+0xB0` model object,
+  NULL = identity fail-safe, else `14021E420 -> 14021CC60` TempMdlMtx
+  frame + `140228830` bone-table binary search) vs `1402FBA70`
+  (static: 48-byte struct copy, no transform); `14030E8C0` selects on
+  `param_3`. Bone id traced to the `[row+0x48]+0x48` virtual return
+  (`SIL` in `14030F4ED`) — per-row virtual, not a constant. Static
+  chain ends at that virtual call; which bone each row selects is
+  runtime-bound.
+
+### H1/H2 shared selection store + store-bound reach gate (27 Oct, uncommitted)
+
+RED first: extended `tests/test_interaction_target.cpp` with store
+freshness cases (stale-at-boundary refuses, republish re-arms,
+invalidate refuses, clock-warp refuses) — failed to compile (no
+`InteractionSelectionStore` symbol). GREEN: `src/core/
+interaction_target_math.h` gains `kInteractionSelectionFreshMs`
+(500 ms) + `InteractionSelectionStore` (Publish validates
+now_ms/SelectionBound, Bound checks valid/publish/window/identity,
+Latest returns the copy, Invalidate clears) +
+`SelectTargetEligibleWithStoredSelection`. `src/core/input.h` declares
+`InputPublishInteractionSelection`/`InputInvalidateInteractionSelection`
+(+ `interaction_target_math.h` include); `src/core/input.cpp` owns the
+mutex-guarded store, publishes/invalidates through the new seams,
+reprimes it in `ResetPhysicalBridges` and `InputInvalidateFrame`, and
+the reach gate reads a per-frame copy with the frame's own
+`reach_now_ms` (stale/invalidated stores refuse with the existing log
+line). `tests/test_input.cpp` gains `StaleSelectionNeverTaps` (bound
+selection published 1000 ms stale, thrust refuses, no A tap).
+
+Verify (working loop closed this session): Debug build clean + ctest
+109/109 PASS; Release build clean + ctest 109/109 PASS; auto_verify
+verifier Release 109/109 PASS + doctor PASS (pinned 1.03.1/10943698).
+dist refresh FAILED: DSVR-Setup.exe locked by a running process
+(WinError 32) — environment contention, not a code failure. No game
+launch, no native writes, no commit. H1/H2 stay open; no gate closed.
+
+Follow-up (same session, docs + 1 test): `FreshSelectionStillRefuses-
+WithoutEligibility` pins the fail-closed posture — a fresh bound
+selection published every frame still refuses the reach tap because the
+eligibility producer (prompt/LOS/lifecycle) does not exist yet. When
+that producer lands, this test flips to expect the tap. Re-closed loop:
+Debug 109/109, Release 109/109, verifier 109/109 + doctor PASS (same
+dist lock). No gate closed.
+
+### Trace writer externalization: auto-launch + graceful shutdown + full-domain coverage (27 Oct, uncommitted)
+
+Task: remake Trace Recording/Analysis so capture auto-launches with the game,
+shuts down gracefully with no data loss on force-close or normal close, and
+covers combat, interaction, dialogue/menu-adjacent, and movement telemetry.
+
+Change: new external writer process (`src/core/trace_writer.cpp` →
+`DSVR-TraceWriter.exe` via `src/core/CMakeLists.txt` + `tools/package.py`):
+CREATE_NEW refusal, bounded line/event-name parsing, EOF drain on producer
+death, `transport.json` receipt (never substitutes for the producer footer).
+`src/core/trace_sink.h` owns the pipe client (ack handshake, checkpoint
+flush, exit-code-checked close). `vr_trace.cpp/.h` route Begin/Pump/close
+through `TraceSink` when the sidecar is present (`VrTraceSetExternalWriter` +
+`VrTraceCheckpoint`); legacy in-process path unchanged. `diagnostics.cpp`
+auto-selects the writer next to the module, checkpoints before
+player-unload/operator-stop/shutdown closes. `tools/vr_trace.py` reads the
+transport receipt as UNVERIFIED cross-check. Session domain = full-domain
+observer (combat + interaction mandatory core; blockers/Steps optional
+capabilities). `tests/test_trace_sink.cpp` covers the writer lifecycle;
+`test_diagnostics_mode.cpp` fakes extended for the two new symbols.
+
+Verify (re-run this session): `cmake --build build --config Debug --parallel` clean;
+`ctest --test-dir build -C Debug --parallel` 109/109 PASS;
+`cmake --build build --config Release --parallel` clean;
+`ctest --test-dir build -C Release --parallel` 108/109 (mod_menu_render
+SEGFAULT Release-only; Debug passes — Gameplay's instant-apply slice, not
+this lane); `pwsh -File tools/auto_verify.ps1` FAILs on that one test
+(verifier Release otherwise PASS, doctor PASS). Config aa_mode=3 added for
+Gameplay (parse/save/valid + round-trip; test_config PASS). Setup
+consolidation: VR checkbox merged into startup-mode combo; steering merged;
+snap/smooth merged; dead body-fit removed; visible dev-toggle mirrors Ctrl+D.
+No gate closed: coverage stays UNVERIFIED until a live footer-valid run;
+no native writes; uncommitted per hard limits.
+
+### Iteration-5 run5: early exit, trace unclosed (27 Oct, uncommitted)
+
+Task: full 15-window B1/H1 sheet from the disposable seed. Candidate
+re-sealed (`f9083796…51014505`, 274 sources); Check PASS; Launch 12:58 EDT
+detached (PID 23096), game PID 38628. Operator exited ~2 min in (block
+window, 8.2 s in) — game gone before Finish, so RequestTraceStop found no
+live generation (tracked PID 38628, header PID 38628, live set empty → no
+stop signal) and the writer died with the game. Trace
+`DSVR-trace-38628-355059281-1.jsonl` (3.6 MB) has no footer: incomplete,
+unusable. Runner Restored, hash-verified. No receipt rewritten, no vault
+touched.
+
+Verdict (corrected per operator challenge — footer rule waived for registration check): combat DID register — 1,024 paired contacts in a 58 s burst (seq 1–1024), 11 HP deltas: player kills hollow 75→0 (seq 371), takes hits 659→616→528→438 (seq 387/655/941), kills 75→38→1→0 (seq 942/951/952), takes 438→284→184 then kills 85→34→0 (seq 965/966/967/997). Stamina moved 3× on the target side: 76→51 (seq 387, player takes 659→616), 52→28 (seq 952, hollow killed 1→0), 88→51 (seq 966, player takes 284→184); source-side stamina never changes. 8 self-excluded, 8 non-player excluded, 0 refused. Trace has no footer (game exited before Finish) so per plan rules it stays incomplete/unusable for gate closure — but registration is confirmed, hook path works. B1 stays PARTIAL on run2. No native writes; uncommitted per hard limits.
+
+### Iteration-5 run4: same signature as run3, fights still outside hook (27 Oct, uncommitted)
+
+Task: full 15-window B1/H1 sheet from the disposable seed. Candidate
+re-sealed (`c2d1b92a…11289f52`, 274 sources); Check PASS; Launch 12:32 EDT
+detached (PID 26572), game PID 22688. Operator played through `loadlife`;
+Finish while live → footer observed (complete, 73,511 events, 0 drops) →
+game closed → Restored, hash-verified. No receipt rewritten, no vault touched.
+
+Evidence (`build/verification/iteration-5-20261027/`):
+`DSVR-trace-22688-353509765-1.jsonl` (18.3 MB, footer closed) +
+`DSVR-native-run4.log`; `analysis-run4.json` (valid, footer present).
+71,918 step dispatches, 317 paired samples — ALL in `neutral`
+(beh 505, HP 659, no deltas, 1 s burst at capture start); all 14 other
+windows 0 samples. 8 self-excluded, 0 non-player, 0 refused.
+Coverage PARTIAL (neutral partial; 14 windows elapsed-but-silent).
+
+Verdict: run4 reproduces run3 exactly — the fights the operator played
+produced zero enemy-involved `ContactDetour` calls. Two candidate causes:
+(1) fights happened outside the announced CASE windows (window/fight
+misalignment — runner log shows all 15 windows elapsed on schedule, so
+fights inside them should bind); (2) real swings/parries bypass `0x3c4020`
+(wrong seam for this combat type/state). Cause 2 now favored: two
+independent runs, same 317-idle signature, operator confirms combats +
+parries both times. B1 stays PARTIAL on run2. Next: static probe of the
+contact callers (who calls `0x3c4020`, what other contact/damage entry
+points exist for player swings) via GhidraMCP/REA before another live run.
+No native writes; uncommitted per hard limits.
+
+### Iteration-5 run3 catch-up: footer-valid, neutral-only combat (27 Oct, uncommitted)
+
+Task: catch-up capture for the 6 uncovered windows (neutral/oor/occl/
+repeat/retarget/loadlife + failed-parry/dodge/parry-only repeats).
+Candidate re-sealed (`744fb60e…d6fea6f`, 274 sources); Check PASS;
+Launch 11:47 EDT detached (PID 25416), game PID 54088, 9 windows
+(540 s declared), new disposable seed. Operator played; Finish while
+live → footer observed (complete, 73,513 events, 0 drops) → game
+closed → Restored, hash-verified. No receipt rewritten, no vault touched.
+
+Evidence (`build/verification/iteration-5-20261027/`):
+`DSVR-trace-54088-350808281-1.jsonl` (18.3 MB, footer closed) +
+`DSVR-native-run3.log`; `analysis-run3.json` (valid, footer present).
+71,920 step dispatches, 317 paired samples — ALL in `neutral`
+(player handle 268713984, HP 659, no deltas). oor/occl/repeat/
+retarget/loadlife/failed-parry/dodge/parry-only: 0 samples each —
+windows elapsed with no combat callbacks. 0 interaction activations.
+Coverage PARTIAL (neutral partial — capture starts mid-window; the 8
+empty windows are elapsed-but-silent, not unobserved).
+
+Verdict (revised per operator): operator reports multiple combats +
+parries during run3, but the trace shows zero enemy-involved contacts
+after second 1 — 317 idle contacts (beh 505, no HP change) in a 1 s burst
+at capture start, then 489 self-excluded over 10 min, 0 non-player
+exclusions, 0 refused. The hook stayed alive (71,920 steps) yet recorded
+none of the reported fights, so "quiet area" is insufficient: either the
+fights fell outside the hooked contact path (wrong seam for this combat
+type/state) or window alignment vs actual fight times diverged. B1 stays
+PARTIAL on run2. Next: short focused run from an enemy-dense spot with
+fights timed inside the announced CASE windows (watch the runner log),
+or trace why real swings/parries bypass ContactDetour. No native writes;
+uncommitted per hard limits.
+
+### Iteration-5 labelled run: footer-valid B1/H1 comparison (27 Oct, uncommitted)
+
+Task: re-run Launch WITH `-Cases` B1/H1 sheet, Finish while game live.
+Candidate re-sealed to current tree (`1d42a16f…1f972816`, 274 sources)
+after MODLOG edit invalidated the prior seal; Check PASS; Launch 11:13 EDT
+detached (PID 9088), game PID 51904, 15 labelled windows (900 s declared).
+Operator played through `loadlife`; Finish requested while live → footer
+observed (complete, 105,414 events, 0 drops) → game closed → Restored,
+hash-verified. No receipt rewritten, no vault touched.
+
+Evidence (`build/verification/iteration-5-20261027/`):
+`DSVR-trace-51904-348727796-1.jsonl` (26.9 MB, header PID 51904, footer
+closed) + `DSVR-native-run2.log`; `analysis-run2.json` (analyzer exit 2 =
+valid, footer present) + `combat-cases.json`. 6,891 paired samples, 0
+unpaired, 0 pairing errors. Case coverage: hit/miss/wall/block/parry-only/
+failed-parry/dodge/elig/inelig fully covered; neutral + oor partial
+(capture starts mid-window); occl/repeat/retarget/loadlife unobserved
+(truncated at Finish). 3 interaction activations (obj `d678030`).
+
+Per-case HP deltas (analyzer-bound, operator windows):
+- hit: player 659→440→323 by handle 268697606 (beh 222320170/100).
+- miss: player 323→269 (beh 222320231) — HP moved in the miss window;
+  window label ≠ outcome proof.
+- wall: hollow 69→29→0 by player (beh 102301000/010, kind 2 then 0).
+- block: player takes 624→613→591→551→534→512→431→408 (beh 225000xxx,
+  ret `...dcecf01`) while killing hollows 69→0 (beh 102301510/000,
+  ret `...0001`); player kills are kind 0/2 ret-1, incoming is kind 0
+  ret-`dcecf01` — distinct return families, not a guard/parry verdict.
+- parry-only: single incoming 408→294 (beh 225500350, ret `dcecf01`).
+  No ret-1 kind-0 zero-motion sample in this window — the run-1 parry
+  shape (seq 3472/3802) does NOT reproduce here. Parry attribution open.
+- elig/inelig: new handles 268468243/45/48 (beh 2254/2255xxx); player
+  kills 75→38→1→0 and 75→0; player takes 659→…→107→0 then dies.
+- failed-parry/dodge: 0 samples — windows elapsed with no combat
+  callbacks; absence of callbacks ≠ successful defense.
+
+B1 verdict: PARTIAL — hit/wall/block/elig/inelig show bound HP deltas in
+their windows; miss shows HP movement (label/outcome mismatch);
+parry-only/failed-parry/dodge show no parry-discriminating signal;
+neutral/oor partial; occl/repeat/retarget/loadlife unobserved. B1 stays
+open. H1: 3 activations, no prompt/LOS/eligibility binding — stays open.
+Kind-2 semantics, beh 104800450/4800450 identity, src-None provenance,
+`...e7d6e01`/`...e20c001`/`...dcecf01` return meanings: still unknown.
+
+Steering (operator, approved): on quit, use this save as the new disposable
+start point; operator reports every combat interaction covered. Staged:
+`build/verification/disposable-start-20261027/test-root-{0,1}/1843241039/DRAKS0005.sl2`
+(Documents slot `54485597…`, AppData slot `1ecf2c4d…`) + steam_autocloud
+(`4f398df6…`), copied from the run2 vault test-outputs — NOT yet installed
+as seed; the seed swap itself goes through the receipt runner path with
+operator approval (vault untouched by this session). No native writes;
+uncommitted per hard limits.
+
+### Iteration-5 observer run: rich combat captured, trace unclosed (27 Oct, uncommitted)
+
+Task: launch protected desktop observer on fresh iteration-5 candidate,
+monitor via telemetry only (no inputs), close out on operator finish.
+Baseline `d2fd048` + uncommitted iterations 2-5 tree; candidate
+`build/verification/iteration-5-20261027/candidate.json` (SHA-256
+`f1201081…9bdce`, 274 sources, 4 binaries; Debug 107/107, Release 107/107,
+LAB 105/105). Check PASS, Launch 10:49 EDT detached (PID 20556), game PID
+30408, 30-min window to 11:19. Operator played ~9 min then closed the game:
+parry-no-riposte + parry-with-riposte, hollow kills incl. black-firebomb
+kill, dialogue/door/bonfire activations, fog traverse, death by Asylum Demon.
+Finish requested via repaired path (held); runner Restored, save roots +
+install files hash-verified against pre-staging inventories. No receipt
+rewritten, no vault touched.
+
+Evidence (all under `build/verification/iteration-5-20261027/`):
+`DSVR-trace-30408-347316546-1.jsonl` (25.6 MB) + `DSVR-native.log`
+(16.3 MB) copied to evidence; `analysis.json` (analyzer exit 2) +
+`hp-deltas.txt` derived. 60,362 step dispatches, 7,891 paired combat
+samples, 3 interaction activations, 0 unpaired contacts. 25 target HP
+deltas: player handle 268713984 (vtable `...13251f0`) kills hollows
+(44→31→18; 69→29→0; 69→12; 69→4; 69→4→0; boss-pool 813→719→625);
+player takes hits (659→624→543; 659→593→…→516→481; 288) and dies 19→0 at
+seq 7718 by handle 268697606 (beh 222320100/atk 223200, ret `...e7d6e01`).
+Two ret-1 kind-0 zero-motion samples (seq 3472/3802, beh 104800450) sit
+immediately before the 69→12 hit and the 12→0 kill — consistent with the
+reported parries, but NOT bound: launch ran without `-Cases`, so no
+operator QPC windows exist to attribute them. Firebomb kill unattributable:
+src-None samples (5372/5373/5476, 3807, 6902) carry beh 102301200-family,
+not a distinct projectile signature.
+
+Verdict: capture integrity FAIL — "no closing footer"; combat observation
+integrity FAIL by propagation. Root cause is sequencing, not the runner:
+game exited before Finish, so RequestTraceStop found no live generation
+(tracked PID 30408, header PID 30408, live set empty → no stop signal) and
+the writer died with the game. Per plan rules only footer-valid traces
+qualify — B1/H1 stay UNVERIFIED, no gate closes. B/C/H acceptance unchanged.
+
+Next: re-run Launch WITH `-Cases` sheet (B1/H1 labels) and call Finish
+while the game is still live, before operator closes it. Open unknowns:
+kind-2 semantics; beh 104800450/4800450 identity; src-None sample
+provenance (firebomb vs untracked source); `...e7d6e01`/`...e20c001`
+return-bit meanings. No native writes; uncommitted per hard limits.
+
+### Iteration 5: runner Finish lease fix + full ladder re-green (27 Oct, uncommitted)
+
+Root cause (MODLOG native-gates session): `-Mode Finish` refused while the
+detached runner held `active-session.lock` because the HResult check read
+`$_.Exception.HResult` on the outer `MethodInvocationException` (low 5377),
+not the inner `IOException` (low 32/33 sharing violation). Fix:
+`tools/run_combat_capture.ps1` Finish path now walks to the inner
+`IOException` before masking. Verified: `SelfTest` PASS; live probe with the
+lock held by another handle returns "Finish requested" (was: refusal).
+No receipt/transaction semantics changed.
+
+Verify: Debug build clean + ctest 107/107 PASS; Release build clean +
+ctest 107/107 PASS; `auto_verify.ps1` verifier Release PASS + doctor PASS
+(pinned build 1.03.1/10943698), dist ZIP 1453173 bytes. DLL hash-verified
+deployed to game dir per standing pref (63FC7F6F…A1EABC both sides, stale
+backup kept). Fresh offline candidate sealed
+`build/verification/iteration-5-20261027/candidate.json` (SHA-256
+`3324ba1a…13e325c4a`, 274 sources, 4 binaries; Debug 107/107, Release
+107/107, LAB Release 105/105) — supersedes the stale native-gates-20261027
+candidate (33 sealed files changed since). Read-only Check PASS against the
+fresh candidate (pinned candidate, offline/disconnected Steam, exact-game
+block, disposable seeds, both roots; no transaction, no deployment). B/C/H
+stay UNVERIFIED — B1/H1 case sheets still unplayed; next is the protected
+native transaction (Launch → Finish) now that the Finish path is repaired.
+No native writes; uncommitted per hard limits.
+
+### Iteration 4: mesh-not-hitbox envelope + bind-pose neutral hand (27 Oct, uncommitted)
+
+Steering: two-hand grip requires hands on the weapon mesh, not the hitbox.
+
+- `SupportGrip` envelope tightens along the blade: allowed distance lerps
+  from `support_attach_m` (hilt, hand wraps grip) to new `support_blade_m`
+  (0.06 default, mesh contact) by grab fraction. A hand floating beside the
+  mid-blade refuses; mesh contact attaches. Test-pinned both ways.
+- Hand calibration fix (user report: neutral grip renders rotated inward):
+  `neutral_hand` derived from the native bind pose (`g_source_reference`
+  hand, expressed in bind-root frame, re-expressed in calibration heading
+  frame) instead of the world-axis T-pose guess. Fallback (no frozen source)
+  keeps the old guess — required for parity (controller frame is reflected).
+  Root cause of the old twist: guess-vs-bind mismatch baked in as permanent
+  rotation. Fixture expectations updated to the bind-derived baseline
+  (diag(-1,1,-1), RotZ roll, weapon-on-grip invariant verified, turn
+  propagation intact); two-hand test reaches for the visible handle.
+- Verify: Debug build clean + ctest 107/107 PASS; Release build clean +
+  ctest 107/107 PASS; `auto_verify.ps1` verifier Release PASS + doctor
+  PASS (pinned build 1.03.1/10943698), dist ZIP 1452712 bytes. DLL deployed
+  to game dir per standing pref (stale backup kept). Lanes C/F + ledger
+  updated. B/C gates stay open; no native writes; uncommitted per hard limits.
+
+### Iteration 3 fixes: config tick, energy agreement, flick-gated parry (27 Oct, uncommitted)
+
+Reviewer FAIL flags, fixed without regressing prior verification:
+
+- Tick config-shaped: support-grip `GripTick` now takes
+  `cfg.deflect_amplitude`/`cfg.deflect_duration_ms` instead of `(0.5f, 20)`
+  constants — same caller-supplied shape contract as the deflect pulse.
+- Energy agreement: `EvaluateBladeContact` reports and feels the gated
+  energy, not the raw speed — `tip_speed_mps = energy`, `HitHaptic(energy,
+  ...)` — so scale, carried measurement and haptic agree under torque.
+  Regression pin: 2.0x response on 1.0 m/s reports 2.0 m/s with matching
+  haptic amplitude/duration.
+- Flick-gated parry: bench holds a persistent `ShieldGuardTrigger` +
+  params (config-mapped); a parry-window hit without the flick shape
+  (`parry`/`flicked`) demotes to block. Held guard can no longer read as
+  parry. Missing `shield_guard_math.h` include added.
+- Verify: Debug build clean + ctest 107/107 PASS; Release build clean +
+  ctest 107/107 PASS; `auto_verify.ps1` verifier Release PASS + doctor
+  PASS (pinned build 1.03.1/10943698), dist ZIP 1451736 bytes. DLL deployed
+  to game dir per standing pref (stale backup kept). Lane C + ledger
+  updated. B/C gates stay open; no native writes; uncommitted per hard
+  limits.
+
+### Iteration 2 fixes: persistent grip, poll-thread drain, proxy deleted, deadlock (27 Oct, uncommitted)
+
+Reviewer-flagged gaps, fixed without regressing prior verification:
+
+- `g_bench.support[2]` persistent state: the bench built a fresh `SupportGrip`
+  every frame, so attach/release hysteresis could never hold. State now lives
+  in the bench; `support.Update` runs against the persistent slot.
+- Poll-thread haptic drain: `ArmIkCombatBench` only fires when the Combat panel
+  polls. New `ArmIkDrainBenchHaptics()` called from `InputPollFrame` every
+  frame; no-op unless the bench queued a pulse from classified geometry.
+- `IsTwoHanded` 14 cm point proxy deleted (`= delete` with redirect comment);
+  `two_hand_distance_m` field removed; `test_hand_math` points at the segment
+  envelope. Old callers fail at compile time instead of silently using the
+  wrong rule.
+- Deadlock: drain re-locked `g_hands_mutex` while `ArmIkCombatBench` held it
+  (`arm_pose_native` hung 236 s). Fixed with lock-held `DrainBenchHapticsLocked`
+  inner + locking wrapper; bench calls the inner, poll frame calls the wrapper.
+- Test stubs: `test_input` gains `ArmIkDrainBenchHaptics` no-op (links
+  `input.cpp` directly).
+
+Verification: Debug build clean + ctest 107/107 PASS; Release build clean +
+ctest 107/107 PASS; `auto_verify.ps1` verifier Release PASS + doctor PASS
+(pinned build 1.03.1/10943698), dist ZIP 1450978 bytes. Lane C + ledger
+updated. B/C gates stay open; no native writes; uncommitted per hard limits.
+
+### Slices 2-7 + dummy gate + verify ladder (27 Oct, uncommitted)
+
+Request: continue until all slices implemented and all related blockers resolved/iterated
+(`docs/superpowers/specs/2026-10-27-expanded-combat-contact-design.md`).
+
+Implementation (same files + `src/core/weapon_grip.{h,cpp}`, `src/core/core.cpp`,
+`tests/test_weapon_grip.cpp`, `tests/test_core_start.cpp`,
+`tests/test_arm_pose_native.cpp`, `docs/NATIVE_MELEE_CONTRACT.md`):
+
+- Slice 2 kinetic scale: `EvaluateBladeContact` takes `torque_response`
+  (default 1); non-unity gates energy before the scale, mis-tuned refuses.
+  `ClassifyWeaponContact` threads it; bench passes `cfg.torque_response`.
+- Slice 3 mass table: `WeaponMass{Load,Get,Entries,Valid}` (`DSVR_MASS 1`
+  format, whole-file refusal, empty path = empty table); bench prefers
+  per-weapon response, falls back to config; `core.cpp` loads the table path
+  at startup (never blocks). Round-trip + corrupt-reload pins.
+- Slice 4 two-hand torque: `TwoHandTorque` (hilt 1.25x fading to tip 1.0x)
+  multiplies the bench response when grabbed; `GripTick` shares deflect shape.
+- Slice 5 rim: `ThreatBlockedByShield` takes `rim_m` (default 0); edge graze
+  counts with rim, far misses either way; bench uses 0.05 m.
+- Slice 6 haptics: `g_bench.pulse[2]` queue (hit/deflect/grip-tick) drained in
+  `ArmIkCombatBench` on the poll thread via `InputApplyHaptic` (never under
+  the pose hook). Test stubs added (`test_arm_pose_native`,
+  `test_core_start` + `WeaponMassLoad`/`WideFromUtf8` stubs).
+- Slice 7 aim: `AimRayFromAimPose` (XR LOCAL, grip-local -Z, fail-closed) +
+  unit pins. No native binding, no target.
+- Dummy gate: Ghidra probe — `140528910` row selector + `1403C93B0` builder
+  pinned; `CreateSfx_DummyPoly` is SFX-only (single DATA xref, no callers).
+  No weapon-model dummy resolver found; unknown recorded in contract,
+  fail-closed rule stands.
+- Link fixes: `test_core_start` stubs, `test_arm_pose_native`
+  `InputApplyHaptic` no-op. Root cause: new production calls need matching
+  test stubs; the parallel build had skipped the failing targets.
+
+Verification: Debug build clean + ctest 107/107 PASS; Release build clean +
+ctest 107/107 PASS; `auto_verify.ps1` verifier Release PASS + doctor PASS
+(pinned build 1.03.1/10943698), dist ZIP 1449759 bytes. Lane C + ledger
+updated. B/C gates stay open; no native writes; uncommitted per hard limits.
+
+### Slice 1 continuous blade contact: source checkpoint (27 Oct, uncommitted)
+
+Request: implement slice 1 of `docs/superpowers/specs/2026-10-27-expanded-combat-contact-design.md`
+(continuous blade contact; kinetic rides on it; weight/two-hand/posture/deflect hooked, later slices bind).
+
+Implementation (`src/core/combat_atkparam.h`, `src/core/combat_math.h`,
+`src/core/combat_contact.h`, `src/core/weapon_weight_math.h`,
+`src/common/config.{h,cpp}`, `src/core/arm_ik.cpp`, `tests/test_combat_{atkparam,math,contact}.cpp`,
+`tests/test_weapon_weight.cpp`, `tests/test_config.cpp`):
+
+- Swept slot overlap: `BladeSweptOverlapsHitSlot` (current + previous capsule,
+  tip/grip paths vs slot); `QualifyContact` takes optional prev_grip/prev_tip
+  (NaN default = static-only, no invented sweep). Regression: fast swing past a
+  thin capsule qualifies only with history, refuses without.
+- Grab-point kinematics: `BladeKinematics::FeedGrabRelative` (own head-relative
+  channel; teleport/non-finite invalidates grab only) + `ContactSpeed(grab_held)`.
+  Halfsword: bench shortens contact segment to grip->grab, scale at grab speed.
+  Root cause fixed: teleport path now clears `grab_valid`.
+- Two-hand envelope: `SupportGrip` segment-to-point (squeeze + free grip near any
+  blade point; hilt ~0, mid-blade halfsword) with release hysteresis; legacy
+  point-proxy overload kept for existing callers.
+- Posture guard: `ShieldPlaneFromCommittedPose` (root * shield hand, caller face
+  radius) + `ThreatBlockedByShield` (segment-vs-disc crossing, no hand sphere);
+  bench defence now uses the plane. Unit: crossing counts, beside/short misses.
+- Weight/torque/config: `TorqueGatedSpeed` (response gates rise, never damage);
+  new `[combat]` keys `weapon_mass_table_path`, `torque_response`,
+  `halfsword_envelope_m`, `deflect_amplitude`, `deflect_duration_ms` —
+  parsed, clamped, saved, validated, round-trip pinned.
+- Deflect haptic: `DeflectHaptic` (shorter/sharper than thrust 45 ms, config
+  shaped, classified-geometry only).
+- Bench integration: halfsword grab feed + segment shortening, shield plane
+  defence, halfsword envelope from config. No native writes; B/C gates open.
+
+Verification: `cmake --build build --config Debug --parallel` clean;
+`ctest --test-dir build -C Debug --parallel` 107/107 PASS;
+`cmake --build build --config Release --parallel` clean;
+`ctest --test-dir build -C Release --parallel` 107/107 PASS;
+`pwsh -NoProfile -File tools/auto_verify.ps1` verifier Release PASS + doctor
+PASS (pinned build, App 1.03.1 / build 10943698), dist ZIP 1445279 bytes.
+Lane C + plan ledger updated; B/C native gates stay open until footer-valid
+B1/H1 captures land.
+
+### Combined body fit: head height + arm reach in one anchor (27 Oct, uncommitted)
+
+Request: arm-reach mode should account for player height; combine the two.
+
+Implementation (`src/core/calibration_fit.h`, `src/core/camhook.cpp`,
+`src/common/config.{h,cpp}`, `src/setup/gui.cpp`, `src/core/mod_menu.cpp`,
+`tests/test_calibration_fit.cpp`, `tests/test_config.cpp`):
+
+- `ResolveCalibrationMapping` no longer branches on `prefer_head_fit`:
+  the head anchor is always computed first (camera stays on the native
+  Head bone), then the reach-implied scale clamps it into a +/-25%
+  plausibility band around the head scale. Reach-only (no upright native
+  head yet) falls back to the old arm fit; no measurement stays manual.
+  No bone base, collider, or mesh is scaled; `prefer_head_fit` is kept
+  as an accepted-but-ignored parameter so old call sites still compile.
+- "arm" is retired as a separate mode: config files with
+  `embodiment_fit = "arm"` load as `"head"`, `ConfigValid` accepts only
+  `"head"`, only `"head"` is written. Setup shows one disabled
+  "Head height + arm reach" box ("Height sets the view; reach keeps the
+  hands reachable"); the mod menu shows the same disabled combo with the
+  combined explanation. `camhook.cpp` always requests the combined fit.
+- Tests: `test_calibration_fit` pins long-arm clamp (1.6x reach -> 1.25x
+  head scale), short-arm clamp (0.72x -> 0.75x), agreement passthrough,
+  and retired-arm equivalence; `test_config` pins legacy load + typo
+  default + write-only-head. Debug 107/107, Release 107/107.
+
+### Setup launcher overhaul: true simple/dev views (27 Oct, DISTRIBUTED)
+
+Request: hide dev mode for real (shrink window, not blank rows), rename
+"Link the flame" to Launch Game, plain-language settings, vignette + snap
+off by default including both auto presets, fix all overlaps.
+
+Implementation (`src/setup/gui.cpp`, `src/common/config.h`,
+`tests/test_setup_theme.cpp`, `tests/test_config.cpp`):
+
+- Simple view now genuinely collapses: the developer block is one contiguous
+  stored band (y 490..726, advanced tuning rows); in simple view every row
+  at/below it shifts up by kDevH and the window shrinks by the same 236px.
+  Hidden dev controls park offscreen; the Settings groupbox shrinks instead
+  of leaving a blank gap. Ctrl+D toggles + resizes back, persisted.
+- Plain-language labels: "Link the flame" -> "Launch Game" (still the ember
+  button), presets Relaxed/Balanced/Sharp with one-line hints, "Play in VR
+  (off = flat monitor)", "Controller rumble", "Weapon hand", "Stance",
+  "Swing to attack (experimental)", "Record play session (trace)",
+  "Dim edges while moving", "Snap turning/step", "Frame cap (fps)",
+  "Walk steered by / Steering hand", "Body matches your (Head height /
+  Arm reach)", "Avatar arms follow". Brief line updated to match.
+- Vignette + snap off by default: `FactorySafeDefaults()` and all five
+  presets (Comfort/Performance/Veteran + Auto Smooth/Res) set
+  `comfort_vignette=false`, `snap_turn=false`, `smooth_turn=true`.
+- Overlaps: test now walks all shown control pairs in both views (combos
+  clipped to closed height, parked hidden rows skipped, hint-vs-control
+  and static-vs-static adjacency ignored). Fixed real collisions: preset
+  hint row under preset buttons, body-fit/arm combos vs arm-hint row,
+  chain proxy vs arm row; spread proxy/trace/save/reset/activity rows down.
+- Tests: `test_setup_theme` pins simple/dev window heights, hidden state,
+  both-view overlap scans, and new brief strings; `test_config` pins the
+  off-defaults. Debug 107/107, Release 107/107. No game launch.
+
+Distribution: `pwsh -NoProfile -File tools/auto_verify.ps1` green —
+Release 107/107, doctor PASS, `dist/DSVR-latest-x64.zip` refreshed
+(0.16.0-render-host-preview, built 2026-10-27T04:55:27Z, Setup
+`c21a0edf…`). Verification JSON `dist/DSVR-latest-verification.json`.
+Note: the first attempt failed at packaging because a stale
+`dist/DSVR-latest/DSVR-Setup.exe` process (PID 3416) held the file;
+stopped it, re-ran green.
+
+### Native gates session (27 Oct, later): static probes closed, live run BLOCKED at Steam Offline
+
+User chose native-gates-only scope. Two bounded static probes via live
+GhidraMCP (`DSRFull`, read-only, DB unsaved), recorded in the contracts:
+
+- Melee: type-64 `+30` consumer search is a **negative result**. The
+  `attackBaseParry` float (weapon row `+F2`, gated `+0x34==0x40` at
+  `1405292A5..B6`) has no reader in any recovered dispatch consumer
+  (`1403C4020/4210`, `1402F84B0/F0`, `1402FC360`, `140420A20/B30`). It is
+  inert build-time data. Kind-1 thunk still ends at the unrecovered
+  `142C58024` jumptable. Parry/block discrimination is runtime-only now.
+- Interaction: eligibility continuation walked to its terminal
+  (`14030D4A0 -> ... -> 1425B7AD2 -> 14273403D/14030D89B` forged-RET mesh).
+  Distance is compared/normalized and consumed inside computed dispatch;
+  nothing returns to an indexed caller. Prompt producer named:
+  `14071BD30(row_param+4, 1, 1)` -> message `(2,1)`/action 7 via
+  `140686BC0` family. H1 static closed at the same computed-dispatch wall
+  as melee. Reach gate stays fail-closed; no binding follows.
+
+Defect found and fixed en route: uncommitted factory-defaults drift had
+flipped `comfort_vignette` and `snap_turn` to false in `FactorySafeDefaults()`
+(and the `Config` default), contradicting the pinned test and the recorded
+implemented posture. Restored `true` in `src/common/config.h:40,291`;
+`FactorySafeDefaults` snap back to `true`. Rebuilt: Debug 107/107,
+Release 107/107, LAB Release 105/105 (logs
+`build/verification/native-gates-20261027-*.log`).
+
+Fresh offline candidate sealed:
+`build/verification/native-gates-20261027/candidate.json` (273 sources;
+LAB core `c25c09fc...`, loader `21d5744c...`). Runner SelfTest PASS.
+Read-only Check BLOCKED: `tools/run_combat_capture.ps1:1001` —
+**Steam Offline preference is not set** (`WantsOfflineMode` for account
+1843241039). No transaction started, nothing installed, no process
+stopped, Steam state untouched (operator owns the Steam client state;
+do not flip it programmatically).
+
+Exact resume (operator action first): in Steam, Go Offline / confirm
+Offline Mode, keep the game closed, then:
+`pwsh -NoProfile -File tools/run_combat_capture.ps1 -Mode Check -CandidateReceipt build/verification/native-gates-20261027/candidate.json -Receipt build/verification/native-gates-20261027/run-receipt.json -WindowMinutes 30`
+then the same with `-Mode Launch` (detached) and the B1 case sheet
+(neutral/hit/miss/wall/block/parry-only/failed-parry/dodge, 480 s) plus
+the H1 interaction sheet (450 s) from execution-guide Step 2. Analyze
+only footer-valid traces; superseded capture labels are not acceptance.
+B/C/H remain UNVERIFIED until that comparison lands. Do not enable
+`physical_attacks`/`physical_defence`/`reach_interact` as qualified
+features, and do not suppress manual RB/RT/LB/LT, until a native
+submission/defense binding passes its own gate.
+
+Follow-up same session: two more in-tree defects were repaired before the
+launch — (1) `src/setup/gui.cpp` dev-mode split left `kContentHeight`
+undeclared at 3 sites (670/797/1249); added mode-aware `ContentHeight()`
+(simple 656 / dev 760) and used it in DrawFrames/Relayout/window creation,
+with the `tests/test_setup_theme.cpp:107` fixture updated to match;
+(2) candidate resealed after the fix (Setup exe `591e56f2...`; LAB core /
+loader unchanged). Full suites re-run green into the same three logs.
+Steam then read Offline/logged-off: **Check PASS** (pinned candidate,
+exact-game block, disposable seeds, both roots). **Launch started
+00:33 EDT, 30-min transaction, absolute cutoff 01:03 EDT**; receipt
+`build/verification/native-gates-20261027/run-receipt.json`. Operator
+gameplay: B1 sheet then H1 sheet (execution-guide Step 2 budgets);
+finish early with `-Mode Finish` on the same receipt. On completion:
+verify Restored + hash-check originals, then analyze only footer-valid
+traces per case before any B/C/H verdict changes.
+
+Outcome (game closed by operator 00:37, before any combat cases): the
+detached runner's `-Mode Finish` path hit a script-local lease bug
+(`run_combat_capture.ps1:965` HResult check missed the sharing
+violation, so the queued `-Mode Finish` refused while PID 33588 still
+held `active-session.lock`). Wrote the identical `finish-v1` marker the
+mode would write; runner then closed out itself. Receipt state
+**Restored**, `tracking_error`/`recovery_error` absent; all 10 save-root
+files hash-verified against pre-staging inventories; installed
+dinput8/DSVR.dll/DSVR.toml byte-identical to pre-run originals; living
+game dir holds only originals + the one incomplete capture. No save
+progress was touched beyond the automated rename-swap-restore cycle;
+personal roots never received disposable content (rename, not merge).
+
+Evidence from this run: `DSVR-trace-32552-310355281-1.jsonl` (22,454
+lines, header schema 2 / combat_detail 1 / context 1, PID 32552) **has
+no closing footer** — recorded as `unclosed_traces` in the receipt and
+therefore **incomplete, unusable for B/C/H**. The observer saw 652
+contacts but all reads were refused (`invalid_or_changed=169` per burst,
+`combat_samples=169` with zero accepted) because the disposable-seed
+local player never loaded into a verifiable scene in the ~3 minutes
+before the operator closed the game; no `native_combat_context`,
+activation or HP attribution exists. The copied `DSVR-native.log` shows
+a healthy observer (22,453 events, 0 drops, combat binding still
+UNVERIFIED by design) on the Early-game disposable seed.
+
+Runner fix needed before the progress-save run: `-Mode Finish` must
+tolerate the `active-session.lock` sharing violation when the detached
+runner itself holds the lease (currently treats it as fatal instead of
+as "runner alive, write the finish marker"). One-line HResult branch;
+no receipt/transaction semantics change. Then the progress-save
+transaction can be staged as its own receipt (real saves as the staged
+inventory, backed up first). B/C/H stay UNVERIFIED; B1/H1 case sheets
+still unplayed.
+
+### Active focus: physical/native/button interaction and combat/defense (27 Oct)
+
+Task `combat-input-20261027`, baseline `d2fd048`; preserved existing dirty
+capture, menu, launcher and refresh-rate work, including concurrent safe-defaults
+edits. This slice fixes the opt-in native-input preview, not contact submission.
+Source-graph and GhidraMCP tools were not advertised in this session; direct
+source reads used the fallback. No native ABI was guessed.
+
+Reproduced with rebuilt `test_input` / `test_shield_guard`: still-moving hands
+could parry after slowing; recenter/gap history could preserve guard or complete
+an old flick; duplicate callbacks truncated attack/guard holds; defense depended
+on the attack toggle. Fixed `input.cpp` / `shield_guard_math.h`: independent
+attack/defense opt-ins, common readiness gates, reset on discontinuities,
+identical pose/time reuse without advancing motion, and a flick that must return
+to actual rest within its original deadline. Initial parry cooldown no longer
+depends on clock origin. Explicit A/RB/RT/LB/LT remain usable with lost poses
+and incomplete native binding.
+
+Regressions cover 72/90/120 Hz, early/late rest, clock origin, duplicate
+callbacks, tracking loss, recenter, polling gaps and rollback. Corrected test
+inputs that teleported the walking head back on stopping and interleaved two
+replay timelines on one clock. No production timing/speed/naturalness threshold
+was relaxed. ENGINEERING now correctly states separate LB block/LT parry and
+preserves manual input while unbound.
+
+Commands/results (logs in `build/verification/combat-input-20261027/`):
+- `cmake --build build --config Debug --parallel`: exit 0.
+- `ctest --test-dir build -C Debug --parallel --output-on-failure`: 107/107, exit 0.
+- `pwsh -NoProfile -File tools/auto_verify.ps1`: Release build and 107/107 tests
+  PASS; doctor PASS; overall exit 1 at packaging because
+  `dist/DSVR-latest/DSVR-Setup.exe` is locked. That folder is not a freshly
+  verified package; the old ZIP/verification receipt was not replaced.
+- `cmake --build build/combat-lab --config Release --parallel`: exit 0.
+- `ctest --test-dir build/combat-lab -C Release --parallel --output-on-failure`:
+  105/105, exit 0.
+
+Native/headset UNVERIFIED. No deployment, save transaction or game launch;
+no process was stopped. Separate development packaging uses
+`build/verification/combat-input-20261027/package/` to avoid the lock.
+`python -B tools/package.py --build build --out
+build/verification/combat-input-20261027/package --version
+0.16.0-render-host-preview --latest --reshade-addon --ctest-log
+build/verification/combat-input-20261027/release-verify.log --doctor pass`:
+exit 0; ZIP and binary-hash verification JSON produced. This is a development
+package only, with no fresh protected-native candidate/preflight claim.
+
+B/C/H remain open: real contact submission needs actor/context lifetime,
+simulation ownership and independently correlated hit/block/parry outcomes;
+physical reach needs selected row/object generation, eligibility/LOS and native
+activation ownership. Next discriminating work is the existing B1 comparison:
+complete footer-valid hit/miss/block/failed-parry/parry-only evidence with selected
+PARAM/event identity, then follow the type-64 `+30` consumer and character-contact
+owner using the live DSRFull Ghidra tools. For H1, continue the selected ObjAct
+row/dummy/eligibility path recorded in NATIVE_INTERACTION_CONTRACT. Do not enable
+either unbound path or reuse superseded capture labels as acceptance evidence.
+
+### Active task: safe factory defaults + reset + Ctrl+D developer mode — implemented, validated
+
+Request: reset-to-defaults button; factory default = safest most
+comfortable average-user posture; current full view becomes an expanded
+developer mode behind Ctrl+D on a simplified default.
+Implementation (uncommitted):
+`FactorySafeDefaults()` in config.h (VR on, Auto Smooth 90cap/70%,
+vignette .65, snap 45 + smooth 240, standing/head/non-dominant/head fit,
+motion + haptics on, all unqualified bridges off, capture off, auto frame
+match on; `ConfigValid` passes; save/load round-trips).
+Launcher: Reset safe defaults button (confirm dialog, refuses without a
+game path, logs outcome), Ctrl+D accelerator (works inside edit boxes)
+flipping a persisted `dev_mode` file flag; simplified default hides 16
+tuning controls (render %, snap degrees, FPS combo, move refs, body fit,
+arm tracking, proxy + labels), developer reveals them; brief shows
+"dev mode"; `ApplySafeDefaults`/`ToggleDevMode`/`ApplyDevVisibility`.
+Fresh binary `build/src/setup/Release/DSVR-Setup.exe` rebuilt. Tests:
+`test_config` factory block, `test_setup_theme` reset/refusal/dev-toggle/
+visibility/brief blocks. Debug 107/107, Release 107/107, LAB Release
+105/105. No game launch in this pass.
+
+### Active task: launcher debug-capture toggle — implemented, validated
+
+Request: fresh Setup build with debug capture as an on/off option.
+Implementation (uncommitted): `Debug capture (session trace)` checkbox in
+the Settings group (`CTL_DEBUGCAP`, first-class setting id), bound to
+`autonomous_session_capture` via PopulateControls/ReadControls, shown in the
+brief line (`capture on/off`), covered by `test_setup_theme` (exists,
+unchecked by default; click → dirty + brief; ReadControls/Save round-trip
+both directions). Layout: Settings groupbox +28px, Activity section shifted
+down, log height trimmed to keep the 760px content size. Fresh binary:
+`build/src/setup/Release/DSVR-Setup.exe` (512 KB, rebuilt). Debug 107/107,
+Release 107/107, LAB Release 105/105. No game launch in this pass; run the
+fresh Setup against the game folder, tick the box, Save, launch.
+
+### Active task: hardware auto-fit presets + refresh warnings — implemented, validated
+
+Request: launcher identifies core hardware and suggests balanced setups for
+72/90 fps; Auto Smooth (90 fps) vs Auto Res (72 fps) presets; headset
+requested rate is always the framecap; launcher warns when the file cap is
+impossible vs the headset rate. Implementation (uncommitted):
+`src/core/perf_fit.h` (pure tier/preset/warning policy),
+`src/common/config.{h,cpp}` (sidecar `DSVR.toml.headset-hz` read/write),
+`src/core/xr.{h,cpp}` (`XrLastDisplayRefreshHz` atomic accessor),
+`src/core/diagnostics.cpp` (shutdown sidecar write),
+`src/setup/{setup_internal.h,hardware.cpp}` (DXGI/RAM probe, fail-soft),
+`src/setup/gui.cpp` (Auto Smooth 90 / Auto Res 72 / Detect hardware buttons,
+populate-time refresh warning, auto_frame checkbox preserved).
+Tests: `test_perf_fit` (tier floors, preset mapping, warning text),
+`test_config` (sidecar round-trip), `test_setup_theme` (preset application,
+detect log, warning on/off). Debug 107/107, Release 107/107, LAB Release
+105/105. Needs full-suite re-run after any further edit + live confirm;
+no game launch in this pass.
+
+### Prior task: auto-match headset refresh to frame cap on launch
+
+Follow-up to the 27-Oct display-refresh fix. Request: changing the Quest
+refresh rate should auto-update DSVR's frame cap at game launch.
+Implementation (uncommitted): `auto_frame_limit_fps` config (default true,
+persisted, validated, mod-menu toggle); one-shot `AutoSyncFrameLimit()` in
+`src/core/xr.cpp` fires on the first shipped FB rate (session create/begin
+query or refresh-changed event) and rewrites only the live config via
+`DiagnosticsRequestConfig(sync, false)` — the file keeps the fallback.
+Quantizes via `QuantizePeriodToFps`; skips when the shipped rate already
+matches; never consumes the one-shot while disabled. Because the sync runs
+before `RequestDisplayRefresh`, session-begin at an already-synced rate
+issues no xrRequest (no mode renegotiation). Tests: `test_config`
+round-trip, `test_xr_mono_recovery` sync-once + no-repeat-request + refusal
+path; `config`, `mod_menu_render`, `xr_mono_recovery` pass. Needs full
+suite + live confirm; no game launch in this pass.
+
+### Prior task: fix display-refresh request flash (regression from 27-Oct build)
+
+Uncommitted 27-Oct display-refresh work (`RequestDisplayRefresh()` in
+`src/core/xr.cpp`) calls `xrRequestDisplayRefreshRateFB` at session
+creation/begin and on events-lost, unconditionally — assuming repeat
+identical requests are the runtime's no-op. Live report: flashing between
+the SteamVR void and the game view, absent before this build. Suspected
+mechanism: each xrRequest renegotiates the display mode on SteamVR/Link,
+showing the compositor fallback during the switch; blank `layerCount=0`
+submits show the same void, so log evidence decides. Fix (uncommitted):
+query the active rate first via `xrGetDisplayRefreshRateFB` and request
+only when it differs from the pick; repeat queries at the active rate make
+no runtime call. `tests/test_xr_mono_recovery.cpp` contract updated
+(request-on-difference + no-repeat-request + refusal-keeps-rate);
+`xr_mono_recovery` + 17 XR-adjacent suites pass. Rebuild + live confirm
+still required; no game launch performed in this pass.
+
+### Prior task: request the configured display refresh rate from the runtime
+
+Task ID `27-Oct-display-refresh-request`; baseline: uncommitted
+autonomous-VR-capture work in tree (see below). Request: keep controllers
+tracked at the highest rate the link sustains. Scope: the runtime owns the
+headset panel clock; the mod can only observe the current rate and request
+its configured `frame_limit_fps` cadence from the runtime's listed set.
+Additive, fail-soft slice only: `QueryDisplayRefresh()` now enumerates via
+`xrEnumerateDisplayRefreshRatesFB` and requests an exact listed match (else
+highest listed rate at/below the request, never above, never unlisted) via
+`xrRequestDisplayRefreshRateFB`, then reads back the authoritative
+`xrGetDisplayRefreshRateFB`. Repeat calls re-assert; refusal keeps the
+runtime default and logs. Instance wiring loads all three FB procs; the
+request pair missing only logs. Test: `test_xr_mono_recovery` gains a fake
+rate list/request surface covering exact match, below-request pick, refused
+request, and missing-proc paths. Debug 106/106, Release 106/106 PASS
+(`ctest --test-dir build -C {Debug,Release} --parallel`). No deployment,
+live run, preflight, or LAB rebuild; no native or headset evidence claimed.
+This slice only owns `src/core/xr.cpp` + `tests/test_xr_mono_recovery.cpp`;
+the rest of the tree below is the prior task's uncommitted work, preserved.
+
+### Active task: autonomous VR-session capture — implemented and validated offline
+
+Task ID `26-Oct-autonomous-vr-capture`; baseline `d2fd048`. The user superseded
+the case-start gate: after a one-time opt-in setting, record automatically from
+verified local-player load, without case plans, narration, or in-play prompts.
+Close player epochs after 2 seconds absent, resume on re-load, rotate 10-minute
+trace segments, record effective virtual-pad transitions and bounded 30 Hz hand
+samples, and write a session index/summary. No video/audio or inferred outcomes.
+
+Implementation is complete and validated offline; no live run, deployment,
+game/Steam launch, save/install transaction, or Ghidra edit. Behavior delivered:
+startup gate (`autonomous_session_capture` + normal VR + LAB; refusal logged);
+session-only LAB hook domain (no render probes; `virtual_pad_state`/`hand_tracking`
+admitted); explicit `DiagnosticsBeginCapture()` refusal while the session owns the
+writer; player-epoch tracking (2 s absence debounce, degraded flags, low-disk
+512 MiB reserve stop, genuine footers, interrupted close on process shutdown);
+append-only session index; multi-segment analyzer with identity/gap/tamper checks.
+
+Fresh candidate `build/verification/autonomous-vr-session-20261026-candidate.json`
+(270 sources, 4 binaries) records Debug 106/106, Release 106/106, LAB Release
+104/104 and read-only preflight PASS (`-Mode Check`). The stale
+`combat-observer-lifecycle-20261026` candidate predates this task and must not
+be deployed. Tests: `ctest --test-dir build -C Debug --parallel`,
+`... -C Release ...`, `ctest --test-dir build/combat-lab -C Release --parallel`.
+
+Architecture correction: desktop `observer_only` disables XR/input, so this
+scope requires the normal VR path in an opt-in LAB build. Capture hooks remain
+passive; ordinary VR mod/gameplay behavior is active. Approved design and test
+seams: `docs/superpowers/specs/2026-10-26-autonomous-vr-session-capture.md`.
+The case-start-gate design is superseded and archived under `docs/history`.
+
+The focused four-step work package remains in section 5 of the execution guide;
+its first step is replaced by this task. Its later native comparison/hitch/
+binding gates remain open and evidence-dependent. Baseline candidate
+`build/verification/combat-observer-lifecycle-20261026/candidate.json` (SHA-256
+`627794ccdbdc957f4f25c4379834c34a047ffedd9436bcd708dd5f9bc5f37ba3`) passed
+Debug 100/100, Release 100/100, LAB Release 98/98 and read-only preflight, but
+predates this task and must not be deployed. No game/Steam launch, deployment,
+save/install transaction, or Ghidra edit. After implementation, rebuild/test all
+three variants, mint a fresh immutable offline candidate, and run read-only
+preflight only. Preserve unrelated user edits in the execution plan.
 
 Selector byte correction and capture lifecycle are committed: `dfc8800`,
 `e4fa2b6`, `c1184c5`. The equality selector returns through the original
@@ -35,18 +5736,13 @@ disposable seeds and both save roots. No transaction, deployment or game launch.
 The default Oct-24 candidate is stale and must not be reused; prior candidate
 receipts remain unchanged.
 
-The observer records once for 600 seconds after local player load; planned cases
-must fit within that capture and count only when a valid footer encloses the full
-interval. The runbook's hit/miss/block/parry and interaction requirements remain
-open; no gameplay has been performed for this candidate. Final code review found
-one coverage caveat: `RunCasePlan` starts
-after the process stabilizes, but does not wait for the automatic trace header
-created after local-player load. The coverage report will expose an uncovered
-startup window rather than count it, but the first planned case could be wasted.
-The user selected and approved a bounded matching-header gate (300-second cap,
-540-second maximum case plan). Design is documented in
-`docs/superpowers/specs/2026-10-26-capture-case-start-gate-design.md`; it is not
-implemented. Request spec review before planning or changing code. No live run.
+The previous runner/case-plan capture records one 600-second trace and is not the
+new autonomous VR implementation. The 300-second header gate and 540-second
+case-plan cap are superseded; do not implement them. The four-step work-package
+text in the execution guide predates the user's autonomous-capture decision and
+must be read with the replacement of Step 1 recorded above. Native
+hit/miss/block/parry and interaction requirements remain open; no gameplay was
+performed for the stale candidate. No live run.
 
 Selector continuation result: `python build/selector_probe.py` against EXE SHA-256
 `a45aaa36dd2f6cc151670a639ea5547043cf38ea79ff4178b963c6ed71f98d7b` decodes
@@ -774,6 +6470,9 @@ then a cooldown; a swing that never comes back to rest never re-fires.
 `src/core/shield_guard_math.h` is its mirror for the shield hand: a raised hand
 held still for `guard_settle_ms` holds the native shield button for as long as
 it is held, and a short fast impulse that returns to rest taps the same button.
+(Superseded 31 Oct 2026 by the section at the end of this file: the shipped
+`guard_settle_ms` is now 0, the raise itself is the pose test, and the settle
+window below was never reaching the in-game detector at all.)
 DSR already separates a block from a parry by press length alone, so neither
 bridge invents a native binding - only press windows. Guard windows, stamina,
 chip damage, parry judgement and ripostes stay the game's and stay unqualified.
@@ -1573,4 +7272,295 @@ No formal release, upload or native physical-combat acceptance. B/C/H remain OPE
 production physical_damage_bound/shield_contact_bound still false, native context
 owner/generation/simulation phase and qualified target/geometry/LOS unresolved.
 Continue from correlated status setters and verified creation wrappers, with the
-saved exact raw traces available; do not repeat manual F9 captures.
+saved exact raw traces available; do not repeat manual F9 captures. The 29 Oct desktop observer Home-menu report traced to DiagnosticsThread: the Home edge was explicitly suppressed by `!cfg.observer_only`, although the UI itself can be opened without enabling any observer-restricted game hooks. Minimal fix removes only that mode gate; outer foreground/hotkeys-enabled checks remain and F6/F8 recenter/sanctuary remain blocked in observer mode. Reproduced predicate before fix: observer_only=true, Home=true, home_down=false -> false. Verification after fix: Debug build PASS, Debug CTest 113/113; Release build PASS, Release CTest 113/113; `pwsh -File tools/auto_verify.ps1` PASS, Release 113/113, package 1,644,904 bytes; doctor warns game is still running. Reopen the game to load the rebuilt DLL and test Home in desktop observer mode. No gate closed.
+
+### Observer-only Home menu render host (29 Oct 2026, uncommitted)
+
+Original diagnosis: Home toggled the menu state, but the observer-only early return ran before a render host was installed, so nothing could draw the menu. A dedicated menu-only hook now supplies the menu render path in observer-only mode without installing observer-restricted gameplay hooks; foreground/hotkeys-enabled guards remain, and F6/F8 recenter/sanctuary remain unavailable. The observer-startup regression pins the menu-only path and absence of those restricted hooks.
+
+Verification: Debug and Release builds PASS (exit 0); Debug and Release CTest PASS (113/113 each); `pwsh -File tools/auto_verify.ps1` PASS (exit 0, Release 113/113), writing `dist\DSVR-latest-x64.zip` (1,645,661 bytes) and `DSVR-latest-verification.json`. Doctor: pinned App 1.03.1/build 10943698 and installed files PASS; WARN game is RUNNING (close before install/uninstall); firewall block active.
+
+Manual verification remains: close/relaunch or update the game so it loads the new files, then confirm Home displays and dismisses the menu in desktop observer-only mode. No K gate closed.
+
+### Rate-sync dependency handoff (30 Oct 2026)
+
+User redirected the high-FPS work to the external MIT DSR-FPS-Unlock dependency (v1.8.0 Remastered), not a DSVR reimplementation. Static analysis established DSVR's owner+0x60 setter changes the presentation deadline and resets its QPC history; `BuildFrpgRenderCommands` calls `FUN_140199b70(...,0.016666668)` per render command, so raising the native presentation rate without compensating every fixed-step system can speed TAE state. DSVR's native FrameRate hook is now disabled, XR only observes headset refresh (no RequestDisplayRefresh/AutoSyncFrameLimit), and the loader rewrites the chained dependency INI before loading it: MaxFPS from last-known headset rate or desktop refresh, FPSUnlock=true, VariableFrameTime=true, preserving other INI settings. DSR-FPS-Unlock reads the INI once, so a newly detected headset rate applies next launch. Debug and Release CTest each passed 113/113; auto_verify passed Release 113/113 and doctor passed (game not running); package 1,688,594 bytes. No dependency was installed or chain-loaded during this verification; manual install/run evidence remains pending. No K gate closed. Repeat after removing DSVR display-rate requests and correcting the native-hook log wording: Debug and Release builds exit 0, CTest 113/113 each, auto_verify exit 0 with Release 113/113, Doctor PASS (game not running), package 1,689,128 bytes. Source-level FPS Unlock evidence: upstream `settings_load` runs once from the chained DLL worker; `VariableFrameTime` and `MaxFPS` are initialized before patches; `hook_sim` supplies measured `dt`, applies frame-step fixes and invokes the original simulation callback with corrected dt. DSVR loader updates dependency INI before `LoadLibrary`; HMD rate comes from last-run sidecar, so headset mode changes take effect next launch. At that point no dependency had been installed and no native VR/desktop check had been performed. Later on 30 Oct, after explicit user approval, installed official FPS Unlock v1.9.0 Remastered from the GitHub release. ZIP SHA-256 37797dd85d49ce440bb693d2cf27ff2993c0d4327f78f10ebe4c7e1751cefbba matched release metadata; extracted dinput8.dll SHA-256 e368f8a5d69b4b9a93a76cb63f92a0f0f4bd8920d81b232b094b204bee10b00c and DSR-FPS-Unlock.ini SHA-256 9a77fd52e05d0a22711afd88bd18008a018dc5684286fbec718cbc281cbf62f7 installed as dinput8-chain.dll and DSR-FPS-Unlock.ini. Game EXE SHA-1 9150CC63C617332ED3C2C66E7566ED67E3292DA0 matches supported build. Before snapshot: %TEMP%\DSVR.toml.before-FPS-Unlock-80f8d59969224305a0d9ecaf30695d4c (SHA-256 7b4144192502de9cf15dc143f5f9f255e2127fc9f25e489f645bf3f1908600ac). DSVR.toml chain_proxy now points to dinput8-chain.dll; original root dinput8.dll (SHA-256 f9adff97179dfdc58ac73b0a694d469844b3840ccabfb2313cdfd747bfeb5830) and DSVR.dll (fb5148f223847900ba42b5d9d2020f2f7d8424dcf97b7af06bd0bc6222e16cfb) unchanged. Static PE parse confirms AMD64 and DirectInput8Create export. Targeted Release CTest `frame_rate_native` passed 1/1. Ran `DSVR-Setup.exe --doctor`: PASS supported build, game not running, DSVR installed, firewall block active, six saves found. No game launch, DLL runtime load, input injection or live memory write. Current DSVR.toml has vr_enabled=false, auto_frame_limit_fps=true, frame_limit_fps=90; shipped INI remains at upstream MaxFPS=120 until DSVR loader runs at startup. Thus actual chain forwarding, INI synchronization, refresh-rate selection and live 90 Hz VR/desktop performance remain UNVERIFIED; K stays open. Upstream warns official online play is untested and may risk a ban; play offline. Final protected run 30 Oct: Debug and Release builds exit 0, CTest 113/113 each, auto_verify exit 0 with Release 113/113, Doctor PASS (game not running), refreshed development ZIP 1,689,385 bytes. FPS Unlock dependency remains uninstalled/unchained and no live desktop/VR MaxFPS handoff has been exercised; install it before DSVR-Setup so the installer chains it, then relaunch to validate. K remains open.
+
+### Rate ownership is single-source; setup carries no frame control (30 Oct 2026)
+
+User restated the rule: every VR frame rate comes from the headset, never a preset; with VR off the cap follows the monitor refresh automatically; DSR-FPS-Unlock owns all limiting for both routes; DSVR only passes the automatically retrieved HMD refresh to it and never caps or uncaps the game itself; the setup UI must reflect that and hold no arbitrary rate pieces.
+
+Verified the code already matches that shape and removed the last remnant. `Config::frame_limit_fps` defaults to 0 with `auto_frame_limit_fps = true`, the two keys are omitted on save and ignored on load, so the stale `frame_limit_fps = 90` still sitting in the game-dir `DSVR.toml` is inert and disappears on the next setup save (`src/common/config.cpp`, `tests/test_config.cpp:100-101,109,125`). `src/core/perf_fit.h` presets carry eye-buffer scale and AA only — no rate field, no `ClampCapToHeadset`. `src/loader/fps_unlock_settings.h:8` `ChooseMaxFps` returns the HMD sidecar value in VR, the live desktop refresh on desktop, and 0 when neither is known; `src/loader/loader.cpp:93` `SyncFpsUnlockSettings` writes `MaxFPS`/`FPSUnlock`/`VariableFrameTime` into the dependency INI before `LoadLibrary` and leaves the INI alone when the rate is unknown. `src/setup/gui.cpp` shows the rate as read-only text (`UpdateBrief` lines 283-294, hints 1154/1180) and reads the sidecar in `RefreshGame`.
+
+Arbitrary piece removed: the dead `CTL_FPS = 140` control id in `src/setup/gui.cpp` — no widget was ever created for it, so it only invited a re-add. `tests/test_setup_theme.cpp` now asserts control id 140 never exists in the default view, in developer mode, and after the debug-cap toggles, so a re-added frame-cap control fails the layout test.
+
+Protected run after the change: `cmake --build build --config Debug --parallel` exit 0; `ctest --test-dir build -C Debug --parallel` 113/113; `cmake --build build --config Release --parallel` exit 0; `ctest --test-dir build -C Release --parallel` 113/113; `pwsh -File tools/auto_verify.ps1` Release 113/113 with no FAIL line; `build\src\setup\Release\DSVR-Setup.exe --doctor` after a forced `--clean-first` rebuild of `dsvr_setup` → 1 PASS + 4 OK + 4 INFO, no FAIL (pinned App 1.03.1 / build 10943698, SHA256 a45aaa36…98d7b, game not running, installed files present, firewall active, 6 saves).
+
+One earlier Release CTest pass reported 108/113 failures — all `Unable to find executable`, caused by my own `--clean-first` on the `dsvr_setup` target wiping the other Release test binaries; `--target ALL_BUILD` restored them and the rerun was 113/113. Not a code regression; the lesson is to force-clean only when the doctor's stale-object hazard applies, and to rebuild ALL_BUILD before trusting a ctest count.
+
+Still unverified: the game has not been launched, so the actual `dinput8-chain.dll` forward, the INI `MaxFPS` write, and live desktop/VR rate behaviour remain UNVERIFIED. Next probe is a single offline launch with the game closed→open, then read the DSVR log for `forwarding DirectInput8Create` plus the `MaxFPS=… from last-known headset refresh`/`current desktop refresh` line, and the dependency INI's `MaxFPS` value afterwards. No K gate closed.
+
+### Setup installs the frame-rate dependency; body hidden by default; theater takes max eye resolution (31 Oct 2026)
+
+Operator ran the game with the dependency in place and reports the frame-rate unlock was felt. That is operator anecdote, not a measured window, so K1/K2 stay open -- but it does retire the "the chain never loads" hypothesis: `dinput8-chain.dll` is present in the game folder, `chain_proxy = "dinput8-chain.dll"` is in the game-dir `DSVR.toml`, and `DSR-FPS-Unlock.ini` plus `DSR-FPS-Unlock.log` exist next to them.
+
+Three shipped changes, all requested for the public test build.
+
+1. Setup button. `src/setup/gui.cpp` gained `CTL_FPS_UNLOCK = 150` (an action id deliberately above `kLastSetting = CTL_BODY`, so it never enters the instant-apply settings branch) plus `Install FPS Unlock` in the header band. The handler calls `setup::InstallFpsUnlock` in the new `src/setup/fps_unlock.cpp`: WinHTTP GET of the pinned GitHub release asset, `FpsUnlockUrlAllowed` re-checking the pin against its own allow-list before a byte is fetched, redirect following restricted to `github.com` / `objects.githubusercontent.com` / `raw.githubusercontent.com`, ZIP SHA-256 verification, extract, DLL SHA-256 verification, `%TEMP%` snapshot of anything about to be overwritten, refusal while the game is running, and install as `dinput8-chain.dll` with `chain_proxy` written. `FpsUnlockStateOf` reports chain/INI/proxy presence; `InstallStateLine` disables and relabels the button when installed, and the handler re-checks state so a stray `WM_COMMAND` cannot re-download over an install. `src/setup/CMakeLists.txt` adds `fps_unlock.cpp`.
+   Digests re-verified against the live release this session rather than trusted from the earlier note: ZIP 227755 bytes, SHA-256 `37797dd85d49ce440bb693d2cf27ff2993c0d4327f78f10ebe4c7e1751cefbba`; inner `dinput8.dll` `e368f8a5d69b4b9a93a76cb63f92a0f0f4bd8920d81b232b094b204bee10b00c`, which equals `certutil -hashfile` of the `dinput8-chain.dll` already installed in the game folder. The pin is therefore truthful in both directions.
+   Seam test: `tests/test_setup_theme.cpp` stubs `FpsUnlockStateOf`/`InstallFpsUnlock` (that TU stubs every `setup::` dependency of `gui.cpp`, so linking the real file would collide) and asserts the button exists and is enabled, one click installs once, the activity log reports the dependency state, and after the state flips to installed the button is disabled, relabelled, and a further message does not install again. The first attempt at this test failed twice for honest reasons: `FpsUnlockState::installed()` is a method not a field, and a disabled button still receives a programmatically sent `WM_COMMAND` -- which is exactly why the handler guard was added instead of relying on the widget state.
+2. Body hidden by default. `hide_torso_and_legs` now defaults true in `Config`, `FactorySafeDefaults` and `DoInstall`; `hide_head` stays true and `hide_player_model` stays false, so arms and the weapon remain drawn while the native torso/leg shell is cleared. Two existing assertions were re-anchored, not relaxed: `tests/test_mod_menu.cpp` now expects the first activation of the checkbox to clear a flag that starts set, and `tests/test_body_visibility.cpp` pins `hide_torso_and_legs = false` because that fixture checks head geometry only and would otherwise mask records it must leave untouched.
+3. Theater at HMD max resolution. New `src/core/xr_eye_resolution.h` holds the rule; `src/core/xr.cpp` `EnsureSwapchains` asks for the runtime maximum image rect when the presentation is the theater screen and the recommended rect for immersive play, records which hint the live swapchains were built from, and rebuilds them when the wanted hint flips (the base hint cannot change on a live swapchain). The log line now names the base. New `tests/test_xr_eye_resolution.cpp` covers immersive-vs-theater selection, the 50..200 scale clamp never exceeding the runtime maximum, a missing maximum falling back instead of inventing a size, and the rebuild predicate. Registered test count moved 113 -> 114.
+
+Protected run: `cmake --build build --config Debug --parallel` exit 0; `ctest --test-dir build -C Debug --parallel` 114/114; `cmake --build build --config Release --target ALL_BUILD --parallel` exit 0; `ctest --test-dir build -C Release --parallel` 114/114; `pwsh -File tools/auto_verify.ps1` Release 114/114, pinned build supported (App 1.03.1 / build 10943698), no FAIL line. Doctor was NOT re-run this session; the 30 Oct PASS stands as the last observation and the stale-object hazard still applies to it.
+
+### Black screen in VR: the theater/max hint was taken literally (31 Oct 2026)
+
+The first fix was not enough, and the operator said so. Capping the max hint at the backbuffer made the theater swapchains 3440x1440 instead of 8192x8192, and the headset still went black -- and this time desktop mode went black too, which the XR eye path cannot cause at all. So the cap was real but not the whole cause.
+
+A/B on the injection, not on the code: renaming the game-folder `dinput8.dll` out of the way (DSVR absent, `dinput8-chain.dll` intact) made the game render normally. That puts the fault inside DSVR's own presentation, not in the game, the dependency, or the loader.
+
+The retained log names the mechanism. `build/` game-dir `DSVR.log`, session opened 00:41:09:
+
+* `00:41:13.845 XR: eye swapchains ready 2144x2292 ... base=immersive/recommended`
+* `00:41:14.006 XR: mono frames submitted=1`
+* `00:41:14.019 XR: eye swapchains ready 3440x1440 ... base=theater/max`
+
+174 ms after the first frame, the presentation flipped to theater (`XrMenuPresentationActive()` is true whenever the session is not focused/visible, which includes the loading screen) and `EnsureSwapchains` destroyed and rebuilt both eye swapchains at a different extent. `g_screen_rect` is computed as fractions of `g_eye_width`/`g_eye_height` (`src/core/xr.cpp:1375-1386`, `1439-1446`) and is not recomputed after a rebuild, so the virtual-screen rect kept pointing at extents that no longer existed. The operator's description matches exactly: black while loading, then the calibration panel arriving as a wide, blurry, badly jagged image, then that panel stuck over the entire view after calibration was finished, with input still reaching the game audibly.
+
+Root cause: a mid-session change of the swapchain base size. The base hint cannot be changed on a live swapchain, and the code that consumes the size does not know a rebuild happened.
+
+Fix: one eye size for the whole session. `prefer_max`, `EyeBufferSize::used_max` and `EyeBuffersNeedRebuild` are gone; the runtime maximum is no longer a base at all, only the ceiling that bounds a scale trim. `EnsureSwapchains` no longer has a hint-flip branch, and the log line no longer advertises a base that cannot change. The backbuffer-ceiling comment stays as the reason the 8192 hint must never be taken literally.
+
+`tests/test_xr_eye_resolution.cpp` was re-anchored rather than deleted: it now asserts that every presentation resolves to the same size (so no presentation change can rebuild), that a generic 8192x8192 ceiling is never the base, and keeps the scale-clamp, missing-maximum and never-zero cases.
+
+Protected run after the change, both configs re-run in this session: `cmake --build build --config Debug --parallel` exit 0 and `ctest --test-dir build -C Debug --parallel --output-on-failure` 114/114; `cmake --build build --config Release --parallel` exit 0 and `ctest --test-dir build -C Release --parallel --output-on-failure` 114/114.
+
+Deployment: game-folder `DSVR.dll` replaced with the Release build (SHA-256 `429ce7bbf72dc5ed68a409261cbc7385f1950d986ec1ded3695b44c472a5b54c`), the previous copy kept as `DSVR.dll.prev-20261031`, and `dinput8.dll` restored to its real name after the vanilla A/B so the chain is intact. Operator confirmation that the view is correct is NOT yet observed.
+
+Separate real defect seen in the same log, not touched here: `XInput: XInputGetState create attempt 1..3 failed (MH_ERROR_MEMORY_ALLOC)` and the same for `XInputGetCapabilities`, after which the game-local IAT fallback was refused for capabilities ("no unique owned game XInputGetCapabilities import"). The state route stayed live through the fallback, so the game was playable, but the trampoline allocation is failing on this build and the capabilities route is silently absent. Next probe for that: read `src/core/xinput_bridge.cpp:380-400` and `170-200` and find why MinHook cannot allocate near the target, then whether the game's IAT actually holds a unique owned `XInputGetCapabilities` import at all.
+
+Next probe for the view, in order of cheapness: (a) operator launch with the deployed DLL, read the new `eye swapchains ready` line and confirm exactly one appears per session; (b) if the panel still sticks after calibration, the suspect is the presentation state itself, not sizing -- `XrMenuPresentationActive()` (`src/core/xr.cpp:1700`) plus `MenuStateWantsSanctuary` (`src/core/menu_state.h:73`) keeping the spatial canvas open on a stale debounced `FrontEnd` reading; (c) the operator's stated goal -- loading, calibration and gameplay as one continuous XR experience with calibration as a spatial interaction rather than a flat theater panel -- is a design change to that same state machine and belongs in lane F/G, not in this sizing fix.
+
+
+The operator launched the new build and the headset went black. The retained log settled it without a re-run:
+
+```
+[22:41:18.672] XR: eye swapchains ready 2144x2292 ... base=immersive/recommended (runtime recommended 2144x2292 max 8192x8192)
+[22:41:18.835] XR: eye swapchains ready 8192x8192 ... base=theater/max      (runtime recommended 2144x2292 max 8192x8192)
+```
+
+Root cause: the 31 Oct theater-resolution change asked for the runtime **maximum** image rect, and SteamVR's maximum is a generic format ceiling (8192x8192), not a render target. That allocated 8192x8192x3 images per eye (~1.6 GB) to hold a 3440x1440 backbuffer, and the compositor showed black. The immersive path (recommended rect) was healthy 0.16 s earlier, and the flip happened the moment the title screen entered theater presentation -- the correlation is the diagnosis.
+
+Fix in `src/core/xr_eye_resolution.h`: the max hint is now capped at the backbuffer it is copied from (`min(max, backbuffer)`), because pixels beyond the source carry no detail. On this machine theater now sizes 3440x1440 -- about the same pixel count as the recommended 2144x2292, so no memory cliff. The runtime ceiling still bounds a boosted *recommended* base. `tests/test_xr_eye_resolution.cpp` gained the regression case (8192 ceiling + 3440x1440 backbuffer must yield 3440x1440, not 8192) and the boosted-immersive fixture was widened so it still exercises the ceiling clamp rather than the new backbuffer cap.
+
+Re-run after the fix: Debug build exit 0 and `ctest -C Debug` 114/114; Release `--target ALL_BUILD` exit 0 and `ctest -C Release` 114/114; package refreshed (`dist/DSVR-latest-x64.zip`, 1709491 bytes). The fixed `DSVR.dll` and `dinput8.dll` were copied into the game folder with the previous pair snapshotted to `%TEMP%\dsvr-overwrite-31oct` first (game was not running). Live headset confirmation that the black screen is gone is the operator's next launch -- NOT yet observed, so no gate closed.
+
+Next probe, in order of cheapness. (a) Read the game-dir `DSR-FPS-Unlock.log` and the DSVR log from the operator's live run to confirm the `forwarding DirectInput8Create` line and the `MaxFPS` source -- this is the cheapest way to turn the anecdote into a receipt. (b) Live HMD evidence that the theater screen actually renders larger: capture the `XR: eye swapchains ready ... base=theater/max` line with a theater run and compare the reported size against the immersive line. (c) The download path has never been exercised end to end against the real server from Setup -- only the digests were verified out of band -- so one guarded click on a machine with the game closed is the remaining proof for the button itself. No K gate closed.
+### Theater panel sharpness: pixel parity on the quad; a hysteresis idea rejected (31 Oct 2026)
+
+The eye-size fix landed, and the operator's remaining description was about quality, not allocation: the loading/calibration panel is huge, blurry and badly jagged. With one eye size per session there is no rebuild left to blame, so the remaining mechanism is magnification.
+
+The theater branch maps tangent linearly onto the eye buffer, so a quad spanning `2*tan_half_h` covers that fraction of `span_h` of the buffer's pixels. When the quad's pixel footprint exceeds the source backbuffer, the copy upsamples. With the game at 3440x1440 into a 2144x2292 eye and a wide requested FOV, the vertical axis binds first: 1440 source rows spread across most of 2292 eye rows is a ~1.6x magnification, and a 1280x720 loading backbuffer is worse.
+
+Fix: `FitTheaterScreenToPixels` in `src/core/stereo_math.h`. Shrink -- never grow -- the angular extents, keeping the requested aspect, until the quad's footprint fits the source on both axes, taking the tighter of the two eye frusta. `src/core/xr.cpp` applies it after `FitTheaterScreenToEyes` and logs once when it clamps, naming the requested and achieved FOV plus the source and eye sizes, so a smaller-than-requested panel is explainable from the log rather than looking like a regression.
+
+Five cases in `tests/test_stereo_math.cpp`: binding vertical limit hit exactly, aspect preserved while shrinking, never magnifies the other way, zero source size and a degenerate frustum leave the request alone, and the tighter of two asymmetric eyes produces the smaller quad. The first fixture attempt was wrong and the test caught it: `EyeFrustum` is `{left, right, up, down}` and I wrote `tan_down = +t`, giving `span_v = 0`, which the helper correctly treats as unusable and returns unchanged. Three assertions failed on a fixture bug, not a code bug -- fixed the fixture, not the assertion.
+
+Attempted and reverted in the same session: a `PresentationPolicy` class dwelling the theater/immersive switch so a flickering signal could not cut the view. Two live contracts reject it. `tests/test_xr_mono_recovery.cpp:629` requires a missing camera sample (loading, death, non-3D cutscene) to force theater on the same frame, and `MenuDebouncer` already carries 150 ms on the front-end reading, so an extra dwell only delays the menu the operator asked for. Worse, `PollEvents` (`src/core/xr.cpp:379`, `419`) maps VISIBLE **and** FOCUSED to `g_session_visible`, so the 174 ms focus blip in the retained log never changed that signal at all -- the blip story was about the swapchain rebuild, which the one-size fix already removed. The class and its test were deleted rather than left as unused code; `XrMenuPresentationActive` keeps its four hard signals with a comment naming why each one is hard.
+
+Protected run after the change, both configs re-run in this session: `cmake --build build --config Debug --parallel` exit 0 and `ctest --test-dir build -C Debug --parallel --output-on-failure` 114/114; `cmake --build build --config Release --target ALL_BUILD --parallel` exit 0 and `ctest --test-dir build -C Release --parallel --output-on-failure` 114/114. No new test registered, so the count stays 114.
+
+Still open, and NOT explained by anything in this section: the desktop black screen. Desktop never enters the XR path, and the A/B (game-folder `dinput8.dll` renamed away -> the game renders normally) puts the fault inside DSVR. Hypothesis worth testing before any more XR work: a bad applied camera snapshot -- a zero or non-finite view/projection matrix blacks desktop and headset alike, and the camera hook is the one thing both routes share. Cheapest probe on the next launch: read the first lines after the gate-verified line for a hook-install failure, and log the determinant of the applied projection once per change. If the determinant is 0 or non-finite, the camera write is the fault; if it is sane, the next shared suspect is the blur/stage copy in `src/core/render.cpp`.
+
+Started, not finished: the operator's actual goal -- loading, calibration and gameplay as one continuous XR experience, with calibration as a spatial interaction rather than a flat panel. The parity clamp is the first piece (the panel can no longer be magnified past its own resolution). The next piece is compositing the calibration UI into the eye buffers at a comfortable angular size instead of forcing the theater quad, which needs the presentation state machine in `XrMenuPresentationActive` / `MenuStateWantsSanctuary` to stop treating the calibration screen as a menu. That is lane F/G design work and no gate there is closed.
+
+### Turn stick dead, gaze-follow gain, left-hand neutral source, and who owns model facing (31 Oct 2026)
+
+Operator report after the deployed build: "Game ran properly." That retires the open desktop-black question from the section above -- the fault is not reproducing for the operator, and no fresh log line contradicts the camera-snapshot hypothesis being wrong. This is an operator report, not a log I read, so it is recorded as operator-observed recovery rather than a verified closure.
+
+Four new reports were worked in the same turn.
+
+**Right stick had no effect at all -- root cause found, not guessed.** The retained game-dir `DSVR.toml` carries `snap_turn = false` **and** `smooth_turn = false`. `TurnTracker::Feed` (`src/core/vr_heading.h:16` path) has no mode to integrate when both are off, so every deflection returns zero yaw and nothing anywhere logs an error -- which is exactly why the stick looked dead rather than mis-tuned. The absence of a single "stick turn applied" line across the 27k-line log is the confirming evidence. Fix at the load seam, not in the tracker: `ConfigLoad` (`src/common/config.cpp:420`) now refuses to ship a config with no live turning mode, re-enabling the factory `smooth_turn` and logging a `Config: snap_turn and smooth_turn were both false` warning naming what it changed and why. One mode on stays a choice -- the loader does not force both on. `tests/test_config.cpp` covers both halves: both-off loads with a live mode and untouched comfort values (`snap_turn_degrees`, `smooth_turn_speed_dps`), and snap-only stays snap-only.
+
+**Headlook influence on turning raised 15% by request.** The gaze lock already ran a hair over 1:1 -- `(mag - deadband)/(limit - deadband) * limit` = slope 1.046 -- so the honest way to add 15% is an explicit gain, not a re-tuned deadband. `kTorsoLookGain = 1.15f` in `src/core/body_pose_math.h` multiplies that response in both `TorsoTargetYaw` and the fallback `SolveTorsoYaw` target. The anatomical bound `kTorsoTwistLimitRad = 0.8` is untouched, so the gain cannot buy extra spine wind-up; it moves where the cap binds, from ~45.8 deg of head yaw to ~40.1 deg. `tests/test_body_pose.cpp` now expresses the expectation as the formula with the gain in it (and asserts `kTorsoLookGain > 1`, `saturate < limit`, and saturation at the cap on both sides of the new knee) instead of pinning magic numbers. Four pre-existing assertions in that file encoded the old 1:1 relationship and went red; they were updated to the gained rule, and the 120-degree over-turn assertion still passes unchanged at the cap -- the bound is still guarded.
+
+**Left hand calibrated deformed (palm up, shield flat) -- instrumented, not yet fixed.** The hand orientation chain has one place where the two hands can legitimately disagree, and it is silent: `src/core/arm_ik.cpp:1526-1577` takes the neutral hand basis from the native bind-pose row for that hand bone, and falls back to a synthetic world-axis T-pose guess (`fsign = side ? 1 : -1`) when that row is invalid. A hand that lands on the fallback keeps a permanent baked twist -- the reported shape. Nothing in the log says which path either hand took, so a one-shot per-hand line now names it: source (`native bind pose` vs `T-pose fallback`), the hand bone index, and the angle between the two candidate bases. That is the cheapest way to turn "the left hand looks wrong" into a receipt on the next launch. No behaviour was changed here: the mirrored grip-roll term `(side ? -1 : 1) * grip_roll_correction_deg` (`arm_ik.cpp:721`) is at most a dozen degrees and cannot produce a ~90 deg palm-up error, so changing it would have been a guess.
+
+**Left stick must not rotate the model -- this is not ours to fix at that seam.** Checked before assuming: the palette writer only writes rows where `g_rig.owned[bone]` (`arm_ik.cpp:842`), ownership is pelvis/spine/chest/neck plus the clavicle and arm subtrees (`arm_ik.cpp:319-328`), and the write loop comment is explicit that the root and physics poses are separately validated and never written. Nothing in DSVR rotates the model root from the stick; the character turning to face its walk direction is native locomotion facing, and our torso solver only *resists* it, bounded by the same 0.8 rad twist cap. Making the model keep its facing while still travelling in the head-directed direction means owning the root row -- a render-owner decision with a hard guard already in place, not a tuning change. Recorded as an open question for lane E (its exit text already says direct root translation is not a completion route); the read-only facing probe in `src/core/camera.cpp` is the cheap way to measure how much native rotates per stick input before anyone proposes a counter-rotation.
+
+Protected run for this turn, both configs re-run here: `cmake --build build --config Debug --parallel` exit 0 and `ctest --test-dir build -C Debug --parallel` 114/114; `cmake --build build --config Release --target ALL_BUILD --parallel` exit 0 and `ctest --test-dir build -C Release --parallel` 114/114. No test registered or removed, so the count stays 114. The new Release `DSVR.dll` was copied into the game folder (deployed and built SHA-256 both `5B8803A9AD474707...`, verified equal after the copy). No gate closed: the turn fix, the gain and the hand diagnostic all still need the operator's next launch, and the hand line has never been read.
+
+### DSVR Setup launcher redesign — Ashen Void (30 Oct 2026)
+
+The launcher now opens to Home with truthful setup/version status and one state-driven primary action (Find game, Set up DSVR, Repair setup, Verify game, Launch game). Game & mods, VR settings and Help are separate navigable pages. The Game page retains install/remove, version check, FPS dependency and folder actions; native launch is a separate confirmation-gated action. Settings retain their existing controls and instant-save behavior, split into preset, comfort/movement, advanced and experience groups. Help holds Doctor and the activity log. Theme uses near-black surfaces, cool neutral accents and Segoe UI consistently; status copy avoids presenting file presence as headset/runtime verification.
+
+Regression evidence: expanded `tests/test_setup_theme.cpp` for page visibility/layout, navigation, adaptive launch actions, native launch consent, palette/font and DPI. An earlier run failed on obsolete assumptions (developer/status copy and panel height); expectations were updated to match the new navigation and concise Home status, not softened runtime/safety checks. Final commands: `cmake --build build --config Debug --target dsvr_setup test_setup_theme --parallel` PASS; `ctest --test-dir build -C Debug -R "^setup_theme$" --output-on-failure` PASS 1/1; `cmake --build build --config Release --target dsvr_setup test_setup_theme --parallel` PASS; `ctest --test-dir build -C Release -R "^setup_theme$" --output-on-failure` PASS 1/1. Full Debug CTest did not run: the required full Debug build failed in `src/core/mod_menu.cpp` on duplicate `FeedPointerOverlay` bodies (lines 417/452) and duplicate controller geometry declarations (lines 515/526), plus the call at 1439. That file is claimed by the VR Physical Combat tab; left untouched. The chained CTest command therefore did not execute. Full Release build/CTest, `tools/auto_verify.ps1`, and Doctor were not run. No core `DSVR.dll` target built, game-directory deployment, game launch or native/headset verification performed. Next: let the owning tab resolve `src/core/mod_menu.cpp`, then rerun the protected full Debug/Release ladder and verifier; inspect the native launcher visually before claiming UI acceptance.
+
+### The guard settle knob was never wired: the raise is now the pose test (31 Oct 2026)
+
+Operator-facing change: a raised shield hand blocks on the frame it is raised.
+The shipped `guard_settle_ms` default went 120 -> 0 (`src/common/config.h`,
+`src/core/shield_guard_math.h:30`); a non-zero value is now an optional extra
+wait in front of engagement instead of the pose test itself.
+
+**Root cause, and it is the interesting part.** While making that change it came
+out that `GuardParamsFromConfig` (`src/core/input.cpp:622`) never copied
+`cfg.guard_settle_ms` into `ShieldGuardParams`. The key was parsed, clamped and
+saved (`src/common/config.cpp:282`) and the bench path mapped it
+(`src/core/arm_ik.cpp:1063`), so the knob looked live everywhere except the one
+place that matters: the in-game path silently used the struct default. Any
+earlier statement that the settle window was tunable in-game was false. The
+change is the one-line mapping at `src/core/input.cpp:624`.
+
+The proof that the mapping was dead: changing only the struct default turned
+seven `test_input` expectations and four `test_shield_guard` cases red. Those
+integration tests set `guard_settle_ms = 120` in the config and had been
+asserting the struct default all along. Some of the red cases encoded the old
+rule itself (motion between the still and flick bands drops the guard; a parry
+press requires the block released first) and were rewritten to the new rule; the
+rest were failing because the value they set never reached the detector. Both
+files now pass with the parameters they claim to set.
+
+**The rule as encoded now** (`src/core/shield_guard_math.h`): the guard is the
+hand being up. Motion never drops one, and the first sample reports the guard
+instead of losing a frame to priming (`:90-100`, `:148-164`). A parry stays the
+opposite shape - a short, sharp, direction-agnostic impulse that comes back to
+rest, with the shield up when the impulse starts (`:105-146`). Block (LB held)
+and parry (LT tapped) are separate channels, so a tap no longer waits for the
+block to be released; the press keeps its own bounded window (`:139-141`,
+`:166-182`) and the output ordering keeps the two off the same frame
+(`:185-186`). `release_ms` no longer gates firing, it only bounds how long a
+queued tap may wait (`:31`), and the dead `block_off_ms_` member - written, never
+read - was removed rather than renamed.
+
+Supersedes the 26 October section above at `MODLOG.md:6234` and `:6244`, and its
+operator experiment at `:6310-6314` ("the block should engage within ~120 ms").
+
+**Protected run, both configs re-run in this session.**
+`cmake --build build --config Debug --parallel` exit 0 (warnings only, all
+pre-existing in other lanes' files) and
+`ctest --test-dir build -C Debug --parallel --output-on-failure` 114/114;
+`cmake --build build --config Release --parallel` exit 0 and
+`ctest --test-dir build -C Release --parallel --output-on-failure` 114/114;
+`pwsh -NoProfile -File tools/auto_verify.ps1` Release 114/114 with pinned-build
+support PASS and `dist\DSVR-latest-x64.zip` 1,730,716 bytes plus the latest
+verification manifest; `build\src\setup\Release\DSVR-Setup.exe --doctor` exit 0
+(game 50286344 bytes / SHA a45aaa36... supported, not running, base DLLs present,
+OpenXR runtime found, firewall block active). No test registered or removed, so
+the count stays 114 for both configs. No game launch, no input injection, no
+memory write, no deployment to the game folder in this turn.
+
+**No gate closed.** This is offline-only. Whether the operator's raised hand
+actually reads as `raised` in the headset is the head-relative band at
+`src/core/input.cpp:67-72` (`kGuardHandBelowHeadM` 0.85, `kGuardHandAboveHeadM`
+0.5) and has not been observed on these bytes.
+
+**Next probe, cheap.** One headset session with `physical_defence = true`: raise
+the shield hand at three heights (belt, chest, overhead), then walk with it
+raised. `PublishPad` already logs the resulting button mask once a second
+(`InputRoute: ... buttons=0x%04x`, `src/core/input.cpp:596`), so "the block never
+engaged" becomes a button-mask read instead of a guess. If LB never appears while
+the hand is up, measure the hand height against the head band before touching the
+state machine; if LB appears while the hand is down, the bug is in the caller's
+height test, not in the trigger.
+
+### The Ghidra route is down, so the melee probe is blocked (31 Oct 2026)
+
+The next planned native probe was the producer and semantics of the event handled
+by `FUN_14038dae0` (ChrManipulator method, ID 1000/subtype 2). It could not run.
+Observed, not inferred: `mcp__GhidraMCP__check_connection` returned
+`WinError 10061 ... target machine actively refused it` (nothing listening),
+`C:\Tools\DarkSoulsRemaster_De\analysis-full\` holds `DSRFull.gpr` with
+`DSRFull.lock.stale` and no GUI holding the program, and REA reported
+`No app is open`. The pinned database itself is intact.
+
+Retained evidence was checked before giving up on it:
+`C:\Tools\DarkSoulsRemaster_De\combat-evidence` carries pinned bytes for the
+setter wrapper `0x142cb5171` (`melee-body-handoff-20261022T213421Z.json`) and
+caller/xref records for `FUN_14024f6b0`, but a search for `14038dae0` across that
+tree returns nothing. So the event 1000/subtype 2 producer cannot be advanced
+from retained files, and no native claim moved this session.
+
+Two things for whoever picks this up. (a) The route needs the Ghidra GUI reopened
+on `DSRFull.gpr` (the bridge is HTTP inside the GUI, so a refused connection means
+the GUI is not running, not that the extension is broken); then the two cheap
+queries are `get_xrefs_to 0x14038dae0` and `get_assembly_context` at its payload
+read. (b) Per the 29 October re-scope recorded in `.empryo/cockpit/lanes/B.md`,
+the trace to an HP write is a closed negative result and must not be reopened as
+a blocker — the probe that actually gates B3 is the shape owners of the objects
+placed at `frame+0x130` / `frame+0x138`. Prefer that one when the database is
+back.
+
+### FUN_14038dae0 dispatch probe: no static producer (31 Oct 2026)
+
+Supersedes the "Ghidra route is down" section above: the bridge answered
+`check_connection` with `{"status":"ok","server_kind":"gui","version":"7.0.0",
+"program":"DarkSoulsRemastered.exe"}`, so the two cheap queries named there were
+run. Question: who produces the event 1000 / subtype 2 input that reaches
+`FUN_142cb5171` (EDX -> EDI) through `FUN_14038dae0`?
+
+`get_functions(0x14038dae0)`: body `14038dae0`-`140390bed`, size 12433, a switch
+over `caseD_0`..`caseD_93`; `caseD_2` sits at `140390bef`, past the reported
+`body_end` — the split-function cliff AGENTS.md warns about, so the real extent is
+wider than the reported body. Reported `caller_count = 0`.
+
+`get_xrefs_to(0x14038dae0)` returns three DATA references only: `141d51368`,
+`14178f264`, `14132e388`. `analyze_data_region` resolves each:
+
+- `141d51368` is typed `_IMAGE_RUNTIME_FUNCTION_ENTRY` — the PE unwind entry for
+  this function, not a dispatch site. It must not be counted as a caller.
+- `14178f264` is the first slot of `IPToStateMapEntry_ARRAY_14178f264`, typed
+  `IPToStateMapEntry[221]`, and that array is pointed at by `DAT_14132e350`.
+  `get_struct_layout(IPToStateMapEntry)` reports "Data type is not a structure", so
+  the element type is a name only in this database — no field semantics available.
+- `14132e388` is undefined data 0x38 bytes past that descriptor field, i.e. the
+  same block.
+
+`get_xrefs_to` on `14132e350`, `14132e348`, `14132e340`, `14178f258`, `14178f260`
+and `analyze_data_region(0x14132e200, 768, xref map)` all return zero references
+into that block. The tested addresses have no incoming xrefs; this does not establish
+the table access mechanism or resolve the producer. Keep the producer/update-owner
+question open; do not present the xref probe as a closed native-evidence gate.
+
+Cheapest remaining static handle, if static work continues:
+`IPToStateMapEntry_ARRAY_14178f264` is a named array whose semantics remain unverified;
+Inspect its entries and references before inferring a state id
+matching the `caseD_*` selector range 0..0x93; a match names the state this handler
+belongs to, which is the nearest thing left to an update-thread owner. B/C/H stay
+open: the attribution gate is one closed labeled hit, which needs an authorized
+game run. No code changed this probe, so no build/ctest was re-run for it.
+
+### First physical-combat native test: preflight blocked (31 Oct 2026)
+
+Followed `docs/TESTING.md` / `docs/VERIFICATION_RUNBOOK.md` for a read-only
+preflight before attempting any native test. Command:
+`pwsh -NoProfile -File tools/run_combat_capture.ps1 -Mode Check -Receipt build\verification\physical-combat-first-test-20261031\receipt.json -WindowMinutes 30`
+Observed failure at `tools/run_combat_capture.ps1:1070`: `Steam Offline
+preference is not set.` Check exits before receipt creation or changes; no game
+launch, save/install transaction, or combat case occurred. This is BLOCKED, not
+PASS/FAIL for gameplay. No inputs were injected and no native game state changed.
+
+Next exact step: set Steam Offline using Steam's UI, verify its preference and
+logged-off state, then rerun this read-only Check. Continue only if it passes all
+candidate, exact-game block, disposable-seed and save-root checks; otherwise log
+the next observed blocker and do not launch. Since native test did not run, no
+build, CTest, verifier or doctor results were produced in this step.
+
+Operator subsequently reported Steam Offline. Re-ran the same read-only Check:
+`pwsh -NoProfile -File tools/run_combat_capture.ps1 -Mode Check -Receipt build\verification\physical-combat-first-test-20261031\receipt.json -WindowMinutes 30`
+Steam guard advanced; Check then failed at `tools/run_combat_capture.ps1:1081`:
+`Source changed since qualified build: src\common\config.cpp`. This is an observed
+stale-candidate rejection. No receipt or transaction was created, no game launched.
+Do not seal around or ignore the manifest mismatch: requalify the exact current
+source through protected Debug/Release build and test gates, then rerun preflight.
+
+Requalification attempt, same session: `cmake --build build --config Debug --parallel`
+FAILED exit 1. Compiler errors were in the other tab's claimed
+`src/setup/gui.cpp` (unmatched brace near 1673, invalid `DRAWITEMSTRUCT::hwnd` at
+1681, cascading parser/argument errors) and `tests/test_setup_theme.cpp` (cascading
+undeclared `fixture`/`shown` errors). That tab owns both files; left them untouched.
+Debug CTest did not run (0 tests); Release build, Release CTest, auto_verify and
+doctor did not run. No valid candidate package was produced, so native launch
+remains blocked. Next: owning tab fixes compile errors, then run the full ladder,
+qualify the exact candidate, and rerun read-only capture Check.

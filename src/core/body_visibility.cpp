@@ -99,9 +99,10 @@ bool ReadBinding(Binding& out) {
 // so a torso/leg filter keeps arms and weapons drawing.
 unsigned FilterMask() {
   const auto config = DiagnosticsCurrentConfig();
+  // No menu-canvas gate: a visibility tick applies on the next native update
+  // even with the menu open, so unticking restores geometry immediately.
   if (!g_enabled.load() || !config.vr_enabled || config.observer_only ||
-      !config.headlook_enabled || !XrSessionRunning() ||
-      XrMenuPresentationActive())
+      !config.headlook_enabled || !XrSessionRunning())
     return 0;
   unsigned mask = 0;
   if (config.hide_head) mask |= (1u << 0) | (1u << 1) | (1u << 2) | (1u << 6);

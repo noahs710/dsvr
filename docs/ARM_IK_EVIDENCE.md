@@ -4,6 +4,102 @@ Consolidated: 21 October 2026. Evidence reference only. [Authority](../README.md
 
 The following measurements/findings were recorded by the preceding arm investigation. They have not been remeasured by this documentation cleanup. Their hypotheses describe the observed candidate; ongoing source changes may already address them. Inspect git diff and actual tests before treating any fix as pending or any test as expected to fail.
 
+## 29 October retained-session audit
+
+Read-only inspection of the installed DSVR.log completed the CamGate evidence
+probe; no game launch, input, memory write, save/config edit or deployment.
+The log at the game root has 646,108 bytes, last-write UTC
+2026-10-29T00:22:18.5120389Z, SHA-256
+F91E129CD974A8B5905CA383CB1F7A26B410C6AA4E59122AC61B6200E2458C06.
+Its latest session header (line 3062) is 2026-10-28 20:20:52 local. Line numbers
+below refer to that hash, not a future appended log.
+
+Observed, not inferred:
+
+- Lines 3074-3076 pin x64 game identity: timestamp 0x6344ca56, image size
+  0x319b000, executable hash A45AAA36DD2F6CC151670A639EA5547043CF38EA79FF4178B963C6ED71F98D7B;
+  App 1.03.1 / build 10943698, 50,286,344 bytes.
+- Lines 3106-3110: SteamVR/OpenXR Meta compatibility mode 2.18.4,
+  recommended eyes 2144x2292. Lines 3136-3140: ResizeBuffers returns success,
+  actual swapchain/staging 1920x1080. This session does not reproduce the
+  earlier failed-resize symptom.
+- Line 3235, 20:21:13.261: camera closed for XR menu presentation. Lines
+  3266 and 3273: sanctuary closes, then CamGate reports applied at
+  20:21:17.360. The blanket "camera never applied" diagnosis is stale.
+- Line 3278, 20:21:17.443: native body copy verified=1 refused=0 map=69
+  body=80 distinct=1 seq=1506. Line 3284, 20:21:17.935: input bridge still
+  reports attack/defence=no-committed-hands, hands=0, hands_epoch=0,
+  space_epoch=2. The last value is the input observation, not a captured
+  copy-publication epoch. The first successful copy is NOT a successful
+  public getter observation.
+- Lines 3668-3669: CPU visits=commits=2054, last_seq=bound_seq=2699,
+  sequence_refusals=0; rendered submission samples applied sequence 2699,
+  camera thread 6820, render thread 6936. Line 3676 reaches verified=2100,
+  refused=0, seq=2726. These are CPU receipts, explicitly not GPU/attachment
+  qualification. No claim of all intervening frames or final mesh correctness.
+- Line 3285: equipment=1, weapons=1401000/500000, stance=1; native damage,
+  shield and two-hand bindings all remain 0. True stereo remains unbound.
+
+Current installed identity (read-only Get-FileHash audit):
+
+| File | SHA-256 |
+|---|---|
+| DSVR.dll | B493BDCEAD2CD6E9D4072424029D15435C85D385B74B6ABB07C327E1BB2B0898 |
+| dinput8.dll | F9ADFF97179DFDC58AC73B0A694D469844B3840CCABFB2313CDFD747BFEB5830 |
+| DSVR-Setup.exe | 52141547B34B4771A00DB93918B22714351E3195D2C89CC25CA0F1EA71BBA048 |
+| DSVR.toml | 2B8DCDE0C15C66AE4E109A1A33B1EF85981DAD766942CFBC2510C8EDF1DB5EDE |
+| DSVR.toml.calibration | 9BC485010E52F59E5D1F35B9AFE0C88B47FABB52B038DDCFBE7FE33614503D71 |
+
+All three installed binaries match dist/DSVR-latest-verification.json
+(built_utc 2026-10-29T01:15:16Z). However core and Setup last-write times are
+00:45:47Z, later than the log's 00:22:18Z; the log does not record its running
+core hash. Therefore this is retained-candidate evidence, not qualification
+of the installed B493BDCE candidate. Current config is also later than the
+log (00:32:18Z). It requests headlook=true, gameplay_theater=false, seated
+mode, frame_limit_fps=90, render_scale_percent=100, stereo=false, live IK,
+hide_head/hide_torso_and_legs/hide_second_model=true. Do not infer those were
+all the captured session settings; the log records an initial 72 FPS fallback.
+
+At audit time: game and vrserver absent, Steam PID 16416; registered runtime
+SteamVR steamxr_win64.json. This inventory is not protected-run preflight,
+Steam Offline readiness, a live XR session or save-transaction qualification.
+No backup vault or retained verification receipt was modified or enumerated.
+
+### 29 October publication-reader interleaving regression
+
+The actual ArmIkLatestHands and ArmIkCombatBench readers capture tracking
+before acquiring g_hands_mutex. The native copy can publish newer hands in
+that interval. PublishedHandsCurrent then compared that new receipt with the
+older local tracking snapshot and irreversibly cleared copy verification,
+hands and bench. This reproduces copy success followed by unavailable hands
+at the real adapter seam; it is not proof this was the retained session's
+only cause.
+
+The arm_pose_native fixture now performs a natural camera/target/source/copy
+transaction after the reader has captured its old tracking snapshot and
+before that reader acquires the hand mutex. It asserts that the copy commit
+counter increased and both public readers can obtain the new verified receipt.
+Targeted Debug rebuild + CTest failed before the fix (0/1, job-96, CHECK
+accepted && after.verified), and passed after it (1/1, job-97). Full Debug
+and Release builds/CTest PASS 113/113 each (job-98); auto_verify repeats
+Release 113/113, doctor PASS and refreshes dist (ZIP 1,584,277 bytes). New
+core hash 9ce2a7ef6f95abaf86e59e13b2a97def70e0d4c1e6a8fdbea2ad880f9cf27ed1;
+not deployed or tested in a native/headset session.
+
+Fix: when the reader's nonzero tracking sequence predates the committed hands,
+refresh tracking once under the existing hand mutex before applying the same
+lifetime checks. No retry loop, native replay, extra pose write or relaxed
+camera-sequence equality/epoch/calibration/100 ms freshness requirement.
+Both readers use the shared check. An actually regressed tracking sequence
+still refuses and irreversibly invalidates: added a positive older-sequence
+case alongside the existing zero-sequence, loss, mode, epoch and calibration
+cases. The provisional source-read refusal remains covered by the fixture.
+
+Final rendered skinning/attachments, operator alignment and exact-current-
+candidate input/native outcomes remain UNVERIFIED. The next task lives only
+in MODDING_PLAN.md section 5; do not repeat camera instrumentation.
+
+
 ## Captured evidence
 
 Measurements below come from the recorded native poses.

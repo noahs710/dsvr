@@ -13,144 +13,54 @@ int main() {
   using namespace dsvr;
   auto period = [](double hz) { return (long long)std::llround(1e9 / hz); };
 
-  // Exact runtime rates quantize to themselves.
   check(QuantizePeriodToFps(period(60)) == 60);
   check(QuantizePeriodToFps(period(72)) == 72);
-  check(QuantizePeriodToFps(11111111LL) == 90);  // canonical 90 Hz period
-  check(QuantizePeriodToFps(period(120)) == 120);
-  check(QuantizePeriodToFps(period(144)) == 144);
-  check(QuantizePeriodToFps(period(240)) == 240);
-  // Near misses snap to the nearest supported cap.
-  check(QuantizePeriodToFps(period(89)) == 90);
-  check(QuantizePeriodToFps(period(75)) == 72);
-  // 80 Hz is its own physical display cadence, not a 72/90 midpoint.
+  check(QuantizePeriodToFps(period(75)) == 75);
   check(QuantizePeriodToFps(period(80)) == 80);
-  check(QuantizePeriodToFps(period(82)) == 80);
-  // Out-of-span rates clamp to the nearest end; invalid periods refuse.
-  check(QuantizePeriodToFps(period(30)) == 60);
-  check(QuantizePeriodToFps(period(360)) == 240);
+  check(QuantizePeriodToFps(period(82)) == 82);
+  check(QuantizePeriodToFps(period(89)) == 89);
+  check(QuantizePeriodToFps(period(120)) == 120);
+  check(QuantizePeriodToFps(period(240)) == 240);
+  check(QuantizePeriodToFps(period(360)) == 360);
   check(QuantizePeriodToFps(0) == 0);
   check(QuantizePeriodToFps(-1) == 0);
 
-  // Fallback: no live sample -> requested wins, no mismatch claimed.
-  {
-    EffectiveRate r = ResolveEffectiveRate(90, 0);
-    check(!r.from_runtime && r.effective_fps == 90 && !r.mismatch);
-    check(r.runtime_period_ns == 0 && r.runtime_hz == 0.0);
-  }
-  // Runtime drives: 72 Hz runtime overrides a 90 request and flags mismatch.
-  {
-    EffectiveRate r = ResolveEffectiveRate(90, period(72));
-    check(r.from_runtime && r.effective_fps == 72 && r.mismatch);
-    check(std::fabs(r.runtime_hz - 72.0) < 0.01);
-  }
-  // Matching runtime is not a mismatch; unsupported requests sanitize to 90.
-  check(!ResolveEffectiveRate(90, period(90)).mismatch);
-  check(ResolveEffectiveRate(61, 0).effective_fps == 90);
-  check(ResolveEffectiveRate(90, period(59.94)).effective_fps == 60);
-  check(!ResolveEffectiveRate(90, period(59.94)).runtime_throttled);
-  check(ResolveEffectiveRate(90, period(45)).runtime_throttled);
+  const EffectiveRate no_sample = ResolveEffectiveRate(0, 0.0);
+  check(!no_sample.from_runtime && no_sample.effective_fps == 0);
+  const EffectiveRate live = ResolveEffectiveRate(period(72));
+  check(live.from_runtime && live.effective_fps == 72 && live.runtime_hz > 71.9);
+  const EffectiveRate throttled = ResolveEffectiveRate(period(45), 90.0);
+  check(throttled.from_runtime && throttled.from_display &&
+        throttled.effective_fps == 90 && throttled.runtime_throttled);
 
-  // Stabilizer: first live sample adopts at once; flapping does not.
   {
     RateStabilizer s;
-    check(s.Update(90, 0).effective_fps == 90 && !s.Current().from_runtime);
-    EffectiveRate first = s.Update(90, period(90));
+    check(s.Update(0).effective_fps == 0 && !s.Current().from_runtime);
+    const EffectiveRate first = s.Update(period(90), 90.0);
     check(first.from_runtime && first.effective_fps == 90);
-    const auto gen = first.generation;
-    check(s.Update(90, period(72)).effective_fps == 90);   // 1 sample: hold
-    check(s.Update(90, period(90)).effective_fps == 90);   // flap resets
-    check(s.Update(90, period(72)).effective_fps == 90);   // 1
-    check(s.Update(90, period(72)).effective_fps == 90);   // 2
-    EffectiveRate adopted = s.Update(90, period(72));      // 3: adopt
-    check(adopted.effective_fps == 72 && adopted.mismatch);
-    check(adopted.generation > gen);
-    // Loss falls back immediately, no hysteresis on the way down.
-    EffectiveRate lost = s.Update(90, 0);
-    check(!lost.from_runtime && lost.effective_fps == 90);
+    const auto generation = first.generation;
+    check(s.Update(period(72), 72.0).effective_fps == 90);
+    check(s.Update(period(72), 72.0).effective_fps == 90);
+    const EffectiveRate changed = s.Update(period(72), 72.0);
+    check(changed.effective_fps == 72 && changed.generation > generation);
+    const EffectiveRate lost = s.Update(0);
+    check(!lost.from_runtime && lost.effective_fps == 0);
   }
 
-  // Native-application decision: once per change, live owner only.
-  check(ShouldApplyNativeRate(60, 72));
-  check(!ShouldApplyNativeRate(72, 72));   // already at target
-  check(ShouldApplyNativeRate(60, 72));   // native owner reset after our apply
-  check(!ShouldApplyNativeRate(0, 72));    // owner rate unknown
-  check(!ShouldApplyNativeRate(60, 0));    // no effective rate
-  check(ShouldApplyNativeRate(60, 90));   // new target after old apply
-
-  // VDXR may throttle the next application frame to a divisor of the headset
-  // cadence. Replaying the observed 90 -> 18 -> 90 sequence must not alternate
-  // the native 90/60 cap and repeatedly clear the native pacing history.
-  for (int display : {60, 72, 90, 120}) {
+  for (double display : {53.0, 59.94, 72.0, 80.0, 90.0, 119.88, 144.0, 240.0}) {
+    const int rounded = (int)(display + 0.5);
     RateStabilizer s;
+    EffectiveRate live_display;
     for (int i = 0; i < kStableRateSamples; ++i)
-      s.Update(90, period(display));
-    for (double hz : {45.0, 30.0, 22.5, 18.0, 90.0 / 7.0}) {
-      EffectiveRate throttled;
-      for (int i = 0; i < 10; ++i) throttled = s.Update(90, period(hz));
-      check(throttled.from_runtime && throttled.effective_fps == display);
-      check(std::fabs(throttled.runtime_hz - hz) < 0.01);
-      check(throttled.runtime_period_ns == period(hz));
+      live_display = s.Update(period(display), display);
+    check(live_display.from_display && live_display.effective_fps == rounded);
+    for (int divisor : {2, 3, 4}) {
+      const EffectiveRate held = s.Update(period(display / divisor), display);
+      check(held.effective_fps == rounded);
+      check(held.runtime_throttled && held.from_display);
     }
-  }
-  // Starting under throttling uses the requested cap, and a real 60 Hz cadence
-  // remains supported rather than being mistaken for an invalid frame period.
-  {
-    RateStabilizer s;
-    check(s.Update(72, period(36)).effective_fps == 72);
-    check(s.Current().from_runtime && std::fabs(s.Current().runtime_hz - 36) < 0.01);
-    for (int i = 0; i < kStableRateSamples; ++i) s.Update(72, period(60));
-    check(s.Current().effective_fps == 60);
-    check(s.Current().mismatch);
-  }
-  {
-    RateStabilizer s;
-    check(s.Update(72, period(36)).effective_fps == 72);
-    check(s.Update(90, period(45)).effective_fps == 90); // preference before live cadence
-    s.Update(72, period(72));
-    check(s.Update(90, period(36)).effective_fps == 72); // retain proven cadence
-    s.Update(90, 0); // session loss clears the previous runtime cadence
-    check(s.Update(90, period(45)).effective_fps == 90);
   }
 
-  {
-    RateStabilizer s;
-    const auto before = s.Update(90, 0);
-    const auto after = s.Update(72, 0);
-    check(after.effective_fps == 72 && after.generation > before.generation);
-    const auto stable = s.Update(72, 0);
-    check(stable.generation == after.generation);
-  }
-  check(ResolveEffectiveRate(80, 0).effective_fps == 80);
-  for (double display : {60.0, 72.0, 80.0, 90.0, 120.0, 144.0, 240.0}) {
-    RateStabilizer s;
-    auto live = s.Update(90, period(display), display);
-    check(live.from_display && live.display_hz == display);
-    for (int divisor : {2, 3, 4}) {
-      auto throttled = s.Update(90, period(display / divisor), display);
-      check(throttled.effective_fps == static_cast<int>(display));
-      check(throttled.runtime_throttled && throttled.from_display);
-      check(throttled.runtime_period_ns == period(display / divisor));
-    }
-    const auto stable = s.Current().generation;
-    check(s.Update(90, period(display / 4), display).generation == stable);
-    check(!s.Update(90, 0, display).from_display);
-  }
-  {
-    RateStabilizer s;
-    s.Update(90, period(60), 120);
-    check(s.Current().effective_fps == 120);
-    check(s.Update(90, period(60), 80).effective_fps == 120);
-    check(s.Update(90, period(60), 80).effective_fps == 120);
-    check(s.Update(90, period(60), 80).effective_fps == 80);
-    check(s.Current().display_hz == 80 && s.Current().runtime_throttled);
-    for (int i=0;i<kStableRateSamples;++i) s.Update(90, period(90), -1);
-    check(!s.Current().from_display);
-  }
-  check(!ResolveEffectiveRate(90, period(90), NAN).from_display);
-  check(!ResolveEffectiveRate(90, period(90), INFINITY).from_display);
-  check(!ResolveEffectiveRate(90, period(90), 0).from_display);
-  check(!ResolveEffectiveRate(90, period(90), 1000).from_display);
   if (failures) { std::printf("%d check(s) failed\n", failures); return 1; }
   std::printf("display_rate: all checks passed\n");
   return 0;

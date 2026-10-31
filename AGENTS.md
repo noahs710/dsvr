@@ -8,8 +8,12 @@ and current. The best shortcut is remembering which shortcut was already false.
 
 1. Read `MODLOG.md` (live handoff only; the closed per-slice task block is
    archived at `docs/history/2026-10-26-modlog-task-block.md`), then the next
-   unmet gate in
-   `docs/superpowers/plans/2026-10-21-native-conversion-execution.md`.
+   unmet gate in the cockpit plan: `MODDING_PLAN.md` (repo root, the
+   orchestration plan) plus the lane files `.empryo/cockpit/lanes/A-K.md`
+   (the lane checkboxes are the sole plan; the superpowers guide was retired
+   to `docs/history/` on 29 October 2026 and must not be recreated, and the
+   short-lived `.empryo/cockpit/PLAN.md` was merged into MODDING_PLAN.md the
+   same day).
 2. Inspect `git status --short` and the actual diff. This checkout contains
    valuable unfinished work: never reset it or stage everything indiscriminately.
 3. Reproduce one bounded failure. Change one cause. Rebuild before trusting a

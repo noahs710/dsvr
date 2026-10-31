@@ -40,6 +40,38 @@ def write_manifest(stage: Path) -> None:
                                            encoding="utf-8")
 
 
+def game_asset_violation(name: str):
+    """Return the offending suffix/path for a name that must never ship.
+
+    DSVR is code plus docs. Game art, including the DSR 2020 Textures
+    replacement (docs/ATTRIBUTION.md), belongs to its own author and is only
+    ever linked. A texture or game archive reaching the stage is a licence
+    violation, so the packager refuses the whole run rather than dropping it.
+    """
+    lowered = name.replace("\\", "/").lower()
+    parts = lowered.split("/")
+    for part in parts:
+        if part in ("bhdtr", "bhdtr2", "eventmsg", "maps", "objects"):
+            return part + "/ (game data directory)"
+    suffix = Path(lowered).suffix
+    if suffix in (".tpf", ".tpfl", ".bdtex", ".bhdtr", ".dds", ".png",
+                  ".tga", ".bmp", ".jpg", ".jpeg", ".ktx", ".ktx2",
+                  ".hkx", ".flver", ".msb", ".esm", ".esd", ".param") or \
+            suffix.endswith(("_param", "_params")):
+        return suffix + " (game/texture asset)"
+    return None
+
+
+def assert_no_game_assets(files: dict) -> list:
+    """Every staged name that would put game or texture art in the package."""
+    bad = []
+    for src, name in files.items():
+        violation = game_asset_violation(str(name))
+        if violation:
+            bad.append(f"{name} <- {src} ({violation})")
+    return bad
+
+
 def populate(stage: Path, files: dict, version_text: str) -> None:
     stage.mkdir(parents=True)
     for src, name in files.items():
@@ -112,9 +144,10 @@ def main() -> int:
         repo / "LICENSE": "LICENSE",
         repo / "third_party" / "README.md": "THIRD_PARTY.md",
         repo / "tools" / "vr_trace.py": "tools/vr_trace.py",
+          build / "src" / "core" / cfg / "DSVR-TraceWriter.exe": "DSVR-TraceWriter.exe",
     }
     for doc in ('README.md', 'MODDING_PLAN.md', 'MODLOG.md',
-                'docs/ENGINEERING.md', 'docs/TESTING.md'):
+                'docs/ENGINEERING.md', 'docs/TESTING.md', 'docs/ATTRIBUTION.md'):
         files[repo / doc] = doc
     if args.reshade_addon:
         files[build / "src" / "reshade" / cfg / "DSVR-ReShade.addon64"] = "DSVR-ReShade.addon64"
@@ -122,6 +155,11 @@ def main() -> int:
     missing = [str(k) for k in files if not k.is_file()]
     if missing:
         print("Missing build outputs:", *missing, sep="\n  ")
+        return 1
+    violations = assert_no_game_assets(files)
+    if violations:
+        print("Refusing to package: game or texture art must never be bundled "
+              "(link and credit it instead):", *violations, sep="\n  ")
         return 1
 
     if not args.latest:

@@ -4,6 +4,7 @@
 #include "gesture_math.h"
 #include "pad_math.h"
 #include "comfort_vignette.h"
+#include "interaction_target_math.h"
 
 namespace dsvr {
 
@@ -31,6 +32,11 @@ struct HandSample {
   float tip[3] = {0, 0, 0};        // grip + blade_dir * blade_length
   float speed = 0.0f;              // smoothed grip speed (m/s)
   float xr_speed = -1.0f;          // runtime linear velocity, -1 = absent
+  float linear_velocity[3] = {0, 0, 0};  // runtime grip velocity, XR local m/s
+  float angular_velocity[3] = {0, 0, 0}; // runtime grip velocity, rad/s
+  unsigned velocity_flags = 0;      // OpenXR linear/angular validity bits
+  std::uint64_t space_epoch = 0;
+  long long predicted_ns = 0;       // OpenXR time; not QPC
   bool squeeze_held = false;
   bool trigger_held = false;
   bool primary_held = false;
@@ -73,6 +79,8 @@ struct RoomscaleBasis {
 struct RoomscaleMotion {
   Vec3 world_velocity{};
   std::uint64_t space_epoch = 0;
+  std::uint64_t calibration_revision = 0;
+  float world_scale = 1.f;
   std::uint64_t published_ms = 0;
   std::uint64_t expires_ms = 0;
   bool active = false;
@@ -103,6 +111,11 @@ void InputInvalidateHeadDirectedLocomotion();
 
 void InputPublishRoomscaleBasis(const RoomscaleBasis& basis);
 
+void InputPublishCameraMotionBasis(const RoomscaleBasis& roomscale,
+                                   Vec3 head_forward,
+                                   Vec3 movement_basis_forward,
+                                   std::uint64_t space_epoch);
+
 void InputInvalidateRoomscaleBasis();
 bool InputLatestRoomscaleMotion(RoomscaleMotion& out);
 // One physical left/right pair, copied after polling for XR publication.
@@ -110,6 +123,12 @@ void InputCopyTrackingSamples(HandSample hands[2], ArmTarget arms[2]);
 
 bool InputAvailable();
 bool InputLatestHand(bool left, HandSample& out);
+// Native selection producer seam (H1): the interaction observer publishes
+// the selected row/object/generation/dummy here; the reach gate reads the
+// live binding. No producer binds it yet, so the store stays empty.
+void InputPublishInteractionSelection(const InteractionSelection& selection,
+                                      long long now_ms);
+void InputInvalidateInteractionSelection();
 // Game thread: latest continuous arm target. want_off_hand=false gives
 // the weapon hand (config dominant hand), true the shield/off hand.
 bool InputLatestArmTarget(bool want_off_hand, ArmTarget& out);

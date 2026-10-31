@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
+#include <string>
 
 namespace dsvr {
 
@@ -58,13 +60,56 @@ struct VrTraceStepSample {
 };
 void VrTraceRecordStep(const VrTraceStepSample&);
 bool VrTraceActive();
+bool VrTraceSessionActive();
 long long VrTraceClock();
 enum class TraceCaptureState {
   Idle, Recording, Closing, Complete, Interrupted, Dropped, IoError
 };
+struct VrTraceHealth {
+  TraceCaptureState state = TraceCaptureState::Idle;
+  std::uint64_t capture_id = 0;
+  std::uint64_t events = 0;
+  unsigned long dropped = 0;
+  unsigned long contended = 0;
+  unsigned long queue_peak = 0;
+  bool io_error = false;
+  std::map<std::string, std::uint64_t> event_counts;
+};
+enum VrTraceSessionCapability : unsigned {
+  kSessionCapNativeCombat = 1u << 0,
+  kSessionCapInteraction = 1u << 1,
+  kSessionCapInputBlockers = 1u << 2,
+  kSessionCapStayStep = 1u << 3,
+  kSessionCapGameStep = 1u << 4,
+  kSessionCapLoadStep = 1u << 5,
+  kSessionCapVirtualPad = 1u << 6,
+  kSessionCapTrackedGrip = 1u << 7,
+};
+enum VrTraceSessionConfigFlag : unsigned {
+  kSessionConfigVr = 1u << 0,
+  kSessionConfigXrInput = 1u << 1,
+  kSessionConfigDominantLeft = 1u << 2,
+  kSessionConfigMotionAttacks = 1u << 3,
+  kSessionConfigPhysicalAttacks = 1u << 4,
+  kSessionConfigPhysicalDefence = 1u << 5,
+  kSessionConfigArmIk = 1u << 6,
+};
 // Only the diagnostic writer thread begins/pumps/finishes files. An explicit
 // path supports the same production writer in offline tests; never overwrites.
+// The external writer owns the file: Begin routes through TraceSink when the
+// launcher sidecar names it, otherwise the legacy in-process writer is used.
 bool VrTraceBegin(const wchar_t* path = nullptr, unsigned duration_ms = 20000);
+// Launcher sidecar for the external writer executable. Empty disables it.
+void VrTraceSetExternalWriter(const wchar_t* executable);
+// Durable checkpoint: flush the pipe and wait for the writer acknowledgement.
+// Returns false when no external writer is active or the ack times out.
+bool VrTraceCheckpoint();
+// Session segments add provenance to the ordinary schema-2 trace header. The
+// session ID must be a short ASCII identifier emitted by the process recorder.
+bool VrTraceBeginSession(const wchar_t* path, unsigned duration_ms,
+                         const char* session_id, std::uint64_t player_epoch,
+                         std::uint64_t segment_index,
+                         unsigned capabilities, unsigned config_flags);
 void VrTracePump();
 // Request/state are safe from any thread. Complete is published only AFTER
 // drain, checked flush and checked close. It does not certify gameplay/stereo.
@@ -76,6 +121,7 @@ TraceCaptureState VrTraceState();
 // Process-local generation of the last successfully begun capture. A client
 // must compare ownership before interpreting state or stopping a capture.
 std::uint64_t VrTraceCaptureId();
+VrTraceHealth VrTraceGetHealth();
 // Writer-thread abort/shutdown. Pump again if state is still Closing.
 void VrTraceFinish(bool interrupted);
 // Byte-gated observation hooks, never retire limiter waits or change matrices.
@@ -84,5 +130,18 @@ bool VrTraceInstall(bool enabled);
 // Startup-only, LAB-gated contact + native Step observation. No renderer/camera
 // hooks or unrelated events; incompatible install domains require a restart.
 bool VrTraceInstallCombat();
+// Startup-only normal-VR LAB session observer. Installs native combat/Step/
+// blocker hooks without the unrelated view/render trace hooks.
+bool VrTraceInstallSession();
+bool VrTraceSessionHooksReady();
+unsigned VrTraceSessionCapabilities();
+
+// Session-domain input payloads: virtual_pad_state uses values[0]=buttons,
+// [1..2]=triggers, [3..6]=signed sticks and flags bit 0=mod output active.
+// hand_tracking uses values[0]=left/right, [1..3]=grip position, [4..7]=xyzw,
+// [8..10]=linear velocity, [11..13]=angular velocity, [14]=held squeeze/
+// trigger/primary bits; flags are valid, transition, linear-valid, angular-valid.
+// Both carry XR predicted time separately from writer QPC; hand epoch is the
+// OpenXR tracking-space epoch. These are raw input observations, not intent.
 
 }  // namespace dsvr

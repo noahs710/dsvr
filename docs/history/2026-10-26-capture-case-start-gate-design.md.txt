@@ -1,4 +1,8 @@
-# Capture case-start gate
+# Superseded design: capture case-start gate
+
+Historical only. Superseded by the user-approved autonomous VR session capture
+design in `../superpowers/specs/2026-10-26-autonomous-vr-session-capture.md`.
+Do not implement the 300-second gate or 540-second case-plan cap.
 
 ## Context
 

@@ -3,12 +3,170 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-from vr_trace import validate, read_capture
+from vr_trace import analyze_session_index, validate, read_capture
 
 
 def check(condition, message):
     if not condition:
         raise RuntimeError(message)
+
+
+def check_session_segments_are_loaded_once():
+    import json
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        index = root / "session-test.jsonl"
+        leaf = "epoch-1-segment-1.jsonl"
+        segment = root / (index.stem + "-" + leaf)
+        session = "offline-test"
+        counts = {"footer": 1, "header": 1, "virtual_pad_state": 1}
+        index_records = [
+            {"event": "session_start", "session_id": session, "pid": 42,
+             "qpc_hz": 1000, "qpc": 100, "utc_filetime_100ns": 10000},
+            {"event": "epoch_start", "session_id": session, "epoch": 1,
+             "qpc": 110, "utc_filetime_100ns": 11000},
+            {"event": "segment_start", "session_id": session, "epoch": 1,
+             "segment": 1, "segment_file": leaf, "gap_qpc": 0, "qpc": 120,
+             "utc_filetime_100ns": 12000},
+            {"event": "segment_end", "session_id": session, "epoch": 1,
+             "segment": 1, "qpc": 180, "utc_filetime_100ns": 18000,
+             "event_counts": counts, "io_error": False},
+            {"event": "epoch_end", "session_id": session, "epoch": 1,
+             "reason": "player_unload", "qpc": 190,
+             "utc_filetime_100ns": 19000},
+            {"event": "session_end", "session_id": session, "qpc": 200,
+             "utc_filetime_100ns": 20000},
+        ]
+        capture_records = [
+            {"event": "header", "qpc": 1, "schema": 2, "pid": 42,
+             "qpc_hz": 1000, "capture_domain": "session",
+             "session_id": session, "player_epoch": 1, "segment_index": 1},
+            {"event": "virtual_pad_state", "qpc": 2, "flags": 1},
+            {"event": "footer", "qpc": 3, "dropped": 0, "events": 1,
+             "interrupted": False, "io_error": False},
+        ]
+        index.write_text("\n".join(json.dumps(row) for row in index_records) + "\n",
+                         encoding="utf-8")
+        segment.write_text("\n".join(json.dumps(row) for row in capture_records) + "\n",
+                           encoding="utf-8")
+        reads = 0
+        original_read_bytes = Path.read_bytes
+        original_read_text = Path.read_text
+
+        def counted_read_bytes(path):
+            nonlocal reads
+            if path == segment:
+                reads += 1
+            return original_read_bytes(path)
+
+        def counted_read_text(path, *args, **kwargs):
+            nonlocal reads
+            if path == segment:
+                reads += 1
+            return original_read_text(path, *args, **kwargs)
+
+        Path.read_bytes = counted_read_bytes
+        Path.read_text = counted_read_text
+        try:
+            report = analyze_session_index(index)
+        finally:
+            Path.read_bytes = original_read_bytes
+            Path.read_text = original_read_text
+        check(reads == 1, "session analyzer loaded each segment more than once")
+        check(report["report_type"] == "autonomous_vr_session",
+              "session report changed while reusing parsed segment records")
+        check(report["event_counts"] == counts,
+              "session report omitted raw per-event counts")
+        check(report["complete"], "normal player unload was marked incomplete")
+        check(report["utc_bounds"] == {
+            "session": {"qpc_start": 100, "qpc_end": 200,
+                        "utc_start_filetime_100ns": 10000,
+                        "utc_end_filetime_100ns": 20000},
+            "epochs": [{"epoch": 1, "qpc_start": 110, "qpc_end": 190,
+                        "utc_start_filetime_100ns": 11000,
+                        "utc_end_filetime_100ns": 19000}],
+            "segments": [{"epoch": 1, "segment": 1, "qpc_start": 120, "qpc_end": 180,
+                          "utc_start_filetime_100ns": 12000,
+                          "utc_end_filetime_100ns": 18000}]},
+              "session index omitted UTC/QPC end bounds")
+
+        foreign_records = [dict(row) for row in index_records]
+        foreign_records[3]["session_id"] = "another-session"
+        foreign_records[4]["session_id"] = "another-session"
+        foreign_records[4]["reason"] = "foreign_epoch_end"
+        index.write_text("\n".join(json.dumps(row) for row in foreign_records) + "\n",
+                         encoding="utf-8")
+        foreign = analyze_session_index(index)
+        check(not foreign["complete"],
+              "foreign segment/epoch end records closed the local session")
+        check(foreign["utc_bounds"]["segments"][0]["utc_end_filetime_100ns"] is None and
+              foreign["utc_bounds"]["epochs"][0]["utc_end_filetime_100ns"] is None,
+              "foreign lifecycle end records supplied local UTC bounds")
+        check("foreign_epoch_end" not in foreign["stop_reasons"],
+              "foreign epoch end contaminated local stop reasons")
+        index_records[3]["event_counts"]["header"] = 2
+        index.write_text("\n".join(json.dumps(row) for row in index_records) + "\n",
+                         encoding="utf-8")
+        mismatch = analyze_session_index(index)
+        check(any("event counts mismatch" in error for error in mismatch["errors"]),
+              "session index event counts were not checked against segment records")
+        index_records[3]["event_counts"]["header"] = 1
+        early_stop = [dict(row) for row in index_records]
+        early_stop[4]["reason"] = "low_disk_reserve"
+        early_stop.insert(5, {"event": "capture_stopped", "session_id": session,
+                              "reason": "low_disk_reserve", "epoch": 1, "qpc": 185,
+                              "utc_filetime_100ns": 18500})
+        index.write_text("\n".join(json.dumps(row) for row in early_stop) + "\n",
+                         encoding="utf-8")
+        low_disk = analyze_session_index(index)
+        check(not low_disk["complete"] and "low_disk_reserve" in low_disk["stop_reasons"],
+              "low-disk stop reported complete")
+        operator_stop = [dict(row) for row in index_records]
+        operator_stop[4]["reason"] = "operator_stop"
+        index.write_text("\n".join(json.dumps(row) for row in operator_stop) + "\n",
+                         encoding="utf-8")
+        stopped = analyze_session_index(index)
+        check(not stopped["complete"] and "operator_stop" in stopped["stop_reasons"],
+              "operator stop reported complete")
+
+        empty_index = root / "empty-session.jsonl"
+        empty_records = [
+            {"event": "session_start", "session_id": session, "pid": 42,
+             "qpc_hz": 1000, "qpc": 100},
+            {"event": "epoch_start", "session_id": session, "epoch": 1, "qpc": 110},
+            {"event": "epoch_end", "session_id": session, "epoch": 1,
+             "reason": "player_unload", "qpc": 190},
+            {"event": "session_end", "session_id": session, "qpc": 200},
+        ]
+        empty_index.write_text("\n".join(json.dumps(row) for row in empty_records) + "\n",
+                               encoding="utf-8")
+        empty_report = analyze_session_index(empty_index)
+        check(not empty_report["complete"] and
+              any("no captured segments" in error for error in empty_report["errors"]),
+              "session without trace segments reported complete")
+        import subprocess
+        cli = subprocess.run([sys.executable,
+                              str(Path(__file__).resolve().parents[1] / "tools" / "vr_trace.py"),
+                              str(empty_index)], capture_output=True, text=True)
+        check(cli.returncode == 2 and not json.loads(cli.stdout)["complete"],
+              "CLI accepted a session without captured segments")
+        empty_index.write_text("null\n" + "\n".join(
+            json.dumps(row) for row in empty_records) + "\n", encoding="utf-8")
+        cli = subprocess.run([sys.executable,
+                              str(Path(__file__).resolve().parents[1] / "tools" / "vr_trace.py"),
+                              str(empty_index)], capture_output=True, text=True)
+        check(cli.returncode == 2 and
+              any("malformed records" in error for error in json.loads(cli.stdout)["errors"]),
+              "CLI misclassified a non-object session-index record")
+        for bad in (None, [], True, "not-an-object", 7):
+            empty_index.write_text(json.dumps(empty_records[0]) + "\n" + json.dumps(bad) + "\n",
+                                   encoding="utf-8")
+            malformed = analyze_session_index(empty_index)
+            check(not malformed["valid"] and not malformed["complete"] and
+                  any("malformed records" in error for error in malformed["errors"]),
+                  "non-object session-index JSON crashed or was accepted")
 
 
 def main():
@@ -182,7 +340,8 @@ def main():
                                [dict(footer, events=2)])["valid"],
           "combat capture with a submission lacking consumed views stayed green")
         for fields in (dict(combat_detail_schema=True), dict(combat_detail_schema=2),
-                       dict(combat_hook=-1)):
+                       dict(combat_hook=-1), dict(combat_health_schema=2),
+                       dict(combat_health_hook=True), dict(combat_module_base="not-hex")):
             check(not capture_report([dict(header, **fields)] + events + [footer])["valid"],
                   "unknown combat header capability accepted")
         for fields in (dict(queue_peak=4097), dict(contended=1), dict(queue_peak=True)):
@@ -660,6 +819,14 @@ def main():
                   sample["target"]["handle"] == 0xfedcba98 and
                   sample["native_return"] == "12345678abcdef01",
                   "actor lifetime or native return lost precision")
+            health = sample["health_writer_observation"]
+            check(health["state"] == "writes_observed" and
+                  health["scoped_call_count"] == 1 and not health["truncated"] and
+                  len(health["recorded"]) == 1 and
+                  health["recorded"][0]["actor_side"] == "target" and
+                  health["recorded"][0]["requested_hp"] == 375 and
+                  health["recorded"][0]["caller"] != "0000000000000000",
+                  "health setter caller/actor/request was not correlated to its contact")
             check(sample["source"]["hp_delta"] == 0 and
                   sample["target"]["hp_delta"] == -25 and
                   sample["target"]["stamina_delta"] == -20,
@@ -668,12 +835,49 @@ def main():
             identity_record = next(e for e in raw if e["event"] == "native_combat_identity")
             contact_record = next(e for e in raw if e["event"] == "native_combat_contact")
             diagnostic_record = next(e for e in raw if e["event"] == "native_combat_diagnostics")
-            def combat_report(records):
+            health_record = next(e for e in raw if e["event"] == "native_combat_health_write")
+            health_bad = dict(health_record, values=list(health_record["values"]))
+            health_bad["values"][10] = 1
+            def combat_report(records, header=None):
                 footer = dict(raw[-1], events=len(records))
-                return capture_report([raw[0]] + records + [footer])
-            legacy = combat_report([contact_record])["native_combat_observations"]
-            check(legacy["paired_samples"] == 0 and legacy["unpaired_contacts"] == 1,
+                return capture_report([raw[0] if header is None else header] +
+                                      records + [footer])
+            malformed_health = combat_report([contact_record, identity_record,
+                                               diagnostic_record, health_bad])
+            check(not malformed_health["valid"] and
+                  malformed_health["native_combat_observations"]["pairing_errors"],
+                  "out-of-order health writer index was accepted")
+            overflow_rows = []
+            for index in range(4):
+                row = dict(health_record, values=list(health_record["values"]))
+                row["values"][10] = index
+                row["values"][11] = 6
+                row["values"][12] = 0
+                row["values"][13] = 1
+                overflow_rows.append(row)
+            overflow_report = combat_report(
+                [event for event in raw[1:-1]
+                 if event["event"] != "native_combat_health_write"] +
+                overflow_rows)
+            overflow_health = overflow_report["native_combat_observations"]["samples"][0][
+                "health_writer_observation"]
+            check(overflow_report["checks"]["capture_integrity"]["status"] == "PASS" and
+                  not overflow_report["native_combat_observations"]["pairing_errors"] and
+                  overflow_health["truncated"] and
+                  overflow_health["scoped_call_count"] == 6 and
+                  len(overflow_health["recorded"]) == 4,
+                  "bounded health-write overflow was not reported as partial")
+            unpaired_legacy = combat_report([contact_record])["native_combat_observations"]
+            check(unpaired_legacy["paired_samples"] == 0 and
+                  unpaired_legacy["unpaired_contacts"] == 1,
                   "legacy record invented an actor lifetime")
+            legacy_header = {key: value for key, value in raw[0].items()
+                             if not key.startswith("combat_health_")}
+            legacy = combat_report([contact_record, identity_record],
+                                   legacy_header)["native_combat_observations"]
+            check(legacy["samples"][0]["health_writer_observation"]["state"] ==
+                  "unknown_or_observer_unavailable",
+                  "legacy capture absence was misreported as no health write")
             duplicate = combat_report([contact_record, identity_record, identity_record])
             check(duplicate["native_combat_observations"]["paired_samples"] == 0 and
                   duplicate["native_combat_observations"]["pairing_errors"],
@@ -741,6 +945,7 @@ def main():
                        dict(combat_detail=1, combat_detail_limit=0)):
             check(not interaction_report([header, interaction, dict(footer, **fields)])["valid"],
                   "malformed continuous callback counts accepted")
+    check_session_segments_are_loaded_once()
     print("test_vr_trace: checks passed")
 
 

@@ -71,5 +71,21 @@ bool ArmIkLatestHands(ArmIkHands& out);
     float hand_separation_m = 0.0f;
   };
   bool ArmIkCombatBench(CombatBenchSnapshot& out);
+  // Iteration 2: poll-thread haptic drain. ArmIkCombatBench only fires when
+  // the Combat panel polls; the render-thread poll frame calls this every
+  // frame so queued bench pulses fire without opening the menu.
+  void ArmIkDrainBenchHaptics();
+
+  // F2 live-probe seam: programmatic copy-publication counts behind the
+  // "native body copy verified=..." log line. Read-only snapshot for the
+  // runbook "Verified native copy publication" row; never a publication
+  // control or a native write.
+  struct ArmIkCopyPublication {
+    std::uint64_t commits = 0;      // verified native copies published
+    std::uint64_t refusals = 0;     // ready copies refused by VerifyNaturalCopy
+    std::uint64_t last_commit_sequence = 0;  // tracking sequence of last commit
+    bool verified = false;          // a verified copy is currently live
+  };
+  void ArmIkCopyPublicationStatus(ArmIkCopyPublication& out);
 
 }  // namespace dsvr

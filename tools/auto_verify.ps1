@@ -1,8 +1,7 @@
 #requires -Version 7.0
-# DSVR offline auto-verify: configure + build + test + doctor + latest package.
+# DSVR offline verify; formal -Package -Version also publishes after the release gates.
 # Safe: never installs, never launches the game, never touches the game folder.
-# On a fully green run this always refreshes dist\DSVR-latest for testing.
-# Formal immutable releases additionally need: -Package -Version <new-version>
+# Formal publication requires closed A-J/K1-K4 gates, full CTest, Doctor, gh auth and a pre-pushed v<version> tag; the tool never pushes tags.
 param([switch]$Package, [string]$Version, [switch]$NoLatest,
   [switch]$SkipDoctor, [switch]$SkipPackage)
 $ErrorActionPreference = "Stop"
@@ -10,8 +9,17 @@ if (($Package -and [string]::IsNullOrWhiteSpace($Version)) -or
     (!$Package -and ![string]::IsNullOrWhiteSpace($Version))) {
   throw "Use -Package and an explicit new -Version together for a formal release."
 }
+if ($Package -and $SkipDoctor) {
+  throw "Formal releases require Doctor; do not use -SkipDoctor."
+}
 $root = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
 Set-Location $root
+if ($Package) {
+  python -B tools\publish_release.py check-gates --lanes .empryo\cockpit\lanes --version $Version
+  if ($LASTEXITCODE -ne 0) { exit 1 }
+  gh auth status --active *> $null
+  if ($LASTEXITCODE -ne 0) { throw "Formal release requires an authenticated GitHub CLI session." }
+}
 # Re-configuring a matching tree costs ~3.6 s and buys nothing: FetchContent
 # deps are already populated and options are pinned below. Only configure when
 # the cache is missing or disagrees on generator/platform/key options.
@@ -35,14 +43,13 @@ cmake --build build --config Release --parallel
 if ($LASTEXITCODE -ne 0) { exit 1 }
 ctest --test-dir build -C Release --parallel --output-on-failure 2>&1 | Tee-Object -FilePath build\latest-ctest.txt
 if ($LASTEXITCODE -ne 0) { exit 1 }
-# Code-only turns skip the game-closed/doctor + zip stages: the inner
-# ctest loop already proved the tree. Packaging stays the default so a
-# green run still refreshes dist/DSVR-latest for testing.
+# Successful nonformal runs refresh the mutable development package by default.
+# Formal releases skip DSVR-latest and publish only their immutable versioned assets.
 if (!$SkipDoctor) {
-  & .\build\src\setup\Release\DSVR-Setup.exe --doctor
+  & .\build\src\setup\Release\DSVR-Setup.exe --doctor 2>&1 | Tee-Object -FilePath build\latest-doctor.txt
   if ($LASTEXITCODE -ne 0) { exit 1 }
 }
-if (!$NoLatest -and !$SkipPackage) {
+if (!$NoLatest -and !$SkipPackage -and !$Package) {
   # Mod version label for the dev package (single source: src/common/version.h).
   $label = "dev"
   $vh = Get-Content src\common\version.h -Raw
@@ -52,5 +59,7 @@ if (!$NoLatest -and !$SkipPackage) {
 }
 if ($Package) {
   python -B tools\package.py --build build --out dist --version $Version --reshade-addon
+  if ($LASTEXITCODE -ne 0) { exit 1 }
+  python -B tools\publish_release.py publish --lanes .empryo\cockpit\lanes --out dist --version $Version --ctest-log build\latest-ctest.txt --doctor-log build\latest-doctor.txt
   if ($LASTEXITCODE -ne 0) { exit 1 }
 }

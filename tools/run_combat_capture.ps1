@@ -363,6 +363,38 @@ function TraceInventory {
   # every caller's .Count would read 1 however many captures exist.
   return $spans
 }
+function WaitForTraceStart {
+  while((Get-Date) -lt [datetime]$r.deadline -and -not (FinishRequested)) {
+    TrackGames
+    $liveIds=@(Games | ForEach-Object { [int]$_.Id })
+    $ownedIds=@($r.pids | ForEach-Object { [int]$_.id })
+    foreach($trace in @(Get-ChildItem -LiteralPath $game -Filter 'DSVR-trace-*.jsonl' -ErrorAction SilentlyContinue |
+                        Where-Object { $_.Name -notin $r.traces_before })) {
+      $stream=$null; $reader=$null
+      try {
+        $stream=[IO.File]::Open($trace.FullName,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite)
+        $reader=[IO.StreamReader]::new($stream)
+        $line=$reader.ReadLine()
+        if($line) {
+          $header=$line | ConvertFrom-Json
+          $capturePid=[int]$header.pid
+          if($header.event -eq 'header' -and [long]$header.qpc -gt 0 -and
+             $capturePid -in $ownedIds -and $capturePid -in $liveIds) {
+            SetReceiptValue 'trace_started_file' $trace.Name
+            SetReceiptValue 'trace_started_pid' $capturePid
+            SetReceiptValue 'trace_started_qpc' ([long]$header.qpc)
+            SaveReceipt
+            Write-Output "TRACE START: $($trace.Name) header confirmed for owned PID $capturePid; case windows begin now."
+            return
+          }
+        }
+      } catch { }
+      finally { if($reader) { $reader.Dispose() } elseif($stream) { $stream.Dispose() } }
+    }
+    Start-Sleep -Milliseconds 250
+  }
+  throw 'Trace header for the owned game did not arrive before the fixed session deadline.'
+}
 function TraceStopRequestPath([int]$processId) {
   return Join-Path $game ("DSVR-trace-stop-{0}.request" -f $processId)
 }
@@ -786,6 +818,39 @@ Write-Output $Message
   }
   if(-not $refused) { throw 'No malformed case plan was refused.' }
   if((ParseCases '').Count) { throw 'Empty case plan produced windows.' }
+  & {
+    $fixtureGame=Join-Path $dir 'trace-start-order'
+    [IO.Directory]::CreateDirectory($fixtureGame) | Out-Null
+    $base=[datetime]'2026-10-30T12:00:00Z'; $script:caseFixtureElapsed=0; $script:caseFixtureQpc=1000
+    $oldGame=$script:game; $oldCasesPath=$script:CasesPath; $oldReceipt=$script:r
+    $script:game=$fixtureGame; $script:CasesPath=Join-Path $fixtureGame 'cases.json'
+    $script:r=[ordered]@{deadline=$base.AddSeconds(5);traces_before=@();pids=@([pscustomobject]@{id=42})}
+    function Get-Date { $base.AddMilliseconds($script:caseFixtureElapsed) }
+    function Start-Sleep { param($Milliseconds)
+        $script:caseFixtureElapsed+=$Milliseconds
+        $trace=Join-Path $fixtureGame 'DSVR-trace-delayed.jsonl'
+        if($script:caseFixtureElapsed -ge 500 -and -not (Test-Path -LiteralPath $trace)) {
+          $header=[ordered]@{event='header';qpc=[long]$script:caseFixtureQpc;pid=42}
+          [IO.File]::WriteAllText($trace,(ConvertTo-Json $header -Compress))
+        }
+    }
+    function Qpc { $script:caseFixtureQpc+=100; return [long]$script:caseFixtureQpc }
+      function FinishRequested { $false }
+    function TrackGames { }
+    function Games { @([pscustomobject]@{Id=42}) }
+      function SaveReceipt { }
+    try {
+      WaitForTraceStart | Out-Null
+      RunCasePlan (ParseCases 'natural_hit:1') {}
+      $case=(Get-Content -LiteralPath $script:CasesPath -Raw | ConvertFrom-Json).cases[0]
+      $span=@(TraceInventory | Where-Object { $_.pid -eq 42 })[0]
+      if($script:caseFixtureElapsed -lt 500 -or -not $span -or $case.start_qpc -lt $span.start) {
+        throw 'Case window started before the owned trace header.'
+      }
+    } finally {
+      $script:game=$oldGame; $script:CasesPath=$oldCasesPath; $script:r=$oldReceipt
+    }
+  }
   $CasesPath=Join-Path $dir 'combat-cases.json'
   RunCasePlan (ParseCases 'hit:1,miss-block:1') {}
   $written=Get-Content -LiteralPath $CasesPath -Raw | ConvertFrom-Json
@@ -964,7 +1029,11 @@ if($Mode -eq 'Finish') {
   $lease=$null; $active=$false
   try { $lease=[IO.File]::Open($lockPath,[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None) }
   catch {
-    $nativeError=$_.Exception.HResult -band 0xffff
+    # [IO.File]::Open wraps the IOException in a MethodInvocationException;
+    # the sharing-violation HResult lives on the inner exception.
+      $inner=$_.Exception
+      while($inner -and $inner -isnot [System.IO.IOException]) { $inner=$inner.InnerException }
+      $nativeError=if($inner) { $inner.HResult -band 0xffff } else { $_.Exception.HResult -band 0xffff }
     if($nativeError -in @(32,33)) { $active=$true } else { throw }
   }
   if($lease) { $lease.Dispose() }
@@ -1074,6 +1143,7 @@ try {
   Write-Output "After the declared work, the runner will request a trace footer and wait for normal game exit. To finish early: pwsh -NoProfile -File `"$PSCommandPath`" -Mode Finish -Receipt `"$Receipt`"."
   Start-Process -FilePath (Join-Path $steam 'steam.exe') -ArgumentList '-applaunch','570940' | Out-Null
   WaitForSingleGameLaunch
+  WaitForTraceStart
   RunCasePlan $plan { TrackGames }
   WaitForGameSession
 } finally {

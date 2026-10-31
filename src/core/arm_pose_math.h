@@ -259,6 +259,95 @@ inline bool ArmPoseInversePoint(const ArmPoseMatrix& pose, Vec3 point,
   return true;
 }
 
+
+enum class NeutralHandBasisSource : unsigned char {
+  NativeBind,
+  MirroredNativeBind,
+  TposeFallback
+};
+
+inline bool NeutralHandBasisDiagnosticReady(int hand_bone,
+                                            bool source_reference_valid) {
+  return hand_bone >= 0 && source_reference_valid;
+}
+
+inline bool NeutralHandFallbackBasis(unsigned side, Vec3 right, Vec3 up,
+                                     Vec3 forward, ArmPoseMatrix& out) {
+  if (side > 1 || !FiniteVec(right) || !FiniteVec(up) || !FiniteVec(forward) ||
+      VLen(right) <= 1e-6f || VLen(up) <= 1e-6f || VLen(forward) <= 1e-6f)
+    return false;
+  right = VNorm(right);
+  up = VNorm(up);
+  forward = VNorm(forward);
+  const float side_sign = side ? 1.0f : -1.0f;
+  const Vec3 axes[3] = {VScale(right, side_sign), VScale(forward, side_sign),
+                        VScale(up, -1.0f)};
+  out = {};
+  for (int axis = 0; axis < 3; ++axis) {
+    out.m[axis] = axes[axis].x;
+    out.m[4 + axis] = axes[axis].y;
+    out.m[8 + axis] = axes[axis].z;
+  }
+  return arm_pose_detail::ValidMatrix(out);
+}
+
+// Transfer a valid hand's authored deviation from the expected outward/palm-down
+// stance to its opposite-side fallback. This changes only orientation, never a
+// wrist position or bone basis, and avoids mixing one native neutral with one
+// unrelated world-axis guess.
+inline bool MirrorNeutralHandBasis(const ArmPoseMatrix& source,
+                                   const ArmPoseMatrix& source_fallback,
+                                   const ArmPoseMatrix& target_fallback,
+                                   ArmPoseMatrix& out) {
+  using namespace arm_pose_detail;
+  if (!ValidMatrix(source) || !ValidMatrix(source_fallback) ||
+      !ValidMatrix(target_fallback))
+    return false;
+  out = {};
+  for (int axis = 0; axis < 3; ++axis) {
+    Vec3 local{};
+    if (!ArmPoseInversePoint(source_fallback, Column(source, axis), local))
+      return false;
+    const Vec3 mapped = ArmPoseTransformPoint(target_fallback, local);
+    out.m[axis] = mapped.x;
+    out.m[4 + axis] = mapped.y;
+    out.m[8 + axis] = mapped.z;
+  }
+  return ValidMatrix(out);
+}
+
+inline bool ResolveNeutralHandBases(const ArmPoseMatrix native[2],
+                                    const bool native_valid[2], Vec3 right,
+                                    Vec3 up, Vec3 forward,
+                                    ArmPoseMatrix resolved[2],
+                                    NeutralHandBasisSource source[2]) {
+  if (!native || !native_valid || !resolved || !source) return false;
+  ArmPoseMatrix fallback[2]{};
+  if (!NeutralHandFallbackBasis(0, right, up, forward, fallback[0]) ||
+      !NeutralHandFallbackBasis(1, right, up, forward, fallback[1]))
+    return false;
+  const bool have_native[2] = {
+      native_valid[0] && arm_pose_detail::ValidMatrix(native[0]),
+      native_valid[1] && arm_pose_detail::ValidMatrix(native[1])};
+  for (unsigned side = 0; side < 2; ++side) {
+    resolved[side] = have_native[side] ? native[side] : fallback[side];
+    source[side] = have_native[side] ? NeutralHandBasisSource::NativeBind
+                                     : NeutralHandBasisSource::TposeFallback;
+  }
+  if (have_native[0] != have_native[1]) {
+    const unsigned bound_side = have_native[0] ? 0u : 1u;
+    const unsigned missing_side = 1u - bound_side;
+    ArmPoseMatrix mirrored{};
+    if (MirrorNeutralHandBasis(native[bound_side], fallback[bound_side],
+                               fallback[missing_side], mirrored)) {
+      resolved[missing_side] = mirrored;
+      source[missing_side] = NeutralHandBasisSource::MirroredNativeBind;
+    }
+  }
+  return arm_pose_detail::ValidMatrix(resolved[0]) &&
+         arm_pose_detail::ValidMatrix(resolved[1]);
+}
+
 // Follow controller rotation relative to a captured native held stance. The
 // controller basis may contain the XR/native handedness reflection; using the
 // complete calibrated bases cancels it without guessing wrist or weapon axes.

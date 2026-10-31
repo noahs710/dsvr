@@ -97,6 +97,16 @@ inline bool CalibrationEstimateAnatomy(const Vec3 positions[2], UserCalibration&
   out=candidate;return true;
 }
 
+// Stillness budget for the one-second hold. Measuring drift from the first
+// sample only, with a fixed 4 cm window, restarted the hold near its end on
+// real headsets: breathing alone moves the head several centimetres per second,
+// and the operator's 31 Oct run never got past progress 0.42. The baseline
+// follows the pose slowly instead -- drift below the follow step is absorbed,
+// a deliberate move still trips the gate.
+inline constexpr float kHoldDriftM = 0.04f;
+inline constexpr float kHoldDriftCos = 0.9914f;  // ~15 degrees
+inline constexpr float kHoldFollow = 0.25f;
+
 // A one-second stable T/A pose observes controller geometry and estimates
 // anatomy. Shoulder sockets and upper/forearm split are unobservable from one
 // pose; the IK retains native segment proportions, not invented bone scales.
@@ -105,7 +115,11 @@ class CalibrationCapture {
   void Reset() { *this=CalibrationCapture{}; }
   bool Feed(const TrackingFrame& f,bool trigger,bool floor_valid,float floor_height,
             float fallback_height,UserCalibration& completed) {
-    ready_=false; progress_=0; last_hands_valid_=false;
+    // progress_ is hold state, not a per-call value. A frame that cannot advance
+    // the hold (duplicate, stale, pose not accepted) leaves the last published
+    // progress alone; only RestartHold() clears it. Zeroing it here made the
+    // on-screen bar flicker to zero on every non-productive frame.
+    ready_=false; last_hands_valid_=false;
     if (!f.sequence || !f.space_epoch || !f.focused || !f.orientation_valid ||
         !f.position_valid || !f.captured_ms || !std::isfinite(fallback_height)) {
       RestartHold(); return false;
@@ -160,15 +174,22 @@ class CalibrationCapture {
     }
     const Vec3 head{f.head_pos[0],f.head_pos[1],f.head_pos[2]};
     float head_dot=0;for(int i=0;i<4;++i)head_dot+=baseline_head_q_[i]*headq[i];
-    if(VLen(VAdd(head,VScale(baseline_head_,-1)))>.04f || std::fabs(head_dot)<.9914f) {
+    if(VLen(VAdd(head,VScale(baseline_head_,-1)))>kHoldDriftM ||
+       std::fabs(head_dot)<kHoldDriftCos) {
       RestartHold();return false;
     }
     for (int s=0;s<2;++s) {
-      if (VLen(VAdd(positions[s],VScale(baseline_[s],-1)))>.04f) { RestartHold();return false; }
+      if (VLen(VAdd(positions[s],VScale(baseline_[s],-1)))>kHoldDriftM) { RestartHold();return false; }
       float dot=0;for(int i=0;i<4;++i)dot+=baseline_q_[s][i]*quats[s][i];
-      if (std::fabs(dot)<.9914f) { RestartHold();return false; }  // 15 degrees
+      if (std::fabs(dot)<kHoldDriftCos) { RestartHold();return false; }
       for (int i=0;i<4;++i) sum_q_[s][i]+=quats[s][i]*(dot<0?-1.f:1.f);
     }
+    // Absorb sub-threshold drift into the baseline so slow tracking noise does
+    // not spend the whole budget across a one-second hold. Orientation keeps its
+    // original reference: it does not wander the way position does.
+    baseline_head_=VAdd(VScale(baseline_head_,1.0f-kHoldFollow),VScale(head,kHoldFollow));
+    for (int s=0;s<2;++s)
+      baseline_[s]=VAdd(VScale(baseline_[s],1.0f-kHoldFollow),VScale(positions[s],kHoldFollow));
     ++samples_;
     for(int side=0;side<2;++side) {
       sum_position_[side][0]+=positions[side].x;

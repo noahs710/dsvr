@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <initializer_list>
 
 // The physical defence bridge: a raised shield hand blocks wherever it is held,
 // a flick of that hand is one parry tap, and neither survives bad input.
@@ -45,13 +46,13 @@ int main() {
     for (int elapsed = 0; elapsed < 220; elapsed += 11) {
       if (frame(tr, 0.1f, true).block && first_block_ms < 0) first_block_ms = t;
     }
-    check(first_block_ms >= p.guard_settle_ms && tr.Guarding(),
-          "a raised, still hand becomes a block only after the settle window");
+    check(first_block_ms == 11 && tr.Guarding(),
+          "a raised shield blocks immediately");
     ShieldGuardTrigger moving;
     Run quiet_run;
     hold(moving, 1.5f, true, 400, quiet_run);
-    check(!quiet_run.blocked && !moving.Guarding(),
-          "a raised hand that never holds still is not a guard");
+    check(quiet_run.blocked && moving.Guarding(),
+                "a raised moving shield remains guarded");
     ShieldGuardTrigger low;
     Run low_run;
     hold(low, 0.1f, false, 400, low_run);
@@ -66,10 +67,9 @@ int main() {
     const auto down = frame(tr, 0.1f, false);
     check(!down.block && !tr.Guarding(), "lowering the shield drops the block at once");
     const auto up = frame(tr, 0.1f, true);
-    check(!up.block, "the block re-settles rather than snapping back on");
+    check(up.block, "raising the shield engages guard immediately");
   }
-  // A flick is a tap of the same button, and it may only start from a released
-  // button: the game separates a block from a parry by press length alone.
+  // The preview releases LB before issuing a bounded LT parry request.
   {
     ShieldGuardTrigger tr;
     Run run;
@@ -144,6 +144,31 @@ int main() {
     hold(stowed, 0.1f, false, 400, run);
     check(run.parries == 0, "a flick with the shield down is not a parry");
   }
+  // Crossing below the flick threshold is not a return to rest. Keep the
+  // entire excursion bounded, including its slower tail, at any clock origin.
+  for (long long origin : {0LL, 10000LL}) {
+    ShieldGuardTrigger tr;
+    tr.Feed(0.1f, true, origin, p);
+    tr.Feed(5.0f, true, origin + 20, p);
+    tr.Feed(5.0f, true, origin + 60, p);
+    const auto slowing = tr.Feed(1.5f, true, origin + 70, p);
+    check(!slowing.parry && !slowing.flicked,
+          "slowing below the flick band cannot parry before returning to rest");
+    const auto rested = tr.Feed(0.1f, true, origin + 100, p);
+    check(rested.parry && rested.flicked,
+          "a completed flick can parry without an initial artificial cooldown");
+    check(!tr.Feed(0.1f, true, origin + 100, p).flicked,
+          "a repeated sample cannot emit the parry-start event twice");
+
+    ShieldGuardTrigger late;
+    late.Feed(0.1f, true, origin, p);
+    late.Feed(5.0f, true, origin + 20, p);
+    late.Feed(5.0f, true, origin + 60, p);
+    late.Feed(1.5f, true, origin + 70, p);
+    const auto expired = late.Feed(0.1f, true, origin + 300, p);
+    check(!expired.parry && !expired.flicked,
+          "a slow tail beyond the flick return deadline cannot queue a parry");
+  }
   // A guard that never released cannot parry: the pending tap expires instead
   // of arriving as a block with a press welded onto it.
   {
@@ -164,8 +189,21 @@ int main() {
       if (out.flicked) ++parries;
       blocked |= out.block;
     }
-    check(parries == 0 && blocked,
-          "a guard that never let go expires the pending parry instead of pressing");
+    check(parries == 1 && blocked,
+          "a held guard resumes after the bounded parry pulse");
+  }
+  for (int hz : {72, 90, 120}) {
+    ShieldGuardTrigger tr;
+    int parries = 0;
+    for (int frame_index = 0; frame_index < hz; ++frame_index) {
+      const long long ms = frame_index * 1000LL / hz;
+      const float speed = ms >= 300 && ms < 370 ? 5.0f : 0.1f;
+      const auto out = tr.Feed(speed, true, ms, p);
+      parries += out.flicked;
+      check(!(out.block && out.parry), "rate variation never overlaps preview block and parry");
+    }
+    check(parries == 1 && tr.Guarding(),
+          "72/90/120 Hz each produce one parry and return to guard");
   }
   // Fail-closed: bad input releases the guard rather than leaving a held block.
   {
@@ -214,11 +252,15 @@ int main() {
   {
     ShieldGuardTrigger a, b;
     Run ra, rb;
+    // Each replay has its own uninterrupted timeline. Interleaving entire
+    // runs on one clock inserts artificial gaps into the other replay.
+    const auto origin = t;
     hold(a, 0.1f, true, 300, ra);
-    hold(b, 0.1f, true, 300, rb);
     hold(a, 5.0f, true, 66, ra);
-    hold(b, 5.0f, true, 66, rb);
     hold(a, 0.1f, true, 500, ra);
+    t = origin;
+    hold(b, 0.1f, true, 300, rb);
+    hold(b, 5.0f, true, 66, rb);
     hold(b, 0.1f, true, 500, rb);
     check(ra.parries == rb.parries && ra.blocked == rb.blocked &&
               ra.parried == rb.parried,

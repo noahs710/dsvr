@@ -18,6 +18,8 @@ constexpr std::uintptr_t base=0x140000000,table=base+0x13251f0;
 constexpr std::uint64_t result=0x12345678abcdef01ull;
 using Contact=std::uint64_t(__fastcall*)(void*);
 Contact callback=nullptr;
+using HealthSetter=std::uint64_t(__fastcall*)(void*,int);
+HealthSetter health_callback=nullptr;
 using Interaction=std::uint64_t(__fastcall*)(void*,int,unsigned);
 Interaction interaction_callback=nullptr;
 std::array<unsigned char,0x58> action_group{};
@@ -32,6 +34,10 @@ std::array<unsigned char,0x600> source{},target{};
 std::array<unsigned char,0x200> other{};
 std::array<unsigned char,0x100> world{};
 unsigned calls=0,reads=0,mode=0,permission_queries=0;
+unsigned health_calls=0;
+unsigned health_emit_count=1;
+bool health_bad_args=false;
+constexpr std::uint64_t health_result=0x9876543210abcdefull;
 bool native_permission_cache=false;
 bool unreadable=false,bad_signature=false,response_unreadable=false;
 unsigned log_calls=0;
@@ -50,13 +56,24 @@ std::uint64_t __fastcall OriginalInteraction(void* group,int index,unsigned acto
   if(interaction_changed) Put(action_row,0x1c,0xdeadbeefu);
   return result;
 }
+std::uint64_t __fastcall OriginalHealthSetter(void* actor,int requested) {
+  ++health_calls;
+  health_bad_args=health_bad_args || actor!=target.data() || requested!=375 ||
+      dsvr::GuardedReadScope::Contains(reinterpret_cast<std::uintptr_t>(target.data()),
+          reinterpret_cast<std::uintptr_t>(target.data())+target.size());
+  Put(target,0x3e8,requested);
+  return health_result;
+}
 std::uint64_t __fastcall Original(void* data) {
   ++calls;
   native_permission_cache=native_permission_cache ||
       dsvr::GuardedReadScope::Contains(reinterpret_cast<std::uintptr_t>(target.data()),
           reinterpret_cast<std::uintptr_t>(target.data())+target.size());
   if (data!=record.data()) return 0;
-  Put(target,0x3e8,375);Put(target,0x3f8,80);
+  for(unsigned i=0;i<health_emit_count;++i)
+    if(health_callback && health_callback(target.data(),375)!=health_result)
+      health_bad_args=true;
+  Put(target,0x3f8,80);
   Put(record,0x3c,7000); // observation must retain the pre-call selected row
   Put(record,0x140,0x99999999u);
   Put(record,0x54,0xfedcba98u);
@@ -107,6 +124,10 @@ std::string MotionLine(const std::string& text) {
 }
 MH_STATUS WINAPI MH_Initialize() { return MH_OK; }
 MH_STATUS WINAPI MH_CreateHook(LPVOID address,LPVOID detour,LPVOID* original) {
+  if(reinterpret_cast<std::uintptr_t>(address)==base+0x322910) {
+    health_callback=reinterpret_cast<HealthSetter>(detour);
+    *original=reinterpret_cast<void*>(&OriginalHealthSetter);return MH_OK;
+  }
   if(reinterpret_cast<std::uintptr_t>(address)==base+0x313470) {
     interaction_callback=reinterpret_cast<Interaction>(detour);
     *original=reinterpret_cast<void*>(&OriginalInteraction);return MH_OK;
@@ -124,6 +145,11 @@ void LogWrite(LogLevel,const char*,int,const char* format,...) {
 std::wstring LogPathNextToModule(void*,const wchar_t*) { return L"unused"; }
 std::uintptr_t ModuleBase(const wchar_t*) { return base; }
 bool BytesMatch(std::uintptr_t address,const void* expected,std::size_t size) {
+  if(address==base+0x322910) {
+    constexpr unsigned char setter[]{0x89,0x54,0x24,0x10,0x53,0x48,0x83,0xec,
+        0x20,0xf6,0x81,0x24,0x05,0,0,0x40,0x48,0x8b,0xd9};
+    return !bad_signature && size==sizeof(setter) && !std::memcmp(expected,setter,size);
+  }
   if(address==base+0x313470) {
     constexpr unsigned char prologue[]{0x40,0x55,0x56,0x57,0x48,0x83,0xec,0x50,
         0x48,0x63,0xf2,0x41,0x8b,0xe8,0x48,0x8b,0xf9,0x85,0xd2};
@@ -173,19 +199,29 @@ bool GuardedReadBytes(std::uintptr_t address,void* out,std::size_t size) {
 }
 int main(int argc,char** argv) {
   const bool combat_only=argc==2 && std::string(argv[1])=="--combat-only";
-  if(!combat_only && argc!=1 && (argc!=3 || (std::string(argv[1])!="--fixture" &&
-                             std::string(argv[1])!="--profile"))) return 2;
+  const bool session_only=argc==2 && std::string(argv[1])=="--session-only";
+  if(!combat_only && !session_only && argc!=1 && (argc!=3 || (std::string(argv[1])!="--fixture" &&
+                              std::string(argv[1])!="--profile"))) return 2;
   using namespace dsvr;
   // A changed prologue never installs a speculative native hook.
   bad_signature=true;
-  if(combat_only) VrTraceInstallCombat(); else VrTraceInstall(true);
+  if(combat_only) VrTraceInstallCombat();
+  else if(session_only) VrTraceInstallSession();
+  else VrTraceInstall(true);
   CHECK(!callback);
+  unrelated_signatures=0;
   bad_signature=false;
-  if(combat_only) VrTraceInstallCombat(); else VrTraceInstall(true);
+  if(combat_only) VrTraceInstallCombat();
+  else if(session_only) VrTraceInstallSession();
+  else VrTraceInstall(true);
   CHECK(callback);
+  CHECK(health_callback);
   CHECK(interaction_callback);
   Fixture();const auto idle_reads=reads;
+  const auto idle_health=health_calls;
   CHECK(callback(record.data())==result && reads==idle_reads && calls==1);
+  CHECK(health_calls==idle_health+1 && !health_bad_args);
+  CHECK(health_callback(target.data(),375)==health_result); // inactive scope still preserves raw RAX
   wchar_t temp[MAX_PATH]{};CHECK(GetTempPathW(MAX_PATH,temp));
   const auto prefix=std::wstring(temp)+L"DSVR-combat-"+std::to_wstring(GetCurrentProcessId())+
       L"-"+std::to_wstring(GetTickCount64());
@@ -209,6 +245,32 @@ int main(int argc,char** argv) {
     CHECK(VrTraceState()==TraceCaptureState::Complete);
     std::filesystem::remove(path);
     std::puts("PASS combat-only capture refuses unrelated render flood");
+    return 0;
+  }
+  if(session_only) {
+    CHECK(unrelated_signatures==1); // only the optional input-blocker signature
+    CHECK(!VrTraceInstallCombat()); // a process cannot switch domains
+    const auto path=prefix+L"-session";CHECK(VrTraceBegin(path.c_str(),600000));
+    VrTraceEvent graphics{};graphics.event="constant_upload_enter";
+    VrTraceRecord(graphics);
+    VrTraceRecordInputBlockers(0x12,42);
+    Fixture();
+    CHECK(callback(record.data())==result);
+    Put(action_group,0x18,reinterpret_cast<std::uintptr_t>(action_row.data()));
+    Put(action_group,0x20,1);
+    Put(action_row,0x40,reinterpret_cast<std::uintptr_t>(action_param.data()));
+    CHECK(interaction_callback(action_group.data(),0,0xffffffffu)==result);
+    VrTraceRecordStep({2,42,1,2,3,.01f,0});
+    VrTraceFinish(false);
+    const auto text=Read(path);
+    CHECK(text.find("constant_upload_enter")==std::string::npos);
+    CHECK(text.find("native_input_blockers")!=std::string::npos);
+    CHECK(text.find("native_combat_contact")!=std::string::npos);
+    CHECK(text.find("native_interaction_activation")!=std::string::npos);
+    CHECK(text.find("native_step_dispatch")!=std::string::npos);
+    CHECK(VrTraceState()==TraceCaptureState::Complete);
+    std::filesystem::remove(path);
+    std::puts("PASS autonomous session domain excludes unrelated render telemetry");
     return 0;
   }
   for (mode=0;mode<=3;++mode) {
@@ -244,6 +306,13 @@ int main(int argc,char** argv) {
       // and the complete 64-bit native return, without float32 ID truncation.
       CHECK(text.find("native_combat_identity")!=std::string::npos);
       CHECK(text.find("native_combat_diagnostics")!=std::string::npos);
+      CHECK(text.find("native_combat_health_write")!=std::string::npos);
+      CHECK(text.find("\"combat_health_schema\":1,\"combat_health_hook\":1")!=std::string::npos);
+      CHECK(text.find("\"combat_module_base\":\"0000000140000000\"")!=std::string::npos);
+      const auto health_at=text.find("\"event\":\"native_combat_health_write\"");
+      CHECK(health_at!=std::string::npos);
+      const auto health_line=text.substr(health_at,text.find('\n',health_at)-health_at);
+      CHECK(health_line.find(",375,0,0,1,0,0,0,1]")!=std::string::npos);
             const auto diagnostic_at=text.find("\"event\":\"native_combat_diagnostics\"");
             const auto diagnostic=text.substr(diagnostic_at,text.find('\n',diagnostic_at)-diagnostic_at);
             CHECK(diagnostic.find("[31,2,0,47768,65244,165,90,1,0,2.5,13124,4386,30600,21862,126,2]")!=std::string::npos);
@@ -313,6 +382,17 @@ int main(int argc,char** argv) {
   CHECK(bounded.find("\"combat_refused\":10")!=std::string::npos);
   CHECK(bounded.find("\"combat_non_player\":0")!=std::string::npos);
   CHECK(VrTraceState()==TraceCaptureState::Complete);std::filesystem::remove(path);
+  Fixture();health_emit_count=6;path=prefix+L"-health-overflow";
+  CHECK(VrTraceBegin(path.c_str()));
+  CHECK(callback(record.data())==result);
+  VrTraceFinish(false);health_emit_count=1;
+  const auto overflow=Read(path);
+  unsigned health_records=0;
+  for(auto at=overflow.find("native_combat_health_write");at!=std::string::npos;
+      at=overflow.find("native_combat_health_write",at+1)) ++health_records;
+  CHECK(health_records==4);
+  CHECK(overflow.find(",375,0,0,6,0,1,0,1]")!=std::string::npos);
+  std::filesystem::remove(path);
   // Continuous combat recording must retain real contacts after a burst of
   // local-player self contacts and after the short-capture detail ceiling.
   Fixture();path=prefix+L"-continuous";
@@ -350,7 +430,7 @@ int main(int argc,char** argv) {
   CHECK(excluded_text.find("\"combat_non_player\":3")!=std::string::npos);
   CHECK(excluded_text.find("\"combat_detail\":0")!=std::string::npos);
   std::filesystem::remove(path);
-  // Leave only four slots: the five-part sample must drop as a whole, never
+  // Leave only four slots: the expanded contact batch must drop as a whole, never
   // leave an apparently attributable contact with missing refusal diagnostics.
   Fixture();path=prefix+L"-pressure";CHECK(VrTraceBegin(path.c_str()));
   VrTraceEvent filler{};filler.event="queue_pressure";
@@ -363,7 +443,8 @@ int main(int argc,char** argv) {
   CHECK(pressure.find("native_combat_diagnostics")==std::string::npos);
   CHECK(pressure.find("native_combat_motion")==std::string::npos);
   CHECK(pressure.find("native_combat_context")==std::string::npos);
-  CHECK(pressure.find("\"dropped\":5")!=std::string::npos);
+  CHECK(pressure.find("native_combat_health_write")==std::string::npos);
+  CHECK(pressure.find("\"dropped\":6")!=std::string::npos);
   CHECK(VrTraceState()==TraceCaptureState::Dropped);std::filesystem::remove(path);
   CHECK(health_logs>=7); // writer emits bounded capture-close summaries
   Put(action_group,0x18,reinterpret_cast<std::uintptr_t>(action_row.data()));

@@ -41,7 +41,6 @@ inline int OffHandIndex(bool dominant_left) { return dominant_left ? 1 : 0; }
 
 struct HandParams {
   float blade_length_m = 0.9f;      // longsword-class reach, grip -> tip
-  float two_hand_distance_m = 0.14f;  // grips closer than this = two-handed
   float block_max_speed = 0.8f;     // held guard, not a sweep (m/s)
   float block_min_forward_m = 0.05f;  // off-hand ahead of the head plane
   float block_min_height_m = -0.45f;  // off-hand no lower than this vs head
@@ -81,17 +80,11 @@ inline bool IsParryCandidate(float off_speed, const HandParams& p = {}) {
   return std::isfinite(off_speed) && off_speed >= p.parry_speed_min;
 }
 
-// Two-handed stance: off-hand grip held near the weapon grip while its
-// squeeze is held. Distance alone never two-hands (hands cross constantly
-// in normal play); the squeeze requirement is deliberate.
-inline bool IsTwoHanded(Vec3 weapon_pos, Vec3 off_pos, bool off_squeeze_held,
-                        const HandParams& p = {}) {
-  if (!off_squeeze_held) return false;
-  if (!std::isfinite(weapon_pos.x) || !std::isfinite(off_pos.x))
-    return false;
-  Vec3 d{weapon_pos.x - off_pos.x, weapon_pos.y - off_pos.y,
-         weapon_pos.z - off_pos.z};
-  return VLen(d) <= p.two_hand_distance_m;
-}
+// Two-handed stance (retired point proxy): superseded by the committed
+// blade-segment envelope (SupportGrip, combat_contact.h) — squeeze held +
+// free grip near ANY point of the blade segment, not a 14 cm grip-point
+// radius. Kept as a deleted stub so old callers fail at compile time with
+// a pointer to the replacement instead of silently using the wrong rule.
+inline bool IsTwoHanded(Vec3, Vec3, bool, const HandParams& = {}) = delete;
 
 }  // namespace dsvr

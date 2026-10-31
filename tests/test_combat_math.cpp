@@ -70,7 +70,9 @@ int main() {
     const float dt = 1.0f / 90.0f;
     Vec3 g{0, 1.4f, 0}, tp{0, 1.4f, -0.9f};
     b.Feed(g, tp, dt);
-    check(b.valid && b.tip_speed == 0.0f);
+    check(b.valid && b.tip_speed == 0.0f && !b.HasVelocitySample());
+    b.Feed(g, tp, dt);
+    check(b.HasVelocitySample());
     for (int i = 0; i < 45; ++i) {
       g.x += 3.0f * dt;
       tp.x += 3.0f * dt;
@@ -86,7 +88,7 @@ int main() {
     b.Feed(tele, tele_tip, dt);
     check(b.tip_speed == 0.0f);
     b.Reset();
-    check(!b.valid && b.tip_speed == 0.0f);
+    check(!b.valid && b.tip_speed == 0.0f && !b.HasVelocitySample());
   }
 
   // Continuous damage: 0 below contact speed, ramp above, no latch.
@@ -130,11 +132,10 @@ int main() {
                                        {1.0f, 1.4f, -1.0f}, 0.05f, p));
     check(!BladeSweptOverlapsSphereArc(g, prev_tip, g, tip,
                                        {0.6364f, 2.4f, -0.6364f}, 0.05f, p));
-    // Pure translation has no rotation plane to invent: the arc path must
-    // agree with the chord, never invent coverage and never go NaN.
+    // Pure translation covers the whole blade, including its initial pose.
     check(BladeSweptOverlapsSphereArc({0, 1.4f, 0.9f}, {0, 1.4f, 0.0f}, g, tip,
                                       {0, 1.4f, -0.45f}, 0.1f, p));
-    check(!BladeSweptOverlapsSphereArc({0, 1.4f, 0.9f}, {0, 1.4f, 0.0f}, g, tip,
+    check(BladeSweptOverlapsSphereArc({0, 1.4f, 0.9f}, {0, 1.4f, 0.0f}, g, tip,
                                        {0, 1.4f, 0.45f}, 0.1f, p));
     check(!BladeSweptOverlapsSphereArc(g, prev_tip, g, tip, on_arc, -1.0f, p));
     check(!BladeSweptOverlapsSphereArc({NAN, 0, 0}, prev_tip, g, tip, on_arc,
@@ -142,8 +143,8 @@ int main() {
     CombatParams bad = p;
     bad.blade_radius_m = NAN;
     check(!BladeSweptOverlapsSphereArc(g, prev_tip, g, tip, on_arc, 0.05f, bad));
-    // A 180-degree flip has no unique axis: fall back to the chord alone
-    // rather than choosing an arbitrary rotation plane.
+    // A 180-degree flip has no unique axis: refuse an unobserved interior
+    // rather than choosing an arbitrary rotation plane or a tip chord.
     check(!BladeSweptOverlapsSphereArc(g, {0, 1.4f, -0.9f}, g,
                                        {0, 1.4f, 0.9f}, {0.9f, 1.4f, 0}, 0.05f,
                                        p));
@@ -161,6 +162,68 @@ int main() {
     check(EvaluateBladeContact(blade, GestureKind::Slash, targets, 0.8f, 1.0f,
                                280, 1000, true, gate, hit));
     check(hit.target_id == 7 && hit.damage_scale > 0.0f);
+  }
+
+  // A thin target between the old four rotation samples, plus a shaft-only
+  // contact during translation. These positions follow analytic geometry.
+  {
+    CombatParams p;
+    p.blade_radius_m = 0.001f;
+    const float angle = 3.14159265358979323846f / 20; // 9 degrees
+    const Vec3 target{0.9f * std::cos(angle), 0, -0.9f * std::sin(angle)};
+    check(BladeSweptOverlapsSphereArc({}, {0.9f, 0, 0}, {}, {0, 0, -0.9f},
+                                      target, 0.002f, p));
+    check(BladeSweptOverlapsSphereArc({}, {0, 0, -1}, {0.4f, 0, 0},
+                                      {0.4f, 0, -1}, {0.2f, 0, -0.5f},
+                                      0.002f, p));
+    // The same analytic path split at different frame rates retains contact.
+    // Combined grip translation, length change and rotation exercise all
+    // terms of the advancement bound. Expected contact is constructed at a
+    // known time and blade fraction, independently of the collision routine.
+    const auto pose = [](float t, Vec3& g, Vec3& tp) {
+      const float a = 2.6f * t, length = 0.7f + 0.5f * t;
+      g = {0.4f * t, 0, 0.2f * t};
+      tp = {g.x + length * std::cos(a), 0, g.z - length * std::sin(a)};
+    };
+    Vec3 cg, ct;
+    pose(0.337f, cg, ct);
+    const Vec3 interior = VAdd(cg, VScale(VAdd(ct, VScale(cg, -1)), 0.55f));
+    for (int frames : {1, 2, 5, 12, 36, 72, 90, 144}) {
+      bool touched = false;
+      for (int frame = 0; frame < frames; ++frame) {
+        Vec3 ag, at, bg, bt;
+        pose(float(frame) / frames, ag, at);
+        pose(float(frame + 1) / frames, bg, bt);
+        const auto distance = [&](Vec3 a, Vec3 b) {
+          return SegmentPointDistance(a, b, interior);
+        };
+        const auto result = SweepBladeContact(ag, at, bg, bt, 0.003f, distance);
+        check(result == BladeSweepResult::Hit || result == BladeSweepResult::Clear);
+        check(SweepBladeContact(ag, at, bg, bt, 0.003f, distance) == result);
+        touched |= result == BladeSweepResult::Hit;
+        // Entire path lies in y=0: a parallel off-plane target is a miss.
+        check(!BladeSweptOverlapsSphereArc(ag, at, bg, bt,
+            {interior.x, 0.01f, interior.z}, 0.002f, p));
+      }
+      check(touched);
+    }
+    const auto distance = [](Vec3 a, Vec3 b) {
+      return SegmentPointDistance(a, b, {0.5f, 0, 0.5f});
+    };
+    check(SweepBladeContact({}, {1, 0, 0}, {}, {-1, 0, 0}, 0.003f,
+                            distance) == BladeSweepResult::Unresolved);
+    check(SweepBladeContact({NAN, 0, 0}, {1, 0, 0}, {}, {0, 0, -1},
+                            0.003f, distance) == BladeSweepResult::Invalid);
+    check(!BladeSweptOverlapsSphereArc({}, {1, 0, 0}, {}, {0, 0, -1},
+                                       target, INFINITY, p));
+    // A fixed plane 1 mm from a blade translating parallel to it has constant
+    // separation. The conservative bound can exhaust its budget on this query;
+    // it must report uncertainty, not certify a miss or create a contact.
+    int evaluations = 0;
+    const auto result = SweepBladeContact({}, {0, 0, -1}, {1, 0, 0}, {1, 0, -1},
+        0, [&](Vec3, Vec3) { ++evaluations; return 0.001f; });
+    check(result == BladeSweepResult::Unresolved);
+    check(evaluations == kBladeSweepIterations + 2);
   }
 
   // Re-hit gate: same enemy blocked inside the window, others pass.
@@ -206,6 +269,41 @@ int main() {
     blade.valid = false;
     check(!EvaluateBladeContact(blade, GestureKind::Slash, targets, 0.8f, 1.0f,
                                 280, 5100, true, gate, hit));
+  }
+
+  // Slice 2 kinetic scale: torque gates energy, energy gates scale. A heavy
+  // response lags the same swing below the contact bar; unity is transparent;
+  // a mis-tuned response refuses instead of falling back to raw speed.
+  {
+    RehitGate gate;
+    BladeKinematics blade;
+    blade.valid = true;
+    blade.grip = {0, 1.4f, 0};
+    blade.tip = {0, 1.4f, -0.9f};
+    blade.prev_tip = {0, 1.4f, 0.9f};
+    blade.tip_speed = 1.0f;
+    BladeContactTarget targets[] = {{7, {0, 1.4f, -0.5f}, 0.3f}};
+    BladeHit hit{};
+    // Unity response: 1.0 m/s at a 0.8 bar hits.
+    check(EvaluateBladeContact(blade, GestureKind::Slash, targets, 0.8f, 1.0f,
+                               280, 1000, true, gate, hit, {}, 1.0f));
+    // Heavy response 0.5: gated 0.5 m/s falls below the bar — no hit.
+    check(!EvaluateBladeContact(blade, GestureKind::Slash, targets, 0.8f, 1.0f,
+                                280, 1300, true, gate, hit, {}, 0.5f));
+    // Mis-tuned response refuses, never silently uses raw speed.
+    check(!EvaluateBladeContact(blade, GestureKind::Slash, targets, 0.8f, 1.0f,
+                                280, 1600, true, gate, hit, {}, 0.0f));
+    check(!EvaluateBladeContact(blade, GestureKind::Slash, targets, 0.8f, 1.0f,
+                                280, 1900, true, gate, hit, {}, NAN));
+      // Iteration 3: scale, reported speed and haptic agree on gated energy.
+    // A 2.0x response on 1.0 m/s gates to 2.0 m/s everywhere, not just scale.
+    blade.tip_speed = 1.0f;
+    check(EvaluateBladeContact(blade, GestureKind::Slash, targets, 0.8f, 1.0f,
+                               280, 2200, true, gate, hit, {}, 2.0f));
+    check(near(hit.tip_speed_mps, 2.0f));
+    HapticPulse expect = HitHaptic(2.0f, GestureKind::Slash, 0.8f, true);
+    check(hit.haptic.amplitude == expect.amplitude &&
+          hit.haptic.duration_ms == expect.duration_ms);
   }
 
   // Roomscale: physical walking translates head and hands together. That
@@ -265,6 +363,57 @@ int main() {
     check(b.tip_speed == 0 && b.grip_speed == 0);
   }
 
+  // Slice 1 halfsword: the grab point gets its own head-relative velocity
+  // channel. A grab held mid-blade measures slower than the tip on the same
+  // swing; scaling the tip would invent energy the hand never had.
+  {
+    BladeKinematics h;
+    const float dt = 1.0f / 90.0f;
+    Vec3 head{0, 1.6f, 0}, g{0, 1.4f, 0}, tp{0, 1.4f, -0.9f};
+    Vec3 grab{0, 1.4f, -0.45f};  // mid-blade grab point
+    h.FeedRelative(g, tp, head, dt, 1);
+    h.FeedGrabRelative(grab, head, dt, 1);
+    for (int i = 0; i < 45; ++i) {
+      // Rotate the blade about the grip: tip sweeps wide, grab barely moves.
+      const float a = 3.0f * dt * (i + 1);
+      tp = {0.9f * std::sin(a), 1.4f, -0.9f * std::cos(a)};
+      grab = {0.45f * std::sin(a), 1.4f, -0.45f * std::cos(a)};
+      h.FeedRelative(g, tp, head, dt, 1);
+      h.FeedGrabRelative(grab, head, dt, 1);
+    }
+    check(h.valid && h.grab_valid);
+    check(h.grab_speed > 0.1f && h.grab_speed < h.tip_speed);
+    check(near(h.ContactSpeed(true), h.grab_speed));
+    check(near(h.ContactSpeed(false), h.tip_speed));
+    // Grab teleport invalidates the grab channel only.
+    h.FeedGrabRelative({5.0f, 1.4f, -0.45f}, head, dt, 1);
+    check(!h.grab_valid && h.valid && h.tip_speed > 0.0f);
+    // Non-finite grab fails closed on its channel.
+    h.FeedGrabRelative({NAN, 0, 0}, head, dt, 1);
+    check(!h.grab_valid);
+    {
+      BladeKinematics walking;
+      const float walking_dt = 1.0f / 90.0f;
+      Vec3 walking_head{0, 1.6f, 0};
+      Vec3 walking_grip{0, 1.4f, 0};
+      Vec3 walking_tip{0, 1.4f, -0.9f};
+      Vec3 walking_grab{0, 1.4f, -0.45f};
+      walking.FeedRelative(walking_grip, walking_tip, walking_head, walking_dt, 1);
+      walking.FeedGrabRelative(walking_grab, walking_head, walking_dt, 1);
+      for (int i = 0; i < 10; ++i) {
+        walking_head.x += 0.01f;
+        walking_grip.x += 0.01f;
+        walking_tip.x += 0.01f;
+        walking_grab.x += 0.01f;
+        walking.FeedRelative(walking_grip, walking_tip, walking_head,
+                             walking_dt, 1);
+        walking.FeedGrabRelative(walking_grab, walking_head, walking_dt, 1);
+      }
+      check(walking.tip_speed < 0.05f);
+      check(walking.grab_speed < 0.05f);
+    }
+  }
+
   // Committed-pose blade: grip is the committed weapon origin in world
   // space; direction is the tracked blade direction carried by the root
   // basis only (native blade axis/length remain untraced assumptions).
@@ -288,6 +437,92 @@ int main() {
     check(!BladeFromCommittedPose(identity, weapon, {0,0,-1}, 0.0f, grip, tip));
     check(!BladeFromCommittedPose(identity, weapon, {NAN,0,0}, 0.9f, grip, tip));
     check(grip.x == 9.0f && tip.x == 8.0f);
+  }
+
+  // Slice 4 two-hand torque: hilt grab commits more than tip grab; no grab
+  // is transparent; non-finite fraction refuses to transparent.
+  {
+    check(near(TwoHandTorque(false, 0.0f), 1.0f));
+    check(TwoHandTorque(true, 0.0f) > TwoHandTorque(true, 0.5f));
+    check(TwoHandTorque(true, 0.5f) > TwoHandTorque(true, 1.0f));
+    check(near(TwoHandTorque(true, 1.0f), 1.0f));
+    check(near(TwoHandTorque(true, NAN), 1.0f));
+    // Attach/detach tick shares the deflect shape.
+    HapticPulse tick = GripTick(0.5f, 20, true);
+    check(tick.amplitude == 0.5f && tick.duration_ms == 20);
+    check(GripTick(0.5f, 20, false).duration_ms == 0);
+  }
+
+  // Slice 1 deflect pulse: shorter/sharper than thrust, config-shaped,
+  // fired only from classified geometry. Refusals stay silent.
+  {
+    HapticPulse d = DeflectHaptic(0.7f, 30, true);
+    check(d.amplitude == 0.7f && d.duration_ms == 30);
+    HapticPulse t = HitHaptic(3.0f, GestureKind::Thrust, 1.0f, true);
+    check(d.duration_ms < t.duration_ms);
+    check(DeflectHaptic(0.0f, 30, true).duration_ms == 0);
+    check(DeflectHaptic(1.5f, 30, true).duration_ms == 0);
+    check(DeflectHaptic(NAN, 30, true).duration_ms == 0);
+    check(DeflectHaptic(0.7f, 0, true).duration_ms == 0);
+    check(DeflectHaptic(0.7f, 30, false).duration_ms == 0);
+  }
+
+  // Slice 1 posture guard: the shield plane comes from the committed pose
+  // (root * hand), and the threat blade must cross the disc. A blade that
+  // passes beside the guard is not a block, whatever the hand distance.
+  {
+    ArmPoseMatrix identity{{1,0,0,0, 0,1,0,0, 0,0,1,0}};
+    ArmPoseMatrix hand{{1,0,0,0.2f, 0,1,0,1.3f, 0,0,1,0.3f}};
+    ShieldPlane shield;
+    check(ShieldPlaneFromCommittedPose(identity, hand, {0,0,1}, 0.25f, shield));
+    check(shield.valid);
+    check(near(shield.centre.x, 0.2f) && near(shield.centre.y, 1.3f) &&
+          near(shield.centre.z, 0.3f));
+    // Threat crossing the disc face counts.
+    check(ThreatBlockedByShield({0.2f, 1.3f, 0.6f}, {0.2f, 1.3f, 0.0f}, shield));
+    // Threat passing beside the disc misses, even at hand distance.
+    check(!ThreatBlockedByShield({0.6f, 1.3f, 0.6f}, {0.6f, 1.3f, 0.0f}, shield));
+    // Threat stopping short of the plane misses.
+    check(!ThreatBlockedByShield({0.2f, 1.3f, 0.6f}, {0.2f, 1.3f, 0.45f}, shield));
+    // Slice 5 rim: an edge graze just outside the face counts with a rim,
+    // misses without one. Far outside misses either way.
+    check(!ThreatBlockedByShield({0.48f, 1.3f, 0.6f}, {0.48f, 1.3f, 0.0f}, shield));
+    check(ThreatBlockedByShield({0.48f, 1.3f, 0.6f}, {0.48f, 1.3f, 0.0f}, shield, 0.05f));
+    check(!ThreatBlockedByShield({0.6f, 1.3f, 0.6f}, {0.6f, 1.3f, 0.0f}, shield, 0.05f));
+    // Shield radii remain physical metres while plane/blade positions are native units.
+    ShieldPlane native_shield;
+    check(ShieldPlaneFromCommittedPose(identity, hand, {0,0,1}, 0.25f,
+                                       native_shield, 100.0f));
+    check(near(native_shield.radius, 25.0f));
+    check(ThreatBlockedByShield({10.2f, 1.3f, 0.6f}, {10.2f, 1.3f, 0.0f},
+                                native_shield, 0.05f, 100.0f));
+    check(!ThreatBlockedByShield({0.2f, 1.3f, 0.6f}, {0.2f, 1.3f, 0.0f}, shield, NAN));
+    // Refusals clear the plane.
+    ShieldPlane bad;
+    check(!ShieldPlaneFromCommittedPose(identity, hand, {0,0,0}, 0.25f, bad));
+    check(!bad.valid);
+    check(!ShieldPlaneFromCommittedPose(identity, hand, {0,0,1}, 0.0f, bad));
+    check(!ThreatBlockedByShield({NAN, 0, 0}, {0, 0, 0}, shield));
+  }
+
+  // Slice 7 aim ray: geometry only, XR LOCAL space, no native binding.
+  // Identity quat aims -Z; yawed quat aims with it; bad input refuses.
+  {
+    AimRay ray;
+    const float pos[3] = {0.3f, 1.2f, -0.4f};
+    const float id[4] = {0, 0, 0, 1};
+    check(AimRayFromAimPose(pos, id, ray) && ray.valid);
+    check(near(ray.origin.x, 0.3f) && near(ray.dir.x, 0.0f) &&
+          near(ray.dir.z, -1.0f));
+    const float s = 0.70710678f;
+    const float yaw[4] = {0, s, 0, s};  // +90 deg about Y: -Z maps to -X
+    check(AimRayFromAimPose(pos, yaw, ray) && ray.valid);
+    check(near(ray.dir.x, -1.0f) && near(ray.dir.z, 0.0f));
+    const float zero[4] = {0, 0, 0, 0};
+    check(!AimRayFromAimPose(pos, zero, ray) && !ray.valid);
+    const float nanp[3] = {NAN, 0, 0};
+    check(!AimRayFromAimPose(nanp, id, ray));
+    check(!AimRayFromAimPose(nullptr, id, ray));
   }
 
   std::printf("combat math: %d failures\n", failures);

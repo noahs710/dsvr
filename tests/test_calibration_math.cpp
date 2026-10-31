@@ -132,6 +132,41 @@ int main() {
   CHECK(capture.Progress()==0);
   f.captured_ms+=151;++f.sequence;CHECK(!capture.Feed(f,true,false,0,1.65f,result));
   CHECK(capture.Progress()==0);
+  // Slow tracking drift must not spend the whole stillness budget. The
+  // operator's 31 Oct headset run restarted the hold near its end (progress
+  // stuck at 0.42) because breathing alone drifts the head further than a
+  // fixed 4 cm window measured from the first sample. 12 cm of drift spread
+  // over the hold is tracking noise, not a moved pose, so it must complete.
+  capture.Reset();f=Pose();done=false;
+  capture.Feed(f,false,false,0,1.65f,result);Step(f);
+  for(int i=0;i<22 && !done;++i) {
+    f.head_pos[0]+=.005f;f.arm[0].pos[0]+=.005f;f.arm[1].pos[0]+=.005f;
+    done=capture.Feed(f,true,false,0,1.65f,result);Step(f);
+  }
+  CHECK(done);
+  // A deliberate move still trips the gate: one step past the budget restarts
+  // the hold and clears the bar.
+  capture.Reset();f=Pose();
+  capture.Feed(f,false,false,0,1.65f,result);Step(f);
+    for(int i=0;i<8;++i) { capture.Feed(f,true,false,0,1.65f,result);Step(f); }
+    CHECK(capture.Progress()>0.f);
+    f.head_pos[0]+=.20f;
+  CHECK(!capture.Feed(f,true,false,0,1.65f,result));
+  CHECK(capture.Progress()==0);
+  // A duplicate frame must not clear published progress: the render loop reads
+  // the same tracking frame more than once per frame, and the on-screen bar
+  // flickered back to zero ("progress bar glitching near the very end").
+  capture.Reset();f=Pose();
+  capture.Feed(f,false,false,0,1.65f,result);Step(f);
+  for(int i=0;i<8;++i) { capture.Feed(f,true,false,0,1.65f,result);Step(f); }
+  const float held=capture.Progress();
+  CHECK(held>0.f && held<1.f);
+  TrackingFrame dup=f;--dup.sequence;
+  CHECK(!capture.Feed(dup,true,false,0,1.65f,result));
+  CHECK(capture.Progress()==held);
+  // Releasing the trigger is a real reset and does clear the bar.
+  CHECK(!capture.Feed(f,false,false,0,1.65f,result));
+  CHECK(capture.Progress()==0);
   // Grip jitter beyond 5cm or roughly 11.5 degrees cannot finish a hold.
   for(bool angular:{false,true}) {
     capture.Reset();f=Pose();capture.Feed(f,false,false,0,1.65f,result);Step(f);done=false;

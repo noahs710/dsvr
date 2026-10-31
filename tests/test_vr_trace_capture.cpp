@@ -21,6 +21,39 @@ std::string Read(const std::filesystem::path& path) {
 }
 
 int wmain(int argc, wchar_t* argv[]) {
+  if (argc == 2 && std::wcscmp(argv[1], L"--session-fixture") == 0) {
+    wchar_t local[MAX_PATH]{};
+    CHECK(GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH) > 0);
+    const auto directory = std::filesystem::path(local) / L"Temp" / L"opencode";
+    const auto path = directory / (L"dsvr-session-header-" +
+        std::to_wstring(GetCurrentProcessId()) + L".jsonl");
+    CHECK(!std::filesystem::exists(path));
+    CHECK(dsvr::VrTraceBeginSession(path.c_str(), 600000, "session-test_1", 7, 9,
+        dsvr::kSessionCapInteraction | dsvr::kSessionCapTrackedGrip,
+        dsvr::kSessionConfigVr | dsvr::kSessionConfigXrInput));
+    dsvr::VrTraceEvent event{};
+    event.event = "session_fixture_event";
+    dsvr::VrTraceRecord(event);
+    dsvr::VrTraceRequestStop();
+    dsvr::VrTracePump();
+    CHECK(dsvr::VrTraceState() == dsvr::TraceCaptureState::Complete);
+    const auto text = Read(path);
+    CHECK(text.find("\"session_id\":\"session-test_1\"") != std::string::npos);
+    CHECK(text.find("\"player_epoch\":7") != std::string::npos);
+    CHECK(text.find("\"segment_index\":9") != std::string::npos);
+    CHECK(text.find("\"session_capabilities\":130") != std::string::npos);
+    CHECK(text.find("\"session_config_flags\":3") != std::string::npos);
+    CHECK(text.find("\"hand_sample_hz_max\":30") != std::string::npos);
+    CHECK(text.find("\"utc_filetime_100ns\":") != std::string::npos);
+    const auto health = dsvr::VrTraceGetHealth();
+    CHECK(health.state == dsvr::TraceCaptureState::Complete && health.events == 1 &&
+          health.capture_id == dsvr::VrTraceCaptureId());
+    CHECK(health.event_counts.at("header") == 1 &&
+          health.event_counts.at("session_fixture_event") == 1 &&
+          health.event_counts.at("footer") == 1);
+    CHECK(std::filesystem::remove(path));
+    return 0;
+  }
   if (argc == 3 && std::wcscmp(argv[1], L"--step-fixture") == 0) {
     CHECK(dsvr::VrTraceBegin(argv[2]));
     // Exercise the production encoding; these are synthetic, not native tasks.

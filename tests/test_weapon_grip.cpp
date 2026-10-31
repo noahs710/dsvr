@@ -96,6 +96,28 @@ int main() {
   Check(!WeaponGripSolveTwoHand(two, identity, identity, 1, {}, {0,0,0.2f}, false,
                                2, state, desired, weapon, support) && !state.must_release,
         "releasing the support grip rearms attachment");
+  // Slice 3 mass table: per-weapon response, whole-file refusal on malformed.
+  const auto mass_path = directory / L"mass.txt";
+  {
+    std::ofstream mass(mass_path, std::ios::trunc);
+    mass << "DSVR_MASS 1\n100000 3.5 1.2 0.6\n200000 0.8 0.2 1.0\n";
+  }
+  Check(WeaponMassLoad(mass_path.wstring()), "mass table loads");
+  WeaponMassEntry entry;
+  Check(WeaponMassGet(100000, entry) && Near(entry.mass_kg, 3.5f) &&
+        Near(entry.inertia, 1.2f) && Near(entry.response, 0.6f),
+        "heavy weapon response lags");
+  Check(WeaponMassGet(200000, entry) && Near(entry.response, 1.0f),
+        "dagger response is transparent");
+  Check(!WeaponMassGet(999999, entry), "unknown weapon is not a mass");
+  {
+    std::ofstream mass(mass_path, std::ios::trunc);
+    mass << "DSVR_MASS 1\n100000 3.5 1.2 99.0\n";
+  }
+  Check(!WeaponMassLoad(mass_path.wstring()) && WeaponMassGet(100000, entry) &&
+        Near(entry.response, 0.6f),
+        "corrupt reload preserves the previous live table");
+  std::filesystem::remove(mass_path);
   std::filesystem::remove(path);
   std::filesystem::remove(directory);
   if (failures) return 1;

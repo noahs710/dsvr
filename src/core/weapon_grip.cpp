@@ -167,6 +167,66 @@ void WeaponGripClearPreview() {
   std::lock_guard<std::mutex> lock(g_mutex);
   g_preview.reset();
 }
+namespace {
+std::vector<WeaponMassEntry> g_mass;
+std::wstring g_mass_path;
+}
+bool WeaponMassValid(const WeaponMassEntry& e) {
+  return e.weapon_id >= 0 && std::isfinite(e.mass_kg) && e.mass_kg >= 0.0f &&
+      e.mass_kg <= 100.0f && std::isfinite(e.inertia) && e.inertia >= 0.0f &&
+      e.inertia <= 100.0f && std::isfinite(e.response) &&
+      e.response >= 0.2f && e.response <= 3.0f;
+}
+bool WeaponMassLoad(const std::wstring& path) {
+  std::lock_guard<std::mutex> lock(g_mutex);
+  if (path.empty()) return false;
+  const std::filesystem::path requested(path);
+  std::error_code error;
+  const bool exists = std::filesystem::exists(requested, error);
+  if (error || !exists) return false;
+  std::ifstream file(requested);
+  file.imbue(std::locale::classic());
+  std::string header;
+  if (!std::getline(file, header) || header != "DSVR_MASS 1") return false;
+  std::vector<WeaponMassEntry> entries;
+  std::string line;
+  while (std::getline(file, line)) {
+    if (line.empty()) continue;
+    WeaponMassEntry e;
+    std::istringstream record(line);
+    record.imbue(std::locale::classic());
+    if (!(record >> e.weapon_id >> e.mass_kg >> e.inertia >> e.response))
+      return false;
+    record >> std::ws;
+    if (!record.eof() || !WeaponMassValid(e)) return false;
+    if (std::find_if(entries.begin(), entries.end(), [&](const auto& x) {
+          return x.weapon_id == e.weapon_id;
+        }) != entries.end())
+      return false;
+    if (entries.size() >= kMaxProfiles) return false;
+    entries.push_back(e);
+  }
+  if (!file.eof()) return false;
+  g_mass_path = requested.wstring();
+  g_mass = std::move(entries);
+  return true;
+}
+bool WeaponMassGet(int weapon_id, WeaponMassEntry& out) {
+  std::lock_guard<std::mutex> lock(g_mutex);
+  out = {};
+  out.weapon_id = weapon_id;
+  if (weapon_id < 0) return false;
+  const auto found =
+      std::find_if(g_mass.begin(), g_mass.end(),
+                   [=](const auto& e) { return e.weapon_id == weapon_id; });
+  if (found == g_mass.end()) return false;
+  out = *found;
+  return true;
+}
+std::vector<WeaponMassEntry> WeaponMassEntries() {
+  std::lock_guard<std::mutex> lock(g_mutex);
+  return g_mass;
+}
 bool WeaponGripApplyPrimary(const WeaponGripPlacement& placement,
                             const ArmPoseMatrix& reference_hand,
                             const ArmPoseMatrix& reference_weapon,
@@ -267,7 +327,7 @@ bool WeaponGripSolveTwoHand(const WeaponGripProfile& profile,
   Vec3 handle = VAdd(weapon_target, VAdd(VScale(weapon[0], local.x),
       VAdd(VScale(weapon[1], local.y), VScale(weapon[2], local.z))));
   if (!state.active && VLen(arm_pose_detail::Sub(handle, offhand_target)) > 0.14f * units)
-    return false;
+      return false;
   const Vec3 from = arm_pose_detail::Sub(handle, primary_anchor);
   const Vec3 to = arm_pose_detail::Sub(offhand_target, primary_anchor);
   const float span = VLen(from), separation = VLen(to);

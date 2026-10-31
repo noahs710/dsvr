@@ -1,12 +1,17 @@
 #include "diagnostics.h"
+#include "autonomous_capture.h"
 
 #include <windows.h>
 
 #include <atomic>
 #include <cmath>
+#include <cstdarg>
+#include <cstdio>
+#include <cstring>
 #include <mutex>
 #include <optional>
 #include <deque>
+#include <string>
 
 #include "../common/logging.h"
 #include "../common/memory.h"
@@ -17,6 +22,7 @@
 #include "mod_menu.h"
 #include "calibration.h"
 #include "combat_native.h"
+#include "input.h"
 
 namespace dsvr {
 namespace {
@@ -50,11 +56,16 @@ std::wstring TraceStopRequestPath() {
   return path;
 }
 
-void PollTraceStopRequest() {
+bool PollTraceStopRequest() {
   static const auto path=TraceStopRequestPath();
-  if (!path.empty() && VrTraceConsumeStopRequest(path.c_str()))
+  if (!path.empty() && VrTraceConsumeStopRequest(path.c_str())) {
     DSVR_LOG("Diagnostics: consumed process-scoped trace stop request");
+    return true;
+  }
+  return false;
 }
+
+
 
 void PumpMenuRequests(bool flush = false) {
   std::optional<Config> pending;
@@ -242,6 +253,9 @@ bool ReloadConfig() {
     if(fresh.combat_trace_only!=g_config.combat_trace_only)
       DSVR_WARN("Diagnostics: combat_trace_only change ignored until process restart");
     fresh.combat_trace_only=g_config.combat_trace_only;
+    if (fresh.autonomous_session_capture != g_config.autonomous_session_capture)
+      DSVR_WARN("Diagnostics: autonomous_session_capture change ignored until process restart");
+    fresh.autonomous_session_capture = g_config.autonomous_session_capture;
     ConfigRestrictObserver(fresh);
     if (g_settings_busy) return false;
     g_config = fresh;
@@ -315,7 +329,7 @@ DWORD WINAPI DiagnosticsThread(LPVOID /*param*/) {
       bool s = (GetAsyncKeyState(VK_F8) & 0x8000) != 0;
       bool c = (GetAsyncKeyState(VK_F6) & 0x8000) != 0;
       bool home = (GetAsyncKeyState(VK_HOME) & 0x8000) != 0;
-      if (!cfg.observer_only && home && !home_down) ModMenuToggle();
+      if (home && !home_down) ModMenuToggle();
       if (!cfg.observer_only && s && !sanctuary_down) XrToggleSanctuary();
       if (!cfg.observer_only && c && !recenter_down) {
         XrRecenterSanctuary();
@@ -333,23 +347,33 @@ DWORD WINAPI DiagnosticsThread(LPVOID /*param*/) {
       home_down = false;
     }
     if (!cfg.observer_only) LabPump();
-    VrTracePump();
+    if (cfg.autonomous_session_capture && PollTraceStopRequest())
+      AutonomousCaptureRequestStop();
+    TraceCapturePump(cfg, g_config_path, GetTickCount64());
     PumpMenuRequests();
     Sleep(40);
   }
   // This path runs on the writer, not an animation/render callback or DllMain.
   PumpMenuRequests(true); // persist the last edit even when the menu/session closes during debounce
+  // Record the last shipped headset rate for the launcher's no-probe refresh
+  // warning. Best-effort: unknown (0) leaves any prior knowledge in place.
+  {
+    const double last_hz = XrLastDisplayRefreshHz();
+    if (last_hz > 0.0) {
+      const std::wstring sidecar = g_config_path + L".headset-hz";
+      const int quantized = static_cast<int>(std::lround(last_hz));
+      if (quantized > 0 &&
+          !WriteLastHeadsetHz(sidecar.c_str(), quantized))
+        DSVR_WARN("Diagnostics: last-known headset rate sidecar unwritable; "
+                  "launcher refresh warning will use older data");
+    }
+  }
   // Hard process termination cannot be acknowledged: its trace stays incomplete.
   if (!DiagnosticsCurrentConfig().observer_only) {
     LabRequestAbort();
     LabPump();
   }
-  VrTraceFinish(true);
-  const auto until = GetTickCount64() + 1000;
-  while (VrTraceState() == TraceCaptureState::Closing && GetTickCount64() < until) {
-    VrTracePump();
-    Sleep(1);
-  }
+  TraceCaptureFinish(DiagnosticsCurrentConfig(), g_config_path);
   return 0;
 }
 
@@ -376,8 +400,11 @@ void DiagnosticsStart(const Config& initial, std::wstring config_path) {
 void DiagnosticsStop() {
   g_running.store(false);
   if (g_thread) {
-    WaitForSingleObject(g_thread, 1500);
-    CloseHandle(g_thread);
+    // The writer drains the queue, closes the segment/epoch/index and
+    // persists pending settings on its own thread; 1.5 s only bounds a
+    // wedged native call, it never truncates a healthy close.
+      WaitForSingleObject(g_thread, 1500);
+      CloseHandle(g_thread);
     g_thread = nullptr;
   }
 }
@@ -401,6 +428,7 @@ bool DiagnosticsRequestConfig(const Config& requested, bool save) {
   Config effective = requested;
     effective.observer_only = g_config.observer_only;
     effective.combat_trace_only = g_config.combat_trace_only;
+    effective.autonomous_session_capture = g_config.autonomous_session_capture;
   ConfigRestrictObserver(effective);
   g_config = effective; // live consumers see the edit immediately; disk I/O stays on the worker
   g_pending_config = effective;
@@ -468,6 +496,10 @@ bool DiagnosticsBeginCapture() {
     DSVR_LOG("Diagnostics: deferred observer hooks camera=%d trace=%d", camera, trace);
     if (!camera || !trace) return false;
   }
+  // The autonomous session owns the bounded writer through player-epoch
+  // tracking on the diagnostic thread. An explicit stop/abort request must
+  // not open a competing capture through this seam.
+  if (config.autonomous_session_capture) return false;
   return (config.observer_only || config.verbose_logging) &&
       VrTraceBegin(nullptr,config.observer_only && config.combat_trace_only ? 600000u : 20000u);
 }

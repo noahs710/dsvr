@@ -12,8 +12,11 @@ namespace dsvr {
 //         camera lands on the avatar's own head and the body occupies the space
 //         the wearer's body does. Reach error is left to the IK naturalness
 //         budget instead of hidden by an arm-local gain.
-//   Arm:  the native arm length over the measured physical reach, so the hands
-//         match exactly and the head may sit off the native head bone.
+//   Arm:  the old exact-hand fit was retired: hand-matched scale alone lets the
+//         head sit off the native head bone, so the head-fit denominator above
+//         is now always honoured. An arm measurement still feeds the head
+//         anchor below when the two disagree by more than stature allows;
+//         with no native measurement at all the fit stays manual.
 enum class CalibrationFit { Manual, Arm, Head };
 
 // One camera packet's physical-metre -> native-world conversion. Native arm
@@ -108,23 +111,58 @@ inline CalibrationMapping ResolveCalibrationMapping(
   if (arm_available && (native_arm_reach < .1f || native_arm_reach > 2.f))
     return out;
   float automatic = 1.f;
+  // One combined fit: height owns the camera, reach constrains stature.
+  // The head anchor is always computed first so the eye never leaves the
+  // native head bone. When both measurements exist and the reach-implied
+  // scale would stretch the avatar's proportions beyond what the wearer's
+  // own body allows, the scale is pulled back toward the reach anchor --
+  // the avatar keeps the wearer's height AND its hands stay reachable.
+  // With reach only (no upright native head yet), the old arm fit is the
+  // fallback so the world still has a measured scale. `prefer_head_fit`
+  // is now a legacy spelling: both anchors always combine, so the flag is
+  // accepted and ignored.
+  (void)prefer_head_fit;
+  float head_candidate = 0.f;
+  bool head_ok = false;
+  float reach_scale = 0.f;
+  bool reach_ok = false;
   if (head_available) {
     // Manual eye placement must not silently resize the whole world and
     // cancel its own height adjustment under a head-anchored fit.
-    const float candidate =
+    head_candidate =
         native_head_height / (profile.eye_height_m + kCalibrationHeightOffsetM);
-    if (prefer_head_fit && native_head_height > .4f && native_head_height < 6.f &&
-        std::isfinite(candidate) && candidate >= kHeadFitScaleMin &&
-        candidate <= kHeadFitScaleMax) {
-      automatic = candidate;
-      out.fit = CalibrationFit::Head;
-    }
+    head_ok = native_head_height > .4f && native_head_height < 6.f &&
+        std::isfinite(head_candidate) && head_candidate >= kHeadFitScaleMin &&
+        head_candidate <= kHeadFitScaleMax;
   }
-  if (out.fit == CalibrationFit::Manual && arm_available) {
+  if (arm_available) {
     const float physical = (CalibrationReachForScale(profile, 0) +
                             CalibrationReachForScale(profile, 1)) * .5f;
-    if (!(physical > 0.f)) return out;
-    automatic = native_arm_reach / physical;
+    if (physical > 0.f) {
+      reach_scale = native_arm_reach / physical;
+      reach_ok = std::isfinite(reach_scale) && reach_scale > 0.f;
+    }
+  }
+  if (head_ok) {
+    automatic = head_candidate;
+    out.fit = CalibrationFit::Head;
+    // Reach-aware clamp on the head-anchored fit: the wearer's own measured
+    // proportions bound how far the two anchors may disagree. A reach-implied
+    // scale far above the head scale means the native avatar is long-armed
+    // relative to the wearer -- pulling toward reach keeps the hands within
+    // reach without moving the eye off the head bone (the eye height below is
+    // still the head bone height times trims). A reach-implied scale far below
+    // the head scale means the native arms are short for the wearer's height;
+    // clamping there keeps the world from shrinking the room around the hands.
+    // The +/-25% band is anatomical plausibility, not a render-owner resize:
+    // it never scales a bone base, a collider, or the skinned mesh itself.
+    if (reach_ok) {
+      const float lo = head_candidate * 0.75f, hi = head_candidate * 1.25f;
+      if (reach_scale < lo || reach_scale > hi)
+        automatic = std::clamp(reach_scale, lo, hi);
+    }
+  } else if (reach_ok) {
+    automatic = reach_scale;
     out.fit = CalibrationFit::Arm;
   }
   if (out.fit != CalibrationFit::Manual) {

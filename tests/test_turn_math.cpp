@@ -25,7 +25,7 @@ int main() {
     check(t.Feed(0.0f, dt) == 0.0f);
     float first = t.Feed(1.0f, dt);
     check(first > 0.0f);
-    check(near(first, 240.0f * 0.0174532925f * dt));
+    check(near(first, 360.0f * 0.0174532925f * dt));
     check(t.Feed(0.0f, dt) == 0.0f);
     }
 

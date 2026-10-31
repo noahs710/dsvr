@@ -25,6 +25,13 @@ inline constexpr float kTorsoTwistLimitRad = 0.8f;
 // band left the chest up to 7 deg off the user's gaze no matter how long they
 // held the look, which read as the body refusing to face where they looked.
 inline constexpr float kTorsoLookDeadbandRad = 0.035f;
+// Gaze-follow gain. The band above leaves the chest's response a hair over
+// 1:1; this multiplier raises the chest's share of a head turn by 15%
+// (operator request, 31 Oct 2026) so the body closes on the gaze sooner and
+// reaches the twist bound at ~40 deg of head yaw instead of ~46 deg. The
+// anatomical bound below still caps the result, so the spine never winds
+// past kTorsoTwistLimitRad; the gain only moves where that cap is reached.
+inline constexpr float kTorsoLookGain = 1.15f;
 // Hard bound on one frame's torso correction, equal to the twist bound:
 // the torso may not wind further from the native facing than it may from
 // the heading. A larger gap is locomotion facing, not a head turn, and
@@ -282,7 +289,8 @@ inline bool SolveTorsoYaw(std::span<ArmPoseMatrix> poses,
   if (VLen(hr)<.99f || VLen(hf)<.99f || VLen(head)<.99f ||
       std::fabs(VDot(hr,hf))>1e-3f) return false;
   const float native_rel=RelativeYaw(facing_w,hr,hf);
-  const float desired=std::clamp(RelativeYaw(head,hr,hf),-kTorsoTwistLimitRad,kTorsoTwistLimitRad);
+  const float desired=std::clamp(RelativeYaw(head,hr,hf)*kTorsoLookGain,
+                                 -kTorsoTwistLimitRad,kTorsoTwistLimitRad);
   const float delta=std::clamp(WrapAngleRad(desired-native_rel),
                               -kTorsoCorrectionLimitRad,kTorsoCorrectionLimitRad);
   if (std::fabs(delta)<1e-4f) return true;
@@ -467,7 +475,8 @@ inline float TorsoTargetYaw(Vec3 head_fwd,Vec3 heading_right,
   if (magnitude <= kTorsoLookDeadbandRad) return 0.0f;
   const float sign = head > 0.0f ? 1.0f : -1.0f;
   const float rescaled = (magnitude - kTorsoLookDeadbandRad) /
-      (kTorsoTwistLimitRad - kTorsoLookDeadbandRad) * kTorsoTwistLimitRad;
+      (kTorsoTwistLimitRad - kTorsoLookDeadbandRad) * kTorsoTwistLimitRad *
+      kTorsoLookGain;
   return std::clamp(sign * rescaled,
                     -kTorsoTwistLimitRad,kTorsoTwistLimitRad);
 }
@@ -625,72 +634,83 @@ inline bool SolveTorsoPose(std::span<ArmPoseMatrix> poses,
 // Exponential approach for torso state: 90 ms time constant, small
 // deadband so resting micro-jitter never reaches the body, snap on the
 // first sample and after long gaps. Angles wrap on the shortest arc.
+// The clock both torso dampers share: the first sample snaps, a clock that did
+// not advance keeps the current value, a gap past 250 ms snaps, and anything
+// else yields the exponential blend weight for that interval. Stated once so a
+// stalled or duplicated timestamp cannot spend a budget step in one damper and
+// not the other.
+class TorsoDampClock {
+ public:
+  enum class Step { Keep, Snap, Blend };
+  Step Advance(std::uint64_t now_ms, float& alpha) {
+    if (!primed_) {
+      primed_ = true;
+      last_ms_ = now_ms;
+      return Step::Snap;
+    }
+    if (now_ms <= last_ms_) return Step::Keep;
+    const std::uint64_t dt = now_ms - last_ms_;
+    last_ms_ = now_ms;
+    if (dt > 250) return Step::Snap;
+    alpha = 1.0f - std::exp(-static_cast<float>(dt) / kTorsoDampTauMs);
+    return Step::Blend;
+  }
+  void Reset() { primed_ = false; last_ms_ = 0; }
+  bool Primed() const { return primed_; }
+
+ private:
+  bool primed_ = false;
+  std::uint64_t last_ms_ = 0;
+};
+
 class DampedAngle {
  public:
   float Approach(float target, std::uint64_t now_ms) {
     if (!std::isfinite(target)) return value_;
-    if (!primed_) {
-      primed_ = true;
-      last_ms_ = now_ms;
-      value_ = target;
-      return value_;
-    }
-    if (now_ms <= last_ms_) return value_;
-    const std::uint64_t dt = now_ms - last_ms_;
-    last_ms_ = now_ms;
-    if (dt > 250) {
+    float alpha = 0.0f;
+    const auto step = clock_.Advance(now_ms, alpha);
+    if (step == TorsoDampClock::Step::Keep) return value_;
+    if (step == TorsoDampClock::Step::Snap) {
       value_ = target;
       return value_;
     }
     const float delta = WrapAngleRad(target - value_);
     if (std::fabs(delta) < kTorsoDampDeadbandRad) return value_;
-    const float alpha =
-        1.0f - std::exp(-static_cast<float>(dt) / kTorsoDampTauMs);
     value_ = WrapAngleRad(value_ + delta * alpha);
     return value_;
   }
-  void Reset() { primed_ = false; value_ = 0; last_ms_ = 0; }
-  bool Primed() const { return primed_; }
+  void Reset() { clock_.Reset(); value_ = 0; }
+  bool Primed() const { return clock_.Primed(); }
   float Value() const { return value_; }
 
  private:
-  bool primed_ = false;
+  TorsoDampClock clock_;
   float value_ = 0;
-  std::uint64_t last_ms_ = 0;
 };
 
 class DampedVec3 {
  public:
   Vec3 Approach(Vec3 target, std::uint64_t now_ms) {
     if (!FiniteVec(target)) return value_;
-    if (!primed_) {
-      primed_ = true;
-      last_ms_ = now_ms;
-      value_ = target;
-      return value_;
-    }
-    if (now_ms <= last_ms_) return value_;
-    const std::uint64_t dt = now_ms - last_ms_;
-    last_ms_ = now_ms;
-    if (dt > 250) {
+    float alpha = 0.0f;
+    const auto step = clock_.Advance(now_ms, alpha);
+    if (step == TorsoDampClock::Step::Keep) return value_;
+    if (step == TorsoDampClock::Step::Snap) {
       value_ = target;
       return value_;
     }
     const Vec3 delta = arm_pose_detail::Sub(target, value_);
     if (VLen(delta) < kTorsoDampDeadbandM) return value_;
-    const float alpha =
-        1.0f - std::exp(-static_cast<float>(dt) / kTorsoDampTauMs);
     value_ = VAdd(value_, VScale(delta, alpha));
     return value_;
   }
-  void Reset() { primed_ = false; value_ = {}; last_ms_ = 0; }
-  bool Primed() const { return primed_; }
+  void Reset() { clock_.Reset(); value_ = {}; }
+  bool Primed() const { return clock_.Primed(); }
   Vec3 Value() const { return value_; }
 
  private:
-  bool primed_ = false;
+  TorsoDampClock clock_;
   Vec3 value_{};
-  std::uint64_t last_ms_ = 0;
 };
 
 }  // namespace dsvr

@@ -62,10 +62,12 @@ int main() {
   const auto head_trim=ResolveCalibrationMapping(p,1.65f,false,1.5f,.72f,4,head_native,shoulders_native);
   CHECK(near(head_trim.world_scale,head_native/(1.65f+kCalibrationHeightOffsetM)*1.5f));
   CHECK(near(head_trim.eye_height,head_native*1.5f));
-  // embodiment_fit="arm" keeps the exact-hand fit even with a head measurement.
+  // embodiment_fit="arm" is retired: the anchors are combined, so the arm
+  // request now yields the same combined head fit (reach already constrains
+  // stature inside it). Kept green so an old profile line cannot regress.
   const auto arm_pref=ResolveCalibrationMapping(p,1.65f,false,1.f,.72f,4,head_native,shoulders_native,false);
-  CHECK(arm_pref.fit==CalibrationFit::Arm && near(arm_pref.world_scale,1.f));
-  CHECK(near(arm_pref.eye_height,1.65f+kCalibrationHeightOffsetM));
+  CHECK(arm_pref.fit==CalibrationFit::Head && near(arm_pref.world_scale,head_fit.world_scale));
+  CHECK(near(arm_pref.eye_height,head_native));
   // No upright measurement yet (0) falls back to the arm fit, never a guess.
   const auto no_head=ResolveCalibrationMapping(p,1.65f,false,1.f,.72f,4,0.f,shoulders_native);
   CHECK(no_head.fit==CalibrationFit::Arm && near(no_head.world_scale,1.f));
@@ -75,6 +77,23 @@ int main() {
   const auto absurd=ResolveCalibrationMapping(p,1.65f,false,1.f,.72f,4,12.f,shoulders_native);
   CHECK(absurd.fit==CalibrationFit::Arm && near(absurd.world_scale,1.f));
   CHECK(near(absurd.native_head_height,12.f));
+  // Combined anchors: reach far outside the wearer's proportions pulls the
+  // head-anchored scale back into the +/-25% plausibility band instead of
+  // stretching the avatar. Long native arms clamp to the top of the band,
+  // short native arms to the bottom; middle values pass through untouched.
+  p.arm_reach_m[0]=p.arm_reach_m[1]=.45f;  // reach-implied 1.6x vs head 1.0x
+  const auto long_arms=ResolveCalibrationMapping(p,1.65f,false,1.f,.72f,4,head_native,shoulders_native);
+  CHECK(long_arms.fit==CalibrationFit::Head);
+  CHECK(near(long_arms.world_scale,head_fit.world_scale*1.25f));
+  CHECK(near(long_arms.eye_height,head_native*1.25f));  // eye rides the clamp
+  p.arm_reach_m[0]=p.arm_reach_m[1]=1.0f;  // reach-implied 0.72x: clamped low
+  const auto short_arms=ResolveCalibrationMapping(p,1.65f,false,1.f,.72f,4,head_native,shoulders_native);
+  CHECK(short_arms.fit==CalibrationFit::Head);
+  CHECK(short_arms.world_scale < head_fit.world_scale);
+  CHECK(near(short_arms.world_scale,head_fit.world_scale*0.75f));
+  p.arm_reach_m[0]=p.arm_reach_m[1]=.72f;  // agreement: pure head fit again
+  const auto agree=ResolveCalibrationMapping(p,1.65f,false,1.f,.72f,4,head_native,shoulders_native);
+  CHECK(agree.fit==CalibrationFit::Head && near(agree.world_scale,head_fit.world_scale));
   // Seated floor height is posture: reach (not seated eye height) owns scale.
   const auto seated_head=ResolveCalibrationMapping(p,1.65f,true,1.f,.72f,4,head_native,shoulders_native);
   CHECK(seated_head.fit==CalibrationFit::Arm && near(seated_head.world_scale,1.f));
@@ -115,6 +134,15 @@ int main() {
   p.arm_reach_m[0]=0;
   CHECK(!ResolveCalibrationMapping(p,1.65f,false,1.f,.54f,3).valid);
   p={};
+  p.valid = true;
+  p.eye_height_m = 1.65f;
+  p.arm_reach_m[0] = p.arm_reach_m[1] = .6f;
+  p.head_to_arm_m = .25f;
+  p.shoulder_half_width_m = .17f;
+  p.arm_span_m = 1.54f;
+  p.floor_height_measured = false;
+  for (int side = 0; side < 2; ++side)
+    for (int i = 0; i < 4; ++i) p.neutral_controller[side][i] = i == 3 ? 1.f : 0.f;
   const auto pending=ResolveCalibrationMapping(p,1.65f,false,1.5f);
   CHECK(pending.valid && !pending.fitted && near(pending.eye_height,(1.65f+kCalibrationHeightOffsetM)*1.5f));
   std::puts("PASS coherent automatic native-world/avatar fit (head and arm anchors), stature, seated, trim, lifetimes and refusals");

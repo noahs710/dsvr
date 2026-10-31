@@ -32,6 +32,30 @@ bool WeaponGripValid(const WeaponGripProfile& profile);
 bool WeaponGripPreview(const WeaponGripProfile& profile);
 void WeaponGripClearPreview();
 
+// Slice 3 offline mass/inertia table (EquipParam transcription, hooked not
+// bound): per-weapon response shaping how fast tip speed can rise. Daggers
+// ~1:1, great weapons lag and need commitment. Weight gates energy, energy
+// gates scale; weight never edits damage directly. File format:
+//
+//   DSVR_MASS 1
+//   <weapon_id> <mass_kg> <inertia> <response>
+//
+// response is the torque rate (0.2..3.0, 1 = transparent). mass_kg/inertia
+// are recorded provenance (EquipParam weight fields); the response is what
+// the energy gate consumes. Malformed file = whole file refused, previous
+// live table preserved. Empty path or missing file = empty table (caller
+// falls back to equip-load fraction / torque_response config).
+struct WeaponMassEntry {
+  int weapon_id = -1;
+  float mass_kg = 0.0f;
+  float inertia = 0.0f;
+  float response = 1.0f;
+};
+bool WeaponMassValid(const WeaponMassEntry& e);
+bool WeaponMassLoad(const std::wstring& path);
+bool WeaponMassGet(int weapon_id, WeaponMassEntry& out);
+std::vector<WeaponMassEntry> WeaponMassEntries();
+
 // Apply a saved primary placement to the pose adapter's existing native grip.
 // desired_hand supplies the baseline orientation; grip_target is the tracked
 // native attachment target. Only those outputs change, never root/physics.

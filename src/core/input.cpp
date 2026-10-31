@@ -6,6 +6,7 @@
 // a trigger and no button pulse fires -- the IK arm is the attack.
 
 #include "input.h"
+#include "input_frame_acquisition.h"
 
 #include <windows.h>
 
@@ -28,6 +29,7 @@
 #include "xr.h"
 #include "camera.h"
 #include "combat_native.h"
+#include "vr_trace.h"
 #include "arm_ik.h"
 #include "swing_attack_math.h"
 #include "shield_guard_math.h"
@@ -86,6 +88,12 @@ ReachIntentTrigger g_reach[2];  // reach-to-interact bridge, polling thread
 // fires once and the button stays down for reach_press_ms. Measured on the same
 // predicted-display clock the trigger itself runs on.
 long long g_reach_hold_until_ms[2] = {0, 0};
+// Latest native selection published by the interaction observer (game thread).
+// No producer binds it yet, so the store stays empty and the reach gate keeps
+// refusing; when a producer exists it publishes here and the gate reads the
+// live binding instead of a default.
+InteractionSelectionStore g_selection_store{};
+std::mutex g_selection_mutex;
 
 // A weapon swap, a stance change or a new player actor invalidates every
 // physical bridge: an armed swing from the previous weapon must not fire after
@@ -116,6 +124,8 @@ void ResetPhysicalBridges() {
     g_reach[side].Reset();
     g_reach_hold_until_ms[side] = 0;
   }
+  std::lock_guard<std::mutex> lock(g_selection_mutex);
+  g_selection_store.Invalidate();
 }
 
 // A guard is "the shield hand is up", not a pose: the band is head-relative so
@@ -137,6 +147,23 @@ std::atomic<float> g_pending_turn_yaw{0.0f};
 std::mutex g_pad_mutex;
 VirtualPadState g_pad_state{};
 bool g_pad_active = false;
+struct PadTraceState {
+  VirtualPadState pad{};
+  bool active = false;
+  bool initialized = false;
+  std::uint64_t capture_id = 0;
+  std::uint64_t sequence = 0;
+};
+PadTraceState g_pad_trace;
+struct HandTraceState {
+  bool initialized = false;
+  bool valid = false;
+  std::uint64_t space_epoch = 0;
+  std::uint64_t capture_id = 0;
+  std::uint64_t sequence = 0;
+  long long last_sample_ns = 0;
+};
+HandTraceState g_hand_trace[2];
 struct HeadDirectedLocomotion {
   Vec3 head_forward{};
   Vec3 movement_basis{};  // basis native interprets the stick in
@@ -377,61 +404,7 @@ void SuggestAll() {
   }
 }
 
-float ReadFloat(XrAction action, XrPath subpath, bool& active) {
-  XrActionStateGetInfo get{XR_TYPE_ACTION_STATE_GET_INFO};
-  get.action = action;
-  get.subactionPath = subpath;
-  XrActionStateFloat state{XR_TYPE_ACTION_STATE_FLOAT};
-  active = false;
-  if (XR_FAILED(xrGetActionStateFloat(g_session, &get, &state)))
-    return 0.0f;
-  active = state.isActive != XR_FALSE;
-  return active ? state.currentState : 0.0f;
-}
-
-bool ReadBool(XrAction action, XrPath subpath, bool& active) {
-  XrActionStateGetInfo get{XR_TYPE_ACTION_STATE_GET_INFO};
-  get.action = action;
-  get.subactionPath = subpath;
-  XrActionStateBoolean state{XR_TYPE_ACTION_STATE_BOOLEAN};
-  active = false;
-  if (XR_FAILED(xrGetActionStateBoolean(g_session, &get, &state)))
-    return false;
-  active = state.isActive != XR_FALSE;
-  return active && state.currentState != XR_FALSE;
-}
-
-XrVector2f ReadStick(XrPath subpath, bool& active, bool* query_failed = nullptr) {
-  XrActionStateGetInfo get{XR_TYPE_ACTION_STATE_GET_INFO};
-  get.action = g_stick;
-  get.subactionPath = subpath;
-  XrActionStateVector2f state{XR_TYPE_ACTION_STATE_VECTOR2F};
-  active = false;
-  const XrResult result = xrGetActionStateVector2f(g_session, &get, &state);
-  if (query_failed) *query_failed = XR_FAILED(result);
-  if (XR_FAILED(result))
-    return {};
-  active = state.isActive != XR_FALSE;
-  return active ? state.currentState : XrVector2f{};
-}
-
-bool ReadHeadOrientation(XrSpace base_space, XrTime time, float quat[4]) {
-  if (!g_view_space) return false;
-  XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};
-  if (XR_FAILED(xrLocateSpace(g_view_space, base_space, time, &location)) ||
-      !(location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT))
-    return false;
-  quat[0] = location.pose.orientation.x;
-  quat[1] = location.pose.orientation.y;
-  quat[2] = location.pose.orientation.z;
-  quat[3] = location.pose.orientation.w;
-  float norm2 = 0.0f;
-  for (float value : {quat[0], quat[1], quat[2], quat[3]}) {
-    if (!std::isfinite(value)) return false;
-    norm2 += value * value;
-  }
-  return norm2 > 0.5f && norm2 < 1.5f;
-}
+// OpenXR frame reads live in input_frame_acquisition.cpp.
 
 bool ReleaseCapturedHand(VrPadHand& hand, VrPadHand& held) {
   if (std::fabs(held.stick_x) >= 0.2f || std::fabs(held.stick_y) >= 0.2f) {
@@ -472,12 +445,97 @@ bool ReleaseCapturedHand(VrPadHand& hand, VrPadHand& held) {
       std::fabs(held.dpad_x) >= 0.2f || std::fabs(held.dpad_y) >= 0.2f;
 }
 
-void PublishPad(const VirtualPadState& pad, bool active) {
+bool SamePad(const VirtualPadState& a, const VirtualPadState& b) {
+  return a.buttons == b.buttons && a.left_trigger == b.left_trigger &&
+      a.right_trigger == b.right_trigger && a.thumb_lx == b.thumb_lx &&
+      a.thumb_ly == b.thumb_ly && a.thumb_rx == b.thumb_rx &&
+      a.thumb_ry == b.thumb_ry;
+}
+
+void RecordPadTelemetry(const VirtualPadState& pad, bool active,
+                        long long predicted_ns, std::uint64_t space_epoch) {
+  if (!VrTraceSessionActive()) {
+    g_pad_trace.initialized = false;
+    return;
+  }
+  const auto capture_id = VrTraceCaptureId();
+  const bool changed = !g_pad_trace.initialized ||
+      g_pad_trace.capture_id != capture_id || g_pad_trace.active != active ||
+      !SamePad(g_pad_trace.pad, pad);
+  if (!changed) return;
+  g_pad_trace.pad = pad;
+  g_pad_trace.active = active;
+  g_pad_trace.initialized = true;
+  g_pad_trace.capture_id = capture_id;
+  VrTraceEvent event{};
+  event.event = "virtual_pad_state";
+  event.seq = ++g_pad_trace.sequence;
+  event.predicted_ns = predicted_ns;
+  event.epoch = space_epoch;
+  event.flags = active ? 1u : 0u;
+  event.values[0] = static_cast<float>(pad.buttons);
+  event.values[1] = pad.left_trigger;
+  event.values[2] = pad.right_trigger;
+  event.values[3] = pad.thumb_lx;
+  event.values[4] = pad.thumb_ly;
+  event.values[5] = pad.thumb_rx;
+  event.values[6] = pad.thumb_ry;
+  VrTraceRecord(event);
+}
+
+void RecordHandTelemetry(const HandSample hands[2], std::uint64_t space_epoch,
+                         long long predicted_ns) {
+  constexpr long long kHandSampleIntervalNs = 33333334LL; // <=30 Hz
+  if (!VrTraceSessionActive()) {
+    for (auto& state : g_hand_trace) state.initialized = false;
+    return;
+  }
+  const auto capture_id = VrTraceCaptureId();
+  for (int side = 0; side < 2; ++side) {
+    const HandSample& hand = hands[side];
+    auto& state = g_hand_trace[side];
+    const bool baseline = !state.initialized || state.capture_id != capture_id;
+    const bool transition = baseline || state.valid != hand.valid ||
+                            state.space_epoch != space_epoch;
+    const bool due = hand.valid && predicted_ns > 0 &&
+        (state.last_sample_ns <= 0 || predicted_ns < state.last_sample_ns ||
+         predicted_ns - state.last_sample_ns >= kHandSampleIntervalNs);
+    state.initialized = true;
+    state.valid = hand.valid;
+    state.space_epoch = space_epoch;
+    state.capture_id = capture_id;
+    if (!transition && !due) continue;
+    VrTraceEvent event{};
+    event.event = "hand_tracking";
+    event.seq = ++state.sequence;
+    event.predicted_ns = predicted_ns;
+    event.epoch = space_epoch;
+    event.flags = (hand.valid ? 1u : 0u) | (transition ? 2u : 0u) |
+        ((hand.velocity_flags & XR_SPACE_VELOCITY_LINEAR_VALID_BIT) ? 4u : 0u) |
+        ((hand.velocity_flags & XR_SPACE_VELOCITY_ANGULAR_VALID_BIT) ? 8u : 0u);
+    event.values[0] = static_cast<float>(side); // 0=left, 1=right
+    event.values[14] = static_cast<float>(
+        (hand.squeeze_held ? 1u : 0u) | (hand.trigger_held ? 2u : 0u) |
+        (hand.primary_held ? 4u : 0u));
+    if (hand.valid) {
+      for (unsigned i = 0; i < 3; ++i) event.values[1 + i] = hand.pos[i];
+      for (unsigned i = 0; i < 4; ++i) event.values[4 + i] = hand.quat[i];
+      for (unsigned i = 0; i < 3; ++i) event.values[8 + i] = hand.linear_velocity[i];
+      for (unsigned i = 0; i < 3; ++i) event.values[11 + i] = hand.angular_velocity[i];
+      state.last_sample_ns = predicted_ns;
+    }
+    VrTraceRecord(event);
+  }
+}
+
+void PublishPad(const VirtualPadState& pad, bool active,
+                long long predicted_ns, std::uint64_t space_epoch) {
   {
     std::lock_guard<std::mutex> lock(g_pad_mutex);
     g_pad_state = pad;
     g_pad_active = active;
   }
+  RecordPadTelemetry(pad, active, predicted_ns, space_epoch);
   static ULONGLONG last_route_log = 0;
   const auto now = GetTickCount64();
   if (!last_route_log || now < last_route_log || now - last_route_log >= 1000) {
@@ -504,7 +562,7 @@ SwingAttackParams SwingParamsFromConfig(const Config& cfg) {
   // Every allowed light threshold must have a distinct, quieter rest band.
   p.rest_speed_max = std::min(p.rest_speed_max,
                              p.slash_speed_min * p.thrust_ratio * 0.5f);
-  p.cooldown_ms = cfg.swing_attack_cooldown_ms;
+
   return p;
 }
 
@@ -589,7 +647,7 @@ struct RoomscaleSampler {
   float world_scale = 1.f;
   bool primed = false;
 };
-std::mutex g_roomscale_mutex;
+std::mutex& g_roomscale_mutex = g_locomotion_mutex;
 RoomscaleBasis g_roomscale_basis{};
 RoomscaleMotion g_roomscale_motion{};
 RoomscaleSampler g_roomscale_sampler{};
@@ -660,6 +718,8 @@ bool UpdateRoomscaleInput(VrPadInput& pad, Vec3 head, std::uint64_t epoch,
         VScale(movement.r, right_speed * basis.world_scale),
         VScale(movement.f, forward_speed * basis.world_scale));
     g_roomscale_motion.space_epoch = epoch;
+    g_roomscale_motion.calibration_revision = basis.calibration_revision;
+    g_roomscale_motion.world_scale = basis.world_scale;
     g_roomscale_motion.published_ms = now;
     g_roomscale_motion.expires_ms = now + 150;
     g_roomscale_motion.active = true;
@@ -792,12 +852,13 @@ void InputAttachSession(void* xr_instance, void* xr_session) {
 
 bool InputAvailable() { return g_attached && !g_failed; }
 
-void InputInvalidateFrame() {
+static void InvalidateInputFrame(std::uint64_t space_epoch, long long predicted_ns) {
   g_comfort_motion = {};
   const ArmTarget targets[2]{};
   const HandSample hands[2]{};
+  RecordHandTelemetry(hands, space_epoch, predicted_ns);
   PublishArmTargets(targets, hands);
-  PublishPad({}, false);
+  PublishPad({}, false, predicted_ns, space_epoch);
   InputInvalidateHeadDirectedLocomotion();
   g_pending_turn_yaw.store(0.0f, std::memory_order_relaxed);
   g_combos.Reset();
@@ -825,6 +886,23 @@ void InputInvalidateFrame() {
   g_reach[0].Reset();
   g_reach[1].Reset();
   g_reach_hold_until_ms[0] = g_reach_hold_until_ms[1] = 0;
+  std::lock_guard<std::mutex> lock(g_selection_mutex);
+  g_selection_store.Invalidate();
+}
+
+void InputInvalidateFrame() {
+  InvalidateInputFrame(0, 0);
+}
+
+void InputPublishInteractionSelection(const InteractionSelection& selection,
+                                      long long now_ms) {
+  std::lock_guard<std::mutex> lock(g_selection_mutex);
+  g_selection_store.Publish(selection, now_ms);
+}
+
+void InputInvalidateInteractionSelection() {
+  std::lock_guard<std::mutex> lock(g_selection_mutex);
+  g_selection_store.Invalidate();
 }
 
 void InputPublishHeadDirectedLocomotion(Vec3 head_forward,
@@ -864,12 +942,50 @@ void InputPublishRoomscaleBasis(const RoomscaleBasis& basis) {
       g_roomscale_sampler.world_scale != basis.world_scale) ResetRoomscaleLocked();
 }
 
+void InputPublishCameraMotionBasis(const RoomscaleBasis& roomscale,
+                                   Vec3 head_forward,
+                                   Vec3 movement_basis_forward,
+                                   std::uint64_t space_epoch) {
+  HeadDirectedLocomotion locomotion{};
+  VrHeading heading;
+  if (space_epoch && heading.SeedOnce(head_forward) &&
+      heading.CandidateLocomotion(0.0f, 0.0f, movement_basis_forward).valid) {
+    locomotion.head_forward = head_forward;
+    locomotion.movement_basis = movement_basis_forward;
+    locomotion.space_epoch = space_epoch;
+    locomotion.published_ms = GetTickCount64();
+    locomotion.valid = true;
+  }
+  const bool valid_roomscale = roomscale.space_epoch == space_epoch && space_epoch &&
+      FiniteVec(roomscale.tracking_right) &&
+      std::isfinite(roomscale.world_scale) && roomscale.world_scale > 0.f &&
+      FiniteVec(roomscale.tracking_up) && FiniteVec(roomscale.tracking_forward) &&
+      FiniteVec(roomscale.movement_basis) && VLen(roomscale.tracking_right) >= 0.9f &&
+      VLen(roomscale.tracking_up) >= 0.9f && VLen(roomscale.tracking_forward) >= 0.9f &&
+      VLen(roomscale.movement_basis) >= 0.5f;
+  std::lock_guard<std::mutex> lock(g_locomotion_mutex);
+  g_head_directed_locomotion = locomotion;
+  if (!valid_roomscale) {
+    g_roomscale_basis = {};
+    ResetRoomscaleLocked();
+    return;
+  }
+  g_roomscale_basis = roomscale;
+  g_roomscale_basis.published_ms = GetTickCount64();
+  g_roomscale_basis.valid = true;
+  if (g_roomscale_sampler.epoch != roomscale.space_epoch ||
+      g_roomscale_sampler.calibration_revision != roomscale.calibration_revision ||
+      g_roomscale_sampler.world_scale != roomscale.world_scale) ResetRoomscaleLocked();
+}
+
 bool InputLatestRoomscaleMotion(RoomscaleMotion& out) {
   out = {};
   std::lock_guard<std::mutex> lock(g_roomscale_mutex);
   const auto now = GetTickCount64();
   if (!g_roomscale_basis.valid || !g_roomscale_motion.active ||
       g_roomscale_motion.space_epoch != g_roomscale_basis.space_epoch ||
+      g_roomscale_motion.calibration_revision != g_roomscale_basis.calibration_revision ||
+      g_roomscale_motion.world_scale != g_roomscale_basis.world_scale ||
       now < g_roomscale_motion.published_ms ||
       now > g_roomscale_motion.expires_ms) return false;
   out = g_roomscale_motion;
@@ -886,8 +1002,8 @@ void InputInvalidateRoomscaleBasis() {
 void InputInvalidateHeadDirectedLocomotion() {
   std::lock_guard<std::mutex> lock(g_locomotion_mutex);
   g_head_directed_locomotion = {};
-
-  InputInvalidateRoomscaleBasis();
+  g_roomscale_basis = {};
+  ResetRoomscaleLocked();
 }
 
 void InputCopyTrackingSamples(HandSample hands[2], ArmTarget arms[2]) {
@@ -898,84 +1014,74 @@ void InputCopyTrackingSamples(HandSample hands[2], ArmTarget arms[2]) {
   }
 }
 
-void InputPollFrame(void* base_space, const float head_pos[3],
-                    std::uint64_t space_epoch,
-                    long long predicted_display_time) {
-  g_comfort_motion = {};
-  if (!InputAvailable() || !base_space || !head_pos ||
-      predicted_display_time <= 0) {
-    InputInvalidateFrame();
-    return;
+void LogBridgeReadiness(const Config& cfg, bool motion_bridge_armed,
+                          const char* attack_gate, const char* defence_gate,
+                          const char* suppress_reason,
+                          const SwingAttackOutput& swing_attack,
+                          const ShieldGuardOutput& shield_guard,
+                          const ArmIkHands& committed_hands,
+                          std::uint64_t space_epoch) {
+  // Log-only diagnostic: one line per state change, never per frame. Names the
+  // exact gate that is closed so a single live session identifies whether the
+  // bridges are config-disabled, waiting on IK commits, or actively firing.
+  static std::string last_line;
+  char line[512]{};
+  std::snprintf(line, sizeof(line),
+                "motion=%d attack=%s defence=%s suppress=%s swing=%d/%d guard=%d/%d "
+                "hands=%llu hands_epoch=%llu space_epoch=%llu motion_attacks=%d "
+                "physical_attacks=%d physical_defence=%d",
+                motion_bridge_armed ? 1 : 0, attack_gate, defence_gate,
+                suppress_reason, swing_attack.light ? 1 : 0,
+                swing_attack.heavy ? 1 : 0, shield_guard.block ? 1 : 0,
+                shield_guard.parry ? 1 : 0,
+                static_cast<unsigned long long>(committed_hands.sequence),
+                static_cast<unsigned long long>(committed_hands.epoch),
+                static_cast<unsigned long long>(space_epoch),
+                cfg.motion_attacks ? 1 : 0, cfg.physical_attacks ? 1 : 0,
+                cfg.physical_defence ? 1 : 0);
+  if (line != last_line) {
+    last_line = line;
+    DSVR_LOG("InputBridges: %s", line);
   }
-  const Vec3 head{head_pos[0], head_pos[1], head_pos[2]};
-  if (!FiniteVec(head)) {
-    InputInvalidateFrame();
-    return;
-  }
-  Config cfg = DiagnosticsCurrentConfig();
-  SyncParams(cfg);
+}
 
-  // OpenXR attaches action sets once per session. Never destroy a working set
-  // to apply an edit that the runtime must refuse on this same session.
-  const bool profile_set_changed =
-      cfg.bind_profile_quest3 != g_binding_seen.quest3 ||
-      cfg.bind_profile_index != g_binding_seen.index ||
-      cfg.bind_profile_wmr != g_binding_seen.wmr ||
-      cfg.bind_profile_simple != g_binding_seen.simple;
-  const bool reload_requested =
-      g_binding_reload.exchange(false, std::memory_order_acq_rel);
-  if (g_binding_seen_valid && (profile_set_changed || reload_requested))
-    DSVR_WARN("Input: binding changes require a game restart; the attached "
-              "controller actions remain active. OpenXR permits only one "
-              "action-set attachment per session.");
-  g_binding_seen = {cfg.bind_profile_quest3, cfg.bind_profile_index,
-                   cfg.bind_profile_wmr, cfg.bind_profile_simple};
-  g_binding_seen_valid = true;
-
-  XrActiveActionSet active{g_action_set, XR_NULL_PATH};
-  XrActionsSyncInfo sync{XR_TYPE_ACTIONS_SYNC_INFO};
-  sync.countActiveActionSets = 1;
-  sync.activeActionSets = &active;
-  XrResult sync_result = xrSyncActions(g_session, &sync);
-  if (sync_result == XR_SESSION_NOT_FOCUSED) {
-    InputInvalidateFrame();
-    return;  // runtime/OS focus: never leave a stale button held
-  }
-  if (!OkInput(sync_result, "xrSyncActions")) {
-    InputInvalidateFrame();
-    g_failed = true;
-    return;
-  }
-
+static void ApplyInputFramePolicy(const Config& cfg, Vec3 head,
+    std::uint64_t space_epoch, long long predicted_display_time, bool sanctuary,
+    const OpenXrInputFrame& acquired) {
   float dt = 0.0f;
   if (g_last_time_ns > 0)
     dt = (float)(predicted_display_time - g_last_time_ns) * 1e-9f;
   g_last_time_ns = predicted_display_time;
 
-  const bool sanctuary = XrMenuPresentationActive();
+
   if (CombatIdentityChanged()) ResetPhysicalBridges();
   const HandParams hand_params;
   // Head facing in the tracking frame. The reach envelope is measured along the
   // direction the player is actually looking, in the same space and at the same
   // predicted time as the hand poses, so a reach means reaching where the head
   // points rather than wherever the hand happens to swing.
-  float head_quat[4]{};
-  const bool head_facing = !sanctuary && cfg.reach_interact &&
-      ReadHeadOrientation((XrSpace)base_space,
-                          (XrTime)predicted_display_time, head_quat);
+  const bool head_facing = acquired.view_orientation_valid;
   const Vec3 head_forward = head_facing
-      ? VNorm(QuatRotate(Vec3{0.f, 0.f, -1.f}, head_quat[0], head_quat[1],
-                         head_quat[2], head_quat[3]))
+      ? VNorm(QuatRotate(Vec3{0.f, 0.f, -1.f}, acquired.view_orientation[0],
+                         acquired.view_orientation[1], acquired.view_orientation[2],
+                         acquired.view_orientation[3]))
       : Vec3{};
-
-  VrPadInput pad_input{};
-  bool pad_active = false;
-  bool right_stick_active = false;
-  bool right_stick_failed = false;
+  VrPadInput pad_input = acquired.actions;
+  bool pad_active = acquired.pad_active;
+  bool right_stick_active = acquired.right_stick_active;
+  bool right_stick_failed = acquired.right_stick_failed;
   ArmTarget arm_targets[2]{};
   HandSample hand_samples[2]{};
   SwingAttackOutput swing_attack{};
     ShieldGuardOutput shield_guard{};
+    // Physical-bridge readiness, logged once per change by LogBridgeReadiness
+    // below. These are the gates that decide whether swings/guards request
+    // native input; logging them here turns a silent gate into a checkable
+    // fact. No behavior change.
+    bool motion_bridge_armed = false;
+    const char* attack_gate = "uncomputed";
+    const char* defence_gate = "uncomputed";
+    const char* suppress_reason = "uncomputed";
     // Reach geometry per hand, consumed after the loop once the opposite hand's
     // speed for this same frame is known.
     float reach_offset[2]{};
@@ -985,114 +1091,84 @@ void InputPollFrame(void* base_space, const float head_pos[3],
     const int weapon_side = cfg.dominant_hand_left ? 0 : 1;
     const int shield_side = weapon_side == 0 ? 1 : 0;
     ArmIkHands committed_hands{};
-    const bool physical_attack_ready = !sanctuary && CameraGameplayReady() &&
-        !cfg.observer_only && cfg.physical_attacks && cfg.motion_attacks &&
-        cfg.arm_ik_enabled && !cfg.arm_ik_log_only && cfg.arm_ik_block_animation &&
-        ArmIkLatestHands(committed_hands) && committed_hands.epoch == space_epoch &&
-        committed_hands.side[weapon_side].valid;
-      const bool physical_defence_ready = physical_attack_ready &&
-         cfg.physical_defence && committed_hands.side[shield_side].valid;
+    const bool ik_hands_available = ArmIkLatestHands(committed_hands);
+    motion_bridge_armed = !sanctuary && cfg.motion_attacks &&
+        !ModMenuCapturesInput() && !CalibrationCapturesInput() && !g_capture_rearm;
+    const char* bridge_gate = nullptr;
+    if (sanctuary) bridge_gate = "theater-menu-active";
+    else if (!CameraGameplayReady()) bridge_gate = "camera-not-gameplay";
+    else if (cfg.observer_only) bridge_gate = "observer-only";
+    else if (!cfg.arm_ik_enabled) bridge_gate = "arm_ik-off";
+    else if (cfg.arm_ik_log_only) bridge_gate = "arm_ik-log-only";
+    else if (!cfg.arm_ik_block_animation) bridge_gate = "block_animation-off";
+    else if (!ik_hands_available) bridge_gate = "no-committed-hands";
+    else if (committed_hands.epoch != space_epoch) bridge_gate = "hand-epoch-stale";
+    if (bridge_gate) attack_gate = bridge_gate;
+    else if (!cfg.motion_attacks) attack_gate = "motion_attacks-off";
+    else if (!cfg.physical_attacks) attack_gate = "physical_attacks-off";
+    else if (!committed_hands.side[weapon_side].valid) attack_gate = "weapon-hand-invalid";
+    else attack_gate = "ready";
+    const bool physical_attack_ready = std::strcmp(attack_gate, "ready") == 0;
+    if (bridge_gate) defence_gate = bridge_gate;
+    else if (!cfg.physical_defence) defence_gate = "physical_defence-off";
+    else if (!committed_hands.side[shield_side].valid) defence_gate = "shield-hand-invalid";
+    else defence_gate = "ready";
+      const bool physical_defence_ready = std::strcmp(defence_gate, "ready") == 0;
 
   for (int side = 0; side < 2; ++side) {
-    // Non-pose actions remain usable when grip tracking is unavailable.
     VrPadHand& pad_hand = side == 0 ? pad_input.left : pad_input.right;
-    bool action_active = false;
-    const float squeeze_raw = ReadFloat(g_squeeze, g_hand_path[side], action_active);
-    pad_active = pad_active || action_active;
-    const float trigger_raw = ReadFloat(g_trigger, g_hand_path[side], action_active);
-    pad_active = pad_active || action_active;
-    XrVector2f stick = ReadStick(g_hand_path[side], action_active,
-                                side == 1 ? &right_stick_failed : nullptr);
-    if (side == 1) right_stick_active = action_active;
-    pad_active = pad_active || action_active;
-    pad_hand.stick_x = stick.x;
-    pad_hand.stick_y = stick.y;
-    pad_hand.squeeze = squeeze_raw;
-    pad_hand.trigger = trigger_raw;
-    pad_hand.primary = ReadBool(g_primary, g_hand_path[side], action_active);
-    pad_active = pad_active || action_active;
-    pad_hand.secondary = ReadBool(g_secondary, g_hand_path[side], action_active);
-    pad_active = pad_active || action_active;
-    pad_hand.menu = ReadBool(g_menu, g_hand_path[side], action_active);
-    pad_active = pad_active || action_active;
-    pad_hand.stick_click = ReadBool(g_stick_click, g_hand_path[side], action_active);
-    pad_active = pad_active || action_active;
+    const AcquiredHand& raw_hand = acquired.hands[side];
     HandSample& sample = hand_samples[side];
+    sample.valid = raw_hand.grip_valid;
+    for (int axis = 0; axis < 3; ++axis) {
+      sample.pos[axis] = raw_hand.grip_position[axis];
+      sample.aim_pos[axis] = raw_hand.aim_position[axis];
+      sample.linear_velocity[axis] = raw_hand.linear_velocity[axis];
+      sample.angular_velocity[axis] = raw_hand.angular_velocity[axis];
+    }
+    for (int axis = 0; axis < 4; ++axis) {
+      sample.quat[axis] = raw_hand.grip_orientation[axis];
+      sample.aim_quat[axis] = raw_hand.aim_orientation[axis];
+    }
+    sample.aim_valid = raw_hand.aim_valid;
+    sample.velocity_flags = raw_hand.velocity_flags;
+    sample.space_epoch = space_epoch;
+    sample.predicted_ns = predicted_display_time;
+    const float squeeze_raw = pad_hand.squeeze;
+    const float trigger_raw = pad_hand.trigger;
     sample.squeeze_held = squeeze_raw > 0.7f;
     sample.trigger_held = trigger_raw > 0.7f;
     sample.primary_held = pad_hand.primary;
-    // Aim is located separately in the exact same space/time as grip and HMD.
-    // Grip tracking loss cannot disable navigation buttons or a valid aim.
-    XrActionStateGetInfo aim_get{XR_TYPE_ACTION_STATE_GET_INFO};
-    aim_get.action=g_aim_pose;aim_get.subactionPath=g_hand_path[side];
-    XrActionStatePose aim_state{XR_TYPE_ACTION_STATE_POSE};
-    XrSpaceLocation aim{XR_TYPE_SPACE_LOCATION};
-    constexpr auto aim_flags=XR_SPACE_LOCATION_ORIENTATION_VALID_BIT |
-                              XR_SPACE_LOCATION_POSITION_VALID_BIT;
-    if (g_aim_space[side] &&
-        XR_SUCCEEDED(xrGetActionStatePose(g_session,&aim_get,&aim_state)) && aim_state.isActive &&
-        XR_SUCCEEDED(xrLocateSpace(g_aim_space[side],(XrSpace)base_space,
-                                   (XrTime)predicted_display_time,&aim)) &&
-        (aim.locationFlags & aim_flags)==aim_flags) {
-      sample.aim_pos[0]=aim.pose.position.x;sample.aim_pos[1]=aim.pose.position.y;
-      sample.aim_pos[2]=aim.pose.position.z;
-      sample.aim_quat[0]=aim.pose.orientation.x;sample.aim_quat[1]=aim.pose.orientation.y;
-      sample.aim_quat[2]=aim.pose.orientation.z;sample.aim_quat[3]=aim.pose.orientation.w;
-      float norm2=0;for(float v:sample.aim_quat)norm2+=v*v;
-      sample.aim_valid=FiniteVec({sample.aim_pos[0],sample.aim_pos[1],sample.aim_pos[2]}) &&
-          std::isfinite(norm2) && norm2>.5f && norm2<1.5f;
-    }
-    XrSpaceVelocity velocity{XR_TYPE_SPACE_VELOCITY};
-    XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};
-    location.next = &velocity;
-    XrResult located = xrLocateSpace(g_grip_space[side], (XrSpace)base_space,
-                                     (XrTime)predicted_display_time, &location);
-    const auto kValid = XR_SPACE_LOCATION_ORIENTATION_VALID_BIT |
-                        XR_SPACE_LOCATION_POSITION_VALID_BIT;
-    if (XR_FAILED(located) || (location.locationFlags & kValid) != kValid) {
-      sample.valid = false;
+    if (!sample.valid) {
       g_blade[side].Reset();
       g_swing_attack[side].Reset();
       g_shield_guard[side].Reset();
       continue;
     }
-    sample.valid = true;
-    sample.pos[0] = location.pose.position.x;
-    sample.pos[1] = location.pose.position.y;
-    sample.pos[2] = location.pose.position.z;
-    sample.quat[0] = location.pose.orientation.x;
-    sample.quat[1] = location.pose.orientation.y;
-    sample.quat[2] = location.pose.orientation.z;
-    sample.quat[3] = location.pose.orientation.w;
-    Vec3 blade = BladeDirection(sample.quat[0], sample.quat[1],
-                                sample.quat[2], sample.quat[3]);
+    const Vec3 blade = BladeDirection(sample.quat[0], sample.quat[1],
+                                      sample.quat[2], sample.quat[3]);
     sample.blade_dir[0] = blade.x;
     sample.blade_dir[1] = blade.y;
     sample.blade_dir[2] = blade.z;
-    Vec3 grip{sample.pos[0], sample.pos[1], sample.pos[2]};
-    Vec3 tip = BladeTip(grip, sample.quat[0], sample.quat[1], sample.quat[2],
-                        sample.quat[3], hand_params.blade_length_m);
+    const Vec3 grip{sample.pos[0], sample.pos[1], sample.pos[2]};
+    const Vec3 tip = BladeTip(grip, sample.quat[0], sample.quat[1],
+        sample.quat[2], sample.quat[3], hand_params.blade_length_m);
     sample.tip[0] = tip.x;
     sample.tip[1] = tip.y;
     sample.tip[2] = tip.z;
     sample.xr_speed = -1.0f;
-    if (velocity.velocityFlags & XR_SPACE_VELOCITY_LINEAR_VALID_BIT) {
-      Vec3 v{velocity.linearVelocity.x, velocity.linearVelocity.y,
-             velocity.linearVelocity.z};
-      sample.xr_speed = VLen(v);
-    }
-    sample.squeeze_held = squeeze_raw > 0.7f;
-    sample.trigger_held = trigger_raw > 0.7f;
-    sample.primary_held = pad_hand.primary;
-
-    // Head-relative kinematics feed the contact bench and optional native-input
-    // preview. Neither submits physical contact damage. Menus and disabling
-    // motion attacks discard both histories.
+    if (raw_hand.linear_velocity_valid)
+      sample.xr_speed = VLen({sample.linear_velocity[0], sample.linear_velocity[1],
+                              sample.linear_velocity[2]});
+      // Head-relative kinematics feed the contact bench and optional native-input
+    // preview. Neither submits physical contact damage. Menus discard both
+    // histories; disable the bridges only when all motion paths are off.
     // Velocities are head-relative: roomscale walking moves head and
     // hands together and must not read as a swing.
     if (sanctuary || ModMenuCapturesInput() || CalibrationCapturesInput() ||
         g_capture_rearm ||
-        (!cfg.motion_attacks && !cfg.arm_swing_sprint)) {
+        (!cfg.motion_attacks && !cfg.arm_swing_sprint &&
+           !cfg.physical_defence)) {
       g_blade[side].Reset();
       g_swing_attack[side].Reset();
       g_shield_guard[side].Reset();
@@ -1100,15 +1176,33 @@ void InputPollFrame(void* base_space, const float head_pos[3],
       g_reach_hold_until_ms[side] = 0;
       sample.speed = 0.0f;
     } else {
-      if (!g_blade[side].valid || g_blade[side].space_epoch_ != space_epoch ||
-          !(dt > 0.0f) || dt > 0.25f)
+      const auto& previous = g_blade[side];
+      const auto same_position = [](Vec3 a, Vec3 b) {
+        return a.x == b.x && a.y == b.y && a.z == b.z;
+      };
+      // A repeated callback for the same pose/time is not tracking loss.
+      // Preserve the velocity and bounded button holds, without accumulating
+      // motion twice. A changed pose at the same time still fails closed.
+      const bool duplicate_sample = dt == 0.0f && previous.valid &&
+          previous.space_epoch_ == space_epoch &&
+          same_position(previous.grip, grip) && same_position(previous.tip, tip) &&
+          same_position(previous.head, head);
+      if (!duplicate_sample &&
+          (!previous.valid || previous.space_epoch_ != space_epoch ||
+           !(dt > 0.0f) || dt > 0.25f)) {
         g_swing_attack[side].Reset();
-      g_blade[side].FeedRelative(grip, tip, head, dt, space_epoch);
+        g_shield_guard[side].Reset();
+        g_reach[side].Reset();
+        g_reach_hold_until_ms[side] = 0;
+      }
+      if (!duplicate_sample)
+        g_blade[side].FeedRelative(grip, tip, head, dt, space_epoch);
       sample.speed = g_blade[side].grip_speed;
       // Input preview only: request a native attack from a committed IK hand.
       // Native hit windows and weapon/hurt geometry still need live proof.
       const bool weapon_hand = side == weapon_side;
-      if (!physical_attack_ready || !weapon_hand || !g_blade[side].valid) {
+      if (!physical_attack_ready || !weapon_hand || !g_blade[side].valid ||
+                !g_blade[side].HasVelocitySample()) {
         g_swing_attack[side].Reset();
       } else {
         const bool thrust =
@@ -1126,7 +1220,7 @@ void InputPollFrame(void* base_space, const float head_pos[3],
       // parry on a flick. Like the attack bridge this requests ordinary
       // native input only: guard windows, chip damage and parry judgement
       // stay the game's, and no contact geometry or damage is submitted.
-      if (!physical_defence_ready || side != shield_side) {
+      if (!physical_defence_ready || side != shield_side || !g_blade[side].valid) {
         g_shield_guard[side].Reset();
       } else {
         const float below_head = head.y - grip.y;
@@ -1181,7 +1275,12 @@ void InputPollFrame(void* base_space, const float head_pos[3],
     target.trigger_held = sample.trigger_held;
   }
 
+  RecordHandTelemetry(hand_samples, space_epoch, predicted_display_time);
   PublishArmTargets(arm_targets, hand_samples);
+  // Iteration 2: drain bench haptic pulses on the render-thread poll frame
+  // every frame (the Combat panel only polls when open). No-op unless the
+  // bench queued a pulse from classified geometry.
+  ArmIkDrainBenchHaptics();
 
   // Both stick clicks are reserved while held. A short pair keeps the legacy
   // recenter action; a three-second hold opens Home once and requires neutral.
@@ -1276,7 +1375,7 @@ void InputPollFrame(void* base_space, const float head_pos[3],
     g_capture_rearm = left_pending || right_pending;
   }
   if (consuming_controls) {
-    PublishPad({}, pad_active);
+    PublishPad({}, pad_active, predicted_display_time, space_epoch);
     g_stick_dpad.Reset();
     g_turn.Reset();
     g_combos.Reset();
@@ -1360,8 +1459,14 @@ void InputPollFrame(void* base_space, const float head_pos[3],
   // until real native physical damage AND defense are bound; enabling IK or
   // log-only must never leave the player unable to attack/block/parry.
   const auto combat=CombatNativeGetStatus();
-  pad_input.suppress_weapon_attacks = cfg.arm_ik_enabled && !cfg.arm_ik_log_only &&
+  const bool suppress_on = cfg.arm_ik_enabled && !cfg.arm_ik_log_only &&
       combat.physical_damage_bound && combat.shield_contact_bound;
+  pad_input.suppress_weapon_attacks = suppress_on;
+  if (!cfg.arm_ik_enabled) suppress_reason = "arm_ik-off";
+  else if (cfg.arm_ik_log_only) suppress_reason = "arm_ik-log-only";
+  else if (!combat.physical_damage_bound) suppress_reason = "damage-unbound";
+  else if (!combat.shield_contact_bound) suppress_reason = "shield-unbound";
+  else suppress_reason = "suppressed";
   // Menu navigation is a d-pad mapping and needs no orientation reference at
     // all, so it must never be fed a stick the locomotion gate already cleared.
     // Sanctuary and every non-gameplay state are menu navigation.
@@ -1506,13 +1611,21 @@ void InputPollFrame(void* base_space, const float head_pos[3],
             reach_ready[1 - side] ? reach_speed[1 - side] : 0.0f, reach_now_ms,
             reach_params);
         // Eligibility gate (H2): the gesture alone must not decide once a
-        // native prompt/LOS owner exists. InteractionTargetEligibility still
-        // has no producer, so the default refuses everything and the reach
-        // path logs why instead of silently tapping A at a wall or a face.
-        if (intent.pressed && !SelectTargetEligible(InteractionTargetEligibility{})) {
-          g_reach_hold_until_ms[side] = 0;
+        // native prompt/LOS owner exists. The selection store has no
+        // producer yet, so it stays empty and the gate keeps refusing;
+        // the reach path logs why instead of silently tapping A at a
+        // wall or a face.
+          InteractionSelectionStore selection_copy;
+          {
+            std::lock_guard<std::mutex> lock(g_selection_mutex);
+            selection_copy = g_selection_store;
+          }
+          if (intent.pressed &&
+              !SelectTargetEligibleWithStoredSelection(
+                  InteractionTargetEligibility{}, selection_copy, reach_now_ms)) {
+            g_reach_hold_until_ms[side] = 0;
           DSVR_LOG("Interaction: reach %.2f m/s at %.2f m ahead refused "
-                   "(no eligible target: prompt/LOS/lifecycle unbound)",
+                   "(no eligible target: prompt/LOS/lifecycle/selection unbound)",
                    reach_forward_speed[side], reach_offset[side]);
           continue;
         }
@@ -1539,7 +1652,18 @@ void InputPollFrame(void* base_space, const float head_pos[3],
   // set for every frame of the guard and clears the frame the hand drops.
   pad_input.guard_block = shield_guard.block;
   pad_input.guard_parry = shield_guard.parry;
-  { const bool roomscale_active = UpdateRoomscaleInput(pad_input, head, space_epoch, predicted_display_time, cfg, sanctuary); PublishPad(MapVrPad(pad_input,menu_navigation), pad_active || roomscale_active || swing_attack.light || swing_attack.heavy || shield_guard.block || shield_guard.parry || pad_input.reach_interact); }
+  {
+    const bool roomscale_active = UpdateRoomscaleInput(
+        pad_input, head, space_epoch, predicted_display_time, cfg, sanctuary);
+    PublishPad(MapVrPad(pad_input, menu_navigation),
+        pad_active || roomscale_active || swing_attack.light ||
+            swing_attack.heavy || shield_guard.block || shield_guard.parry ||
+            pad_input.reach_interact,
+        predicted_display_time, space_epoch);
+  }
+  LogBridgeReadiness(cfg, motion_bridge_armed, attack_gate, defence_gate,
+                     suppress_reason, swing_attack, shield_guard,
+                     committed_hands, space_epoch);
 
   // Stick turn: sanctuary freezes the world; otherwise the tracker owns
   // snap/smooth and only the accumulated delta crosses to the game thread.
@@ -1562,6 +1686,77 @@ void InputPollFrame(void* base_space, const float head_pos[3],
       }
     }
   }
+}
+
+void InputPollFrame(void* base_space, const float head_pos[3],
+                    std::uint64_t space_epoch,
+                    long long predicted_display_time) {
+  g_comfort_motion = {};
+  if (!InputAvailable() || !base_space || !head_pos ||
+      predicted_display_time <= 0) {
+    InvalidateInputFrame(space_epoch, predicted_display_time > 0 ? predicted_display_time : 0);
+    return;
+  }
+  const Vec3 head{head_pos[0], head_pos[1], head_pos[2]};
+  if (!FiniteVec(head)) {
+    InvalidateInputFrame(space_epoch, predicted_display_time > 0 ? predicted_display_time : 0);
+    return;
+  }
+  Config cfg = DiagnosticsCurrentConfig();
+  SyncParams(cfg);
+
+  // OpenXR attaches action sets once per session. Never destroy a working set
+  // to apply an edit that the runtime must refuse on this same session.
+  const bool profile_set_changed =
+      cfg.bind_profile_quest3 != g_binding_seen.quest3 ||
+      cfg.bind_profile_index != g_binding_seen.index ||
+      cfg.bind_profile_wmr != g_binding_seen.wmr ||
+      cfg.bind_profile_simple != g_binding_seen.simple;
+  const bool reload_requested =
+      g_binding_reload.exchange(false, std::memory_order_acq_rel);
+  if (g_binding_seen_valid && (profile_set_changed || reload_requested))
+    DSVR_WARN("Input: binding changes require a game restart; the attached "
+              "controller actions remain active. OpenXR permits only one "
+              "action-set attachment per session.");
+  g_binding_seen = {cfg.bind_profile_quest3, cfg.bind_profile_index,
+                   cfg.bind_profile_wmr, cfg.bind_profile_simple};
+  g_binding_seen_valid = true;
+
+  const bool sanctuary = XrMenuPresentationActive();
+  OpenXrInputBindings bindings{};
+  bindings.session = g_session;
+  bindings.action_set = g_action_set;
+  bindings.squeeze = g_squeeze;
+  bindings.trigger = g_trigger;
+  bindings.stick = g_stick;
+  bindings.primary = g_primary;
+  bindings.secondary = g_secondary;
+  bindings.menu = g_menu;
+  bindings.stick_click = g_stick_click;
+  bindings.aim_pose = g_aim_pose;
+  bindings.view_space = g_view_space;
+  for (int side = 0; side < 2; ++side) {
+    bindings.hand_paths[side] = g_hand_path[side];
+    bindings.grip_spaces[side] = g_grip_space[side];
+    bindings.aim_spaces[side] = g_aim_space[side];
+  }
+  OpenXrInputFrame acquired{};
+  const auto acquisition = AcquireOpenXrInputFrame(bindings,
+      (XrSpace)base_space, space_epoch, (XrTime)predicted_display_time,
+      !sanctuary && cfg.reach_interact, acquired);
+  if (acquisition.status == OpenXrInputFrameStatus::NotFocused) {
+    InvalidateInputFrame(space_epoch, predicted_display_time);
+    return;
+  }
+  if (acquisition.status == OpenXrInputFrameStatus::SyncFailed) {
+    OkInput(acquisition.sync_result, "xrSyncActions");
+    InvalidateInputFrame(space_epoch, predicted_display_time);
+    g_failed = true;
+    return;
+  }
+
+  ApplyInputFramePolicy(cfg, head, space_epoch, predicted_display_time,
+                         sanctuary, acquired);
 }
 
 ComfortMotion InputLatestComfortMotion() { return g_comfort_motion; }

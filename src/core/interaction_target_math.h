@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cmath>
+#include <cstdint>
 
 namespace dsvr {
 
@@ -58,6 +59,97 @@ inline constexpr InteractionClassRange kInteractionClassRanges[] = {
      "unverified: refuses until H1 research-cache value cited"},
 };
 
+// Native selection binding (H1 shape, no physics).
+//
+// The ObjAct selection loop (140314E30) picks the first eligible row and the
+// activation path (140313470) marks it; the nearest-row sweep (140314150)
+// resolves each candidate's dummy position through 14030E8C0. Until a live
+// producer binds the selected row handle, object handle, object generation
+// and dummy position from an actual callback, the selection is unbound and
+// every gesture refuses. Row/object/generation/dummy are the identity the
+// native loop itself consumes; no prompt text, LOS term or range follows
+// from this struct alone.
+struct InteractionSelection {
+  // Selected ObjAct row handle (row +0x1C), nonzero when bound.
+  std::uint32_t row_handle = 0u;
+  // Selected object handle (row +0x1C sibling identity), nonzero when bound.
+  std::uint32_t object_handle = 0u;
+  // Object generation: the callback-local identity certification (flags & 4
+  // in the interaction observer). Zero means the handle may be reused.
+  std::uint64_t generation = 0u;
+  // Dummy position resolved for the selected row (14030E8C0 output), metres
+  // in the frame the producer publishes. Valid only when dummy_valid holds.
+  bool dummy_valid = false;
+  float dummy_pos[3] = {0.0f, 0.0f, 0.0f};
+};
+
+// A selection counts only when every identity field positively holds.
+inline bool SelectionBound(const InteractionSelection& s) {
+  if (s.row_handle == 0u || s.object_handle == 0u) return false;
+  if (s.generation == 0u || !s.dummy_valid) return false;
+  for (float v : s.dummy_pos) {
+    if (!std::isfinite(v)) return false;
+  }
+  return true;
+}
+
+// Selection freshness: a bound selection is only live for a bounded window
+// after its publish time. Native rows recycle (handles 111/110/109 across
+// progression) and the observer certifies identity per callback, so a
+// selection that outlives its window must refuse rather than tap a reused
+// row. Zero/negative publish times and clock warps refuse fail-closed.
+inline constexpr long long kInteractionSelectionFreshMs = 500LL;
+
+class InteractionSelectionStore {
+ public:
+  void Publish(const InteractionSelection& s, long long now_ms) {
+    if (now_ms <= 0 || !SelectionBound(s)) {
+      Invalidate();
+      return;
+    }
+    selection_ = s;
+    published_ms_ = now_ms;
+    valid_ = true;
+  }
+  void Invalidate() {
+    valid_ = false;
+    published_ms_ = 0;
+    selection_ = InteractionSelection{};
+  }
+  bool Bound(long long now_ms) const {
+    if (!valid_ || published_ms_ <= 0 || now_ms < published_ms_) return false;
+    if (now_ms - published_ms_ >= kInteractionSelectionFreshMs) return false;
+    return SelectionBound(selection_);
+  }
+  bool Latest(InteractionSelection& out) const {
+    if (!valid_) return false;
+    out = selection_;
+    return true;
+  }
+
+ private:
+  InteractionSelection selection_{};
+  long long published_ms_ = 0;
+  bool valid_ = false;
+};
+
+// The one class-table lookup: copy the record, overwrite its reach with the
+// class row, and refuse (false) when the class is Unknown or has no row, so no
+// caller can reach the AND-gate with a guessed reach.
+inline bool ClassReachApplied(const InteractionTargetEligibility& e,
+                              InteractionClass cls,
+                              InteractionTargetEligibility& out) {
+  if (cls == InteractionClass::Unknown) return false;
+  for (const auto& row : kInteractionClassRanges) {
+    if (row.cls == cls) {
+      out = e;
+      out.max_reach_m = row.max_reach_m;
+      return true;
+    }
+  }
+  return false;
+}
+
 // Fail-closed eligibility: every condition must positively hold.
 inline bool SelectTargetEligible(const InteractionTargetEligibility& e) {
   if (!e.prompt_visible || !e.line_of_sight_clear || !e.target_valid)
@@ -74,15 +166,39 @@ inline bool SelectTargetEligible(const InteractionTargetEligibility& e) {
 // values refuse through SelectTargetEligible's own checks.
 inline bool SelectTargetEligibleForClass(const InteractionTargetEligibility& e,
                                          InteractionClass cls) {
-  if (cls == InteractionClass::Unknown) return false;
-  for (const auto& row : kInteractionClassRanges) {
-    if (row.cls == cls) {
-      InteractionTargetEligibility with_class = e;
-      with_class.max_reach_m = row.max_reach_m;
-      return SelectTargetEligible(with_class);
-    }
-  }
-  return false;
+  InteractionTargetEligibility with_class;
+  if (!ClassReachApplied(e, cls, with_class)) return false;
+  return SelectTargetEligible(with_class);
+}
+
+// Selection-bound eligibility: the gesture-level AND-gate plus a bound
+// native selection. An eligible gesture with no selected row still refuses;
+// a bound selection with no eligible gesture still refuses.
+inline bool SelectTargetEligibleWithSelection(const InteractionTargetEligibility& e,
+                                              const InteractionSelection& s) {
+  if (!SelectionBound(s)) return false;
+  return SelectTargetEligible(e);
+}
+
+// Class-aware, selection-bound eligibility: Unknown classes always refuse;
+// known classes use their table max before the shared AND-gate.
+inline bool SelectTargetEligibleForClassWithSelection(
+    const InteractionTargetEligibility& e, InteractionClass cls,
+    const InteractionSelection& s) {
+  if (!SelectionBound(s)) return false;
+  InteractionTargetEligibility with_class;
+  if (!ClassReachApplied(e, cls, with_class)) return false;
+  return SelectTargetEligible(with_class);
+}
+
+// Store-bound eligibility: the gesture-level AND-gate plus a live (fresh,
+// non-stale) stored selection. A stale or invalidated store refuses even
+// when the gesture is eligible.
+inline bool SelectTargetEligibleWithStoredSelection(
+    const InteractionTargetEligibility& e,
+    const InteractionSelectionStore& store, long long now_ms) {
+  if (!store.Bound(now_ms)) return false;
+  return SelectTargetEligible(e);
 }
 
 }  // namespace dsvr

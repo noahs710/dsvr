@@ -86,6 +86,78 @@ inline ScreenTangentExtents FitTheaterScreenToEyes(
   return {tan_h, tan_h / aspect};
 }
 
+// The theater quad is a magnifier: the game image is copied into a sub-rect of
+// the eye buffer, so a rect that covers more eye pixels than the source has
+// pixels upsamples it. The operator's live report on 31 Oct 2026 was a "huge,
+// blurry, badly jagged" panel while the game rendered 3440x1440 into a
+// 2144x2292 eye buffer. Shrink (never grow) the angular extent until the quad's
+// pixel footprint fits the source, keeping the requested aspect.
+inline ScreenTangentExtents FitTheaterScreenToPixels(
+    ScreenTangentExtents requested, const EyeFrustum eyes[2],
+    unsigned eye_width, unsigned eye_height,
+    unsigned source_width, unsigned source_height) {
+  if (!eyes || eye_width == 0 || eye_height == 0 || source_width == 0 ||
+      source_height == 0 || !(requested.tan_half_h > 0.0f) ||
+      !(requested.tan_half_v > 0.0f) || !std::isfinite(requested.tan_half_h) ||
+      !std::isfinite(requested.tan_half_v))
+    return requested;
+  float scale = 1.0f;
+  for (unsigned i = 0; i < 2; ++i) {
+    const EyeFrustum& eye = eyes[i];
+    const float span_h = eye.tan_right - eye.tan_left;
+    const float span_v = eye.tan_up - eye.tan_down;
+    if (!(span_h > 0.0f) || !(span_v > 0.0f) || !std::isfinite(span_h) ||
+        !std::isfinite(span_v))
+      continue;
+    // xr.cpp's theater branch maps tangent linearly onto the eye buffer, so a
+    // quad spanning 2*tan_half covers that fraction of the buffer's pixels.
+    const float limit_h = static_cast<float>(source_width) * span_h /
+                          (2.0f * static_cast<float>(eye_width));
+    const float limit_v = static_cast<float>(source_height) * span_v /
+                          (2.0f * static_cast<float>(eye_height));
+    if (requested.tan_half_h > limit_h)
+      scale = std::min(scale, limit_h / requested.tan_half_h);
+    if (requested.tan_half_v > limit_v)
+      scale = std::min(scale, limit_v / requested.tan_half_v);
+  }
+  if (!std::isfinite(scale) || !(scale > 0.0f) || scale >= 1.0f) return requested;
+  const float h = requested.tan_half_h * scale;
+  const float v = requested.tan_half_v * scale;
+  if (!(h > 0.0f) || !(v > 0.0f) || !std::isfinite(h) || !std::isfinite(v))
+    return requested;
+  return {h, v};
+}
+
+// Where the theater panel lands in one eye buffer, in pixels. This is the one
+// tested implementation of the rect xr.cpp used to compute inline (with a dead
+// y_top and a hardcoded 0.5 vertical centre). The panel IS the game image: its
+// aspect comes from the source, so nothing is letterboxed inside it.
+struct PixelRect {
+  float x = 0.0f, y = 0.0f, w = 0.0f, h = 0.0f;
+};
+
+inline PixelRect TheaterRectForEye(const ScreenTangentExtents& screen,
+                                   const EyeFrustum& eye, float eye_width,
+                                   float eye_height) {
+  PixelRect out;
+  const float span_h = eye.tan_right - eye.tan_left;
+  const float span_v = eye.tan_up - eye.tan_down;
+  if (!(span_h > 0.0f) || !(span_v > 0.0f) || !(screen.tan_half_h > 0.0f) ||
+      !(screen.tan_half_v > 0.0f) || !(eye_width > 0.0f) || !(eye_height > 0.0f))
+    return out;
+  const float x0 = (-screen.tan_half_h - eye.tan_left) / span_h;
+  const float x1 = (screen.tan_half_h - eye.tan_left) / span_h;
+  // Rows run from angleUp, so the panel spans 2*tan_half_v / span_v rows. It is
+  // centred on buffer mid-height: the optical centre (tu/span_v = 40.2%) sat too
+  // high and the old pixel-linear form sat at 59.8% ("image too low"), and the
+  // operator asked for the midpoint between those two.
+  const float h = 2.0f * screen.tan_half_v / span_v;
+  out.x = x0 * eye_width;
+  out.y = (0.5f - h * 0.5f) * eye_height;
+  out.w = (x1 - x0) * eye_width;
+  out.h = h * eye_height;
+  return out;
+}
 
 // The game's single symmetric frustum that covers an eye: vertical FOV of
 // the widest eye (xr.cpp policy -- neither eye may be asked to show more

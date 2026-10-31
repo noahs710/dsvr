@@ -39,6 +39,7 @@ struct MenuPointerState {
   bool beam_valid = false;
   float beam_x = 0.0f;
   float beam_y = 0.0f;
+  bool theater_screen = false;
 };
 
 inline bool MenuFiniteVec3(Vec3 value) {
@@ -167,6 +168,95 @@ inline MenuPointerState ProjectMenuPointer(bool spatial_menu, bool anchored,
     state.beam_valid = true;
     state.beam_x = tail_u * static_cast<float>(display_width);
     state.beam_y = tail_v * static_cast<float>(display_height);
+  }
+  return state;
+}
+
+
+inline MenuRayProjection ProjectTheaterScreenRay(
+    Vec3 ray_origin, Vec3 ray_direction, Vec3 view_origin,
+    const float view_quat_xyzw[4], float screen_distance,
+    float horizontal_fov_rad, float source_aspect_ratio) {
+  const MenuRayProjection miss{false, false, 0.0f, 0.0f};
+  if (!MenuFiniteVec3(ray_origin) || !MenuFiniteVec3(ray_direction) ||
+      !MenuFiniteVec3(view_origin) || !view_quat_xyzw ||
+      !std::isfinite(screen_distance) || screen_distance <= 0.0f ||
+      !std::isfinite(horizontal_fov_rad) || horizontal_fov_rad <= 0.0f ||
+      horizontal_fov_rad >= 3.14159265f ||
+      !std::isfinite(source_aspect_ratio) || source_aspect_ratio <= 0.0f)
+    return miss;
+
+  float norm2 = 0.0f;
+  for (int i = 0; i < 4; ++i) {
+    if (!std::isfinite(view_quat_xyzw[i])) return miss;
+    norm2 += view_quat_xyzw[i] * view_quat_xyzw[i];
+  }
+  if (!std::isfinite(norm2) || norm2 <= 1e-6f) return miss;
+  const float inverse_norm = 1.0f / std::sqrt(norm2);
+  const float qx = -view_quat_xyzw[0] * inverse_norm;
+  const float qy = -view_quat_xyzw[1] * inverse_norm;
+  const float qz = -view_quat_xyzw[2] * inverse_norm;
+  const float qw = view_quat_xyzw[3] * inverse_norm;
+
+  const float direction_length = VLen(ray_direction);
+  if (!std::isfinite(direction_length) || direction_length <= 1e-6f)
+    return miss;
+  const Vec3 direction = VScale(ray_direction, 1.0f / direction_length);
+  const Vec3 world_offset{ray_origin.x - view_origin.x,
+                          ray_origin.y - view_origin.y,
+                          ray_origin.z - view_origin.z};
+  const Vec3 local_origin = QuatRotate(world_offset, qx, qy, qz, qw);
+  const Vec3 local_direction = QuatRotate(direction, qx, qy, qz, qw);
+  if (!MenuFiniteVec3(local_origin) || !MenuFiniteVec3(local_direction) ||
+      local_direction.z >= -1e-6f)
+    return miss;
+  const float distance = (-screen_distance - local_origin.z) / local_direction.z;
+  const float width = 2.0f * screen_distance *
+                      std::tan(horizontal_fov_rad * 0.5f);
+  const float height = width / source_aspect_ratio;
+  if (!std::isfinite(distance) || distance < 0.0f ||
+      !std::isfinite(width) || width <= 0.0f ||
+      !std::isfinite(height) || height <= 0.0f)
+    return miss;
+  const Vec3 intersection{local_origin.x + local_direction.x * distance,
+                           local_origin.y + local_direction.y * distance,
+                           local_origin.z + local_direction.z * distance};
+  const float u = 0.5f + intersection.x / width;
+  const float v = 0.5f - intersection.y / height;
+  if (!MenuFiniteVec3(intersection) || !std::isfinite(u) || !std::isfinite(v))
+    return miss;
+  return {true, u >= 0.0f && u <= 1.0f && v >= 0.0f && v <= 1.0f, u, v};
+}
+
+inline MenuPointerState ProjectTheaterPointer(
+    bool active, bool tracking_valid, bool select_down, Vec3 view_origin,
+    const float view_quat_xyzw[4], Vec3 ray_origin, Vec3 ray_direction,
+    float screen_distance, float horizontal_fov_rad, float source_aspect_ratio,
+    unsigned display_width, unsigned display_height) {
+  MenuPointerState state{};
+  state.spatial_menu = active;
+  state.theater_screen = active;
+  if (!active || !tracking_valid || !display_width || !display_height)
+    return state;
+  const auto hit = ProjectTheaterScreenRay(
+      ray_origin, ray_direction, view_origin, view_quat_xyzw, screen_distance,
+      horizontal_fov_rad, source_aspect_ratio);
+  if (!hit.hit || !hit.inside) return state;
+  state.valid = true;
+  state.select = select_down;
+  state.x = hit.u * static_cast<float>(display_width);
+  state.y = hit.v * static_cast<float>(display_height);
+  const Vec3 to_controller{ray_origin.x - view_origin.x,
+                           ray_origin.y - view_origin.y,
+                           ray_origin.z - view_origin.z};
+  const auto tail = ProjectTheaterScreenRay(
+      view_origin, to_controller, view_origin, view_quat_xyzw,
+      screen_distance, horizontal_fov_rad, source_aspect_ratio);
+  if (tail.hit) {
+    constexpr float inset = 0.02f;
+    state.beam_valid = true;
+    state.beam_x = std::clamp(tail.u, inset, 1.0f - inset) * display_width;
+    state.beam_y = std::clamp(tail.v, inset, 1.0f - inset) * display_height;
   }
   return state;
 }

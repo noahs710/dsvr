@@ -17,9 +17,9 @@ using namespace dsvr;
 
 void PrimeSwing(SwingAttackTrigger& trigger, const SwingAttackParams& params,
                 long long& now) {
-  const long long end = now + params.rest_ms_min + 16;
-  for (; now <= end; now += 16) trigger.Feed(0.0f, false, now, params);
-  Check(trigger.Armed(), "the weight fixture arms from an independently supplied rest");
+  Check(!trigger.Feed(0.0f, false, now, params).fired,
+        "a stationary sample does not start an attack");
+  now += 16;
 }
 int main() {
   const SwingAttackParams base;  // shipped defaults
@@ -33,9 +33,8 @@ int main() {
     const SwingAttackParams p = WeaponWeightSwingParams(base, w);
     Check(p.slash_speed_min == base.slash_speed_min &&
               p.slash_heavy_min == base.slash_heavy_min &&
-              p.settle_ms == base.settle_ms &&
-              p.cooldown_ms == base.cooldown_ms,
-          "an unreported load leaves every bar exactly where it was");
+              p.rest_speed_max == base.rest_speed_max,
+            "an unreported load leaves start and stop speeds unchanged");
     Check(WeaponWeightDamageScale(1.0f, w) == 1.0f,
           "an unreported load leaves damage scale alone");
   }
@@ -72,13 +71,10 @@ int main() {
         "a heavy weapon's rest band stays below its quietest qualifying swing");
   Check(ph.rest_speed_max < ph.slash_speed_min && ph.slash_heavy_min >= ph.slash_speed_min,
         "every scaled bar set keeps its own ordering");
-  Check(pm.settle_ms > pl.settle_ms && ph.settle_ms > pm.settle_ms,
-        "a heavier weapon must hold the swing longer before it counts");
-  Check(pm.rest_ms_min > pl.rest_ms_min && ph.rest_ms_min > pm.rest_ms_min,
-        "a heavier weapon needs a longer rest before the next swing counts");
-  Check(pm.cooldown_ms > pl.cooldown_ms && ph.cooldown_ms > pm.cooldown_ms,
-        "a heavier weapon recovers more slowly");
-  Check(ph.cooldown_ms >= ph.hold_ms, "the heavy cooldown still contains its own button hold");
+  Check(pl.rest_speed_max == base.rest_speed_max &&
+              pm.rest_speed_max == base.rest_speed_max &&
+              ph.rest_speed_max == base.rest_speed_max,
+        "weapon weight never adds delay or changes the fixed stop-speed band");
 
   // The reward: one clean heavy hit is worth more than the light flurry.
   const float dl = WeaponWeightDamageScale(1.0f, light);
@@ -86,6 +82,16 @@ int main() {
   const float dh = WeaponWeightDamageScale(1.0f, heavy);
   Check(dm > dl && dh > dm, "damage scale rises with equip load");
   Check(dh > 1.0f && dh < 3.0f, "the heavy damage bonus is a reward, not a runaway");
+
+  // Slice 1 torque: response gates how fast speed rises, never damage.
+  // Unity is transparent, below lags (heavy needs commitment), above leads.
+  Check(TorqueGatedSpeed(3.0f, 1.0f) == 3.0f, "unity response is transparent");
+  Check(TorqueGatedSpeed(3.0f, 0.5f) < 3.0f, "heavy weapon lags the hand");
+  Check(TorqueGatedSpeed(3.0f, 2.0f) > 3.0f, "light weapon leads the hand");
+  Check(TorqueGatedSpeed(0.0f, 0.5f) == 0.0f, "no speed from rest, whatever the table");
+  Check(TorqueGatedSpeed(3.0f, 0.0f) == 0.0f, "non-positive response refuses");
+  Check(TorqueGatedSpeed(3.0f, NAN) == 0.0f, "non-finite response refuses");
+  Check(TorqueGatedSpeed(NAN, 1.0f) == 0.0f, "non-finite speed refuses");
 
   // Reach is never a weight penalty. A longer blade keeps its advantage at
   // every load, and no load pulls the hands in.

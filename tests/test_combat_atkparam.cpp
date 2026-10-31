@@ -362,6 +362,42 @@ int main() {
     QualifiedContact th;
     CHECK(QualifyContact(thrust, atk, selection, one, grip, tip, th) &&
           th.attribute == NativeAtkAttribute::Thrust);
+      // Slice 1 anti-tunnel: a fast swing that jumps past a thin slot between
+    // frames still qualifies when the sweep crosses it. Static-only would miss.
+    const std::array thin{NativeHitSlot{.id = 11,
+                                        .tip = {0, 1.4f, -0.5f},
+                                        .tail = {0, 1.4f, -0.52f},
+                                        .radius = 0.02f,
+                                        .capsule = true}};
+    const Vec3 prev_grip{0, 1.4f, 0.3f}, prev_tip{0, 1.4f, -0.2f};
+    const Vec3 far_grip{0, 1.4f, -0.8f}, far_tip{0, 1.4f, -1.3f};
+    CHECK(!BladeOverlapsHitSlot(thin[0], far_grip, far_tip, p.blade_radius_m));
+    CHECK(!BladeOverlapsHitSlot(thin[0], prev_grip, prev_tip, p.blade_radius_m));
+    CHECK(BladeSweptOverlapsHitSlot(thin[0], prev_grip, prev_tip, far_grip,
+                                    far_tip, p.blade_radius_m));
+    QualifiedContact tunneled;
+    CHECK(QualifyContact(hit, atk, selection, thin, far_grip, far_tip,
+                         tunneled, false, p, prev_grip, prev_tip));
+    CHECK(tunneled.slot_resolved && tunneled.slot.id == 11);
+    // A mid-shaft arc contact must survive the actual PARAM qualifier,
+    // including capsule slots; endpoint chords cannot establish this contact.
+    for (bool capsule : {false, true}) {
+      const std::array arc{NativeHitSlot{.id = 12,
+          .tip = {0.35f, 1.4f, -0.35f}, .tail = {0.35f, 1.45f, -0.35f},
+          .radius = 0.003f, .capsule = capsule}};
+      QualifiedContact swept;
+      CHECK(QualifyContact(hit, atk, selection, arc, {0, 1.4f, 0},
+                           {0, 1.4f, -0.9f}, swept, false, p,
+                           {0, 1.4f, 0}, {0.9f, 1.4f, 0}));
+      CHECK(swept.slot_resolved && swept.slot.id == 12);
+    }
+    // Non-finite history falls back to the static test: no invented sweep.
+    QualifiedContact no_sweep;
+    CHECK(!QualifyContact(hit, atk, selection, thin, far_grip, far_tip,
+                          no_sweep, false, p));
+    CHECK(!QualifyContact(hit, atk, selection, thin, far_grip, far_tip,
+                          no_sweep, false, p,
+                          {NAN, NAN, NAN}, {NAN, NAN, NAN}));
   }
 
   std::printf("combat_atkparam: %s (%d failures)\n",

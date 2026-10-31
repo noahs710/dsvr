@@ -10,4 +10,10 @@ void CoreOnRenderFrame();
 // without publishing a render host or enabling XR/gameplay adapters.
 void CoreOnDesktopFrame();
 
+// Startup-selected frame-host values, frozen at install time (core.cpp).
+// The mod menu compares the live config against these so restart-gated rows
+// (render host, eye resolution) show their reminder only after a real change.
+bool CoreStartupRenderHost(bool& reshade_host);
+bool CoreStartupEyeScale(int& render_scale_percent);
+
 }  // namespace dsvr

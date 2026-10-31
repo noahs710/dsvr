@@ -1,12 +1,15 @@
 // Fake-runtime regression seam linked against the actual core/input.cpp.
 #include "../src/core/input.h"
+#include "../src/core/vr_trace.h"
 #include "../src/core/diagnostics.h"
 #include "../src/core/combat_native.h"
 #include "../src/core/arm_ik.h"
 #include "../src/common/logging.h"
 #include <openxr/openxr.h>
 
+#include <algorithm>
 #include <cmath>
+#include <cstdarg>
 #include <cstdio>
 #include <cstring>
 #include <map>
@@ -19,6 +22,8 @@ bool g_camera_gameplay_ready = true;
 bool CameraGameplayReady() { return g_camera_gameplay_ready; }
 // Settable native equipment identity, so a test can swap weapons mid-swing.
 CombatNativeStatus g_combat_status{};
+std::vector<std::string> BridgeLogLines();
+void BridgeLogClear();
 }
 
 
@@ -37,6 +42,7 @@ XrAction secondary_action = XR_NULL_HANDLE;
 XrAction stick_click_action = XR_NULL_HANDLE;
 XrSpace view_space = XR_NULL_HANDLE;
 XrResult turn_result = XR_SUCCESS;
+XrResult sync_result = XR_SUCCESS;
 int right_stick_queries = 0;
 int fail_right_query = 0;
 dsvr::Config config{};
@@ -55,6 +61,7 @@ bool menu_back = false;
 bool menu_prev = false;
 bool menu_next = false;
 bool right_primary = false;
+std::vector<std::string> bridge_log_lines;
 bool right_secondary = false;
 bool left_secondary = false;
 bool left_primary = false;
@@ -75,6 +82,9 @@ float right_quat[4] = {0, 0, 0, 1};
 int calibration_requests = 0;
 int recenter_calls = 0;
 bool sanctuary = false;
+bool trace_active = false;
+std::uint64_t trace_capture_id = 1;
+std::vector<dsvr::VrTraceEvent> trace_events;
 float left_stick_x = 0;
 float left_stick_y = 0;
 std::map<std::string, XrPath> paths;
@@ -400,6 +410,44 @@ void DigitalDpad() {
     ResetRoomscaleTestControls();
     InputInvalidateFrame();
 }
+// Observe the real poll/publish seam, including the existing deferred B tap.
+// This establishes analog input delivery, not the native roll motor's direction.
+void AnalogDodgeRequest() {
+    using namespace dsvr;
+    const auto saved = config;
+    ResetRoomscaleTestControls();
+    InputInvalidateFrame();
+    config.movement_orientation = MovementOrientation::Head;
+    config.play_style = "seated";
+    long long time = 47000000000LL;
+    VirtualPadState pad{};
+    const auto poll = [&] {
+        InputPublishHeadDirectedLocomotion({0, 0, 1}, {0, 0, 1}, 1);
+        InputPollFrame(reinterpret_cast<XrSpace>(100), kHead, 1, time);
+        time += 10000000LL;
+        Expect(InputLatestPad(pad), "dodge request publishes a current pad");
+    };
+    poll();
+    for (float angle : {0.29f, 0.71f, 2.21f, 3.89f, 5.57f}) {
+        left_stick_x = 0.8f * std::cos(angle);
+        left_stick_y = 0.8f * std::sin(angle);
+        // The theater chord reserves B initially; a lone quick tap is emitted
+        // on release, then releases on the following poll.
+        for (int stage = 0; stage < 3; ++stage) {
+            right_secondary = stage == 0;
+            poll();
+            Expect(bool(pad.buttons & kPadB) == (stage == 1),
+                   "deferred dodge B tap and release reach the native input seam");
+            const float delivered = std::atan2(float(pad.thumb_ly), float(pad.thumb_lx));
+            Expect(std::fabs(std::sin(delivered - angle)) < 0.001f &&
+                   std::cos(delivered - angle) > 0,
+                   "non-cardinal dodge intent retains its continuous direction");
+        }
+    }
+    config = saved;
+    ResetRoomscaleTestControls();
+    InputInvalidateFrame();
+}
 void HeadDirectedLocomotion() {
     const XrSpace base = reinterpret_cast<XrSpace>(100);
     dsvr::VirtualPadState pad{};
@@ -477,8 +525,7 @@ void HeadDirectedLocomotion() {
     room_basis.movement_basis = {0, 0, 1};
     room_basis.space_epoch = 1;
     room_basis.valid = true;
-    dsvr::InputPublishRoomscaleBasis(room_basis);
-    dsvr::InputPublishHeadDirectedLocomotion({0, 0, 1}, {0, 0, 1}, 1);
+    dsvr::InputPublishCameraMotionBasis(room_basis, {0, 0, 1}, {0, 0, 1}, 1);
     const float room_start[3] = {0.0f, 1.6f, 0.0f};
     const float room_forward[3] = {0.0f, 1.6f, -0.2f};
     dsvr::InputPollFrame(base, room_start, 1, 1900000000);
@@ -489,6 +536,14 @@ void HeadDirectedLocomotion() {
     Expect(dsvr::InputLatestPad(room_pad) && room_pad.thumb_lx > 0 &&
            room_pad.thumb_ly > 0,
            "physical walking remains sampled and composes with simultaneous stick translation");
+    dsvr::RoomscaleMotion motion{};
+    Expect(dsvr::InputLatestRoomscaleMotion(motion) && motion.active &&
+           motion.calibration_revision == room_basis.calibration_revision &&
+           motion.world_scale == room_basis.world_scale,
+           "roomscale motion carries applied-camera generation metadata");
+    room_basis.calibration_revision++;
+    dsvr::InputPublishCameraMotionBasis(room_basis, {0, 0, 1}, {0, 0, 1}, 1);
+    Expect(!dsvr::InputLatestRoomscaleMotion(motion), "new calibration cannot expose prior-generation motion");
     dsvr::InputInvalidateFrame();
 }
 
@@ -878,8 +933,12 @@ void PhysicalDefence() {
         } else if (!now_lt && lt) {
             lt = false;
             const long long ms = (time - lt_start) / 1000000LL;
-            ++presses;
-            if (ms < 200) ++taps; else ++holds;
+            // A deliberately rolled-back test clock cannot measure the
+            // duration of the hold that began on the previous timeline.
+            if (ms >= 0) {
+                ++presses;
+                if (ms < 200) ++taps; else ++holds;
+            }
         }
     };
     const auto step = [&](int side, float speed, bool walking) {
@@ -904,6 +963,11 @@ void PhysicalDefence() {
     reset(); hold(0, 40);
     Expect(lt && presses == 0,
            "a raised still shield hand holds the native guard button open");
+    InputPollFrame(reinterpret_cast<XrSpace>(100), kHead, epoch, time);
+    VirtualPadState repeated_guard{};
+    InputLatestPad(repeated_guard);
+    Expect((repeated_guard.buttons & kPadLeftShoulder) && !repeated_guard.left_trigger,
+           "a duplicate tracked sample preserves the held guard without parrying");
     InputInvalidateFrame();
     lt = false;
     hold(0, 1);
@@ -923,7 +987,8 @@ void PhysicalDefence() {
            "motion between the still and flick bands drops the guard, never parries");
     reset(); grip_position[0][1] = 0.2f; hold(0, 40); hold(5, 5); hold(0, 40);
     Expect(taps == 0 && presses == 0, "a flick with the shield down is not a parry");
-    reset(); hold(0, 40); hold(5, 5, true); hold(0, 40);
+    // Keep the translated head at its new position when walking stops.
+    reset(); hold(0, 40); hold(5, 5, true); hold(0, 40, true);
     Expect(taps == 0 && presses == 0 && lt,
            "roomscale walking with the shield up is neither guard drop nor flick");
     reset(); hold(0, 40);
@@ -932,6 +997,39 @@ void PhysicalDefence() {
     Expect(!lt && holds == 1, "shield-hand tracking loss releases the guard");
     left_pose_valid = true; hold(0, 40);
     Expect(lt && holds == 1 && taps == 0, "the guard re-engages when tracking returns");
+    for (int transition = 0; transition < 3; ++transition) {
+        reset(); hold(0, 40);
+        if (transition == 0) epoch = applied_hands_epoch = 2;
+        else if (transition == 1) time += 1000000000LL;
+        else time -= 1000000000LL;
+        hold(0, 1);
+        Expect(!lt, "recenter, polling gap and clock rollback release a held guard");
+        hold(0, 40);
+        Expect(lt && taps == 0, "a discontinuity requires a fresh guard settle");
+        epoch = applied_hands_epoch = 1;
+
+        reset(); hold(0, 40); hold(5, 5);
+        if (transition == 0) epoch = applied_hands_epoch = 2;
+        else if (transition == 1) time += 1000000000LL;
+        else time -= 1000000000LL;
+        hold(0, 1);
+        VirtualPadState after{};
+        InputLatestPad(after);
+        Expect(after.left_trigger == 0 && !(after.buttons & kPadLeftShoulder),
+               "a discontinuity cannot turn an unfinished flick into parry or block");
+        hold(0, 40);
+        Expect(taps == 0, "discarded flick cannot return as a delayed parry");
+        epoch = applied_hands_epoch = 1;
+    }
+    config.physical_attacks = false;
+    reset(); hold(0, 40); hold(5, 5); hold(0, 40);
+    Expect(taps == 1 && holds == 1 && lt,
+           "defence preview works independently of the attack-preview toggle");
+    config.motion_attacks = false;
+    reset(); hold(0, 40);
+    Expect(lt, "physical defence remains available when motion attacks are disabled");
+    config.motion_attacks = true;
+    config.physical_attacks = true;
     config.dominant_hand_left = true;
     reset(); hold(0, 40); hold(5, 5); hold(0, 40);
     Expect(taps == 1 && holds == 1 && lt,
@@ -940,18 +1038,17 @@ void PhysicalDefence() {
     Expect(taps == 0 && presses == 0 && lt,
            "the weapon hand cannot tap the shield button");
     config.dominant_hand_left = false;
-    for (int gate = 0; gate < 11; ++gate) {
+    for (int gate = 0; gate < 9; ++gate) {
         config.physical_defence = gate != 0;
-        config.physical_attacks = gate != 1;
-        config.motion_attacks = gate != 2;
-        config.arm_ik_log_only = gate == 3;
-        config.arm_ik_block_animation = gate != 4;
-        applied_hands_valid = gate != 5;
-        g_camera_gameplay_ready = gate != 6;
-        applied_hands_epoch = gate == 7 ? 2 : 1;
-        sanctuary = gate == 8;
-        menu_capture = gate == 9;
-        calibration_capture = gate == 10;
+        config.motion_attacks = true;
+        config.arm_ik_log_only = gate == 1;
+        config.arm_ik_block_animation = gate != 2;
+        applied_hands_valid = gate != 3;
+        g_camera_gameplay_ready = gate != 4;
+        applied_hands_epoch = gate == 5 ? 2 : 1;
+        sanctuary = gate == 6;
+        menu_capture = gate == 7;
+        calibration_capture = gate == 8;
         reset(); hold(0, 40); hold(5, 5); hold(0, 40);
         Expect(presses == 0 && !lt,
                "disabled, uncommitted, menu or calibration IK cannot guard physically");
@@ -974,6 +1071,64 @@ void PhysicalDefence() {
     right_stick_value = 1;
 }
 
+void BridgeReadinessLog() {
+    using namespace dsvr;
+    const auto saved = config;
+    const bool saved_left_pose = left_pose_valid;
+    const bool saved_right_pose = right_pose_valid;
+    left_pose_valid = right_pose_valid = true;
+    right_stick_value = 0;
+    config.arm_ik_enabled = true;
+    config.arm_ik_log_only = false;
+    config.arm_ik_block_animation = true;
+    config.motion_attacks = config.physical_attacks = config.physical_defence = true;
+    config.dominant_hand_left = false;
+    const auto base = reinterpret_cast<XrSpace>(100);
+    const auto latest_bridges = []() -> std::string {
+        const auto lines = dsvr::BridgeLogLines();
+        return lines.empty() ? std::string{} : lines.back();
+    };
+    // Same-frame polling with identical XR time: the second config change must
+    // produce a new readiness line naming the newly closed gate.
+    dsvr::BridgeLogClear();
+    applied_hands_valid = false;
+    applied_hands_epoch = 1;
+    g_camera_gameplay_ready = true;
+    sanctuary = menu_capture = calibration_capture = false;
+    InputPollFrame(base, kHead, 1, 3000000000LL);
+    const std::string uncommitted = latest_bridges();
+    Expect(uncommitted.find("attack=no-committed-hands") != std::string::npos &&
+           uncommitted.find("defence=no-committed-hands") != std::string::npos,
+           "readiness log names the uncommitted-hands gate while IK has no solve");
+    // Committed hands with a stale epoch: the line must change to name it.
+    applied_hands_valid = true;
+    applied_hands_epoch = 2;
+    InputPollFrame(base, kHead, 1, 3000000001LL);
+    const std::string stale = latest_bridges();
+    Expect(stale != uncommitted &&
+           stale.find("attack=hand-epoch-stale") != std::string::npos,
+           "readiness log changes to the stale-epoch gate on the next poll");
+    // Fresh matching epoch: the line must report ready with the same hand count.
+    applied_hands_epoch = 1;
+    InputPollFrame(base, kHead, 1, 3000000002LL);
+    const std::string ready = latest_bridges();
+    Expect(ready != stale && ready.find("attack=ready") != std::string::npos &&
+           ready.find("defence=ready") != std::string::npos,
+           "readiness log reports ready attacks and guards on matching IK epoch");
+    // No new line while nothing changes: the log stays quiet per frame.
+    const std::size_t lines_before = dsvr::BridgeLogLines().size();
+    InputPollFrame(base, kHead, 1, 3000000003LL);
+    Expect(dsvr::BridgeLogLines().size() == lines_before,
+           "unchanged readiness emits no repeated log line");
+    config = saved;
+    left_pose_valid = saved_left_pose;
+    right_pose_valid = saved_right_pose;
+    applied_hands_valid = false;
+    applied_hands_epoch = 1;
+    sanctuary = false;
+    InputInvalidateFrame();
+}
+
 void PhysicalAttacks() {
     using namespace dsvr;
     const auto saved = config;
@@ -989,7 +1144,7 @@ void PhysicalAttacks() {
     config.dominant_hand_left = false;
     config.swing_attack_speed_min = 2;
     config.swing_attack_heavy_min = 4.5f;
-    config.swing_attack_cooldown_ms = 500;
+    
     applied_hands_valid = true;
     applied_hands_epoch = 1;
     long long time = 1000000000LL;
@@ -1024,9 +1179,25 @@ void PhysicalAttacks() {
         }
     };
     reset(); move(1, 0, 40); move(1, 3, 100);
-    Expect(light_edges == 1 && heavy_edges == 0 && !last_light,
-           "physical slash reaches the actual input pad once and releases");
-    reset(); move(1, 0, 40); move(1, 6, 25);
+    Expect(light_edges == 1 && heavy_edges == 0 && last_light,
+           "physical slash holds the native attack while the sword keeps moving");
+    move(1, 0, 40);
+    Expect(light_edges == 1 && !last_light,
+           "native attack releases once sword speed falls into the stop band");
+    reset(); move(1, 0, 40); move(1, 3, 10);
+    Expect(last_light && light_edges == 1,
+           "a qualified slash starts its held native input immediately");
+    InputPollFrame(reinterpret_cast<XrSpace>(100), kHead, epoch, time);
+    VirtualPadState repeated_attack{};
+    InputLatestPad(repeated_attack);
+    Expect((repeated_attack.buttons & kPadRightShoulder) && !repeated_attack.right_trigger,
+           "a duplicate tracked sample cannot truncate the attack press window");
+    move(1, 3, 30);
+    Expect(light_edges == 1 && last_light,
+           "duplicate sampling cannot restart or truncate the active attack");
+    move(1, 0, 40);
+    Expect(!last_light, "low-speed follow-through ends the attack hold");
+    reset(); move(1, 0, 40); move(1, 9, 25);
     Expect(heavy_edges == 1 && light_edges == 0,
            "fast physical slash reaches the native strong-attack trigger");
     reset(); move(1, 0, 40); move(1, 3, 30, false, true);
@@ -1035,7 +1206,7 @@ void PhysicalAttacks() {
     config.dominant_hand_left = true;
     reset(); move(0, 0, 40); move(1, 6, 30);
     Expect(light_edges == 0 && heavy_edges == 0, "off-hand motion cannot attack");
-    move(0, 6, 30);
+    move(0, 9, 30);
     Expect(heavy_edges == 1 && light_edges == 0, "left weapon hand can attack");
     config.dominant_hand_left = false;
     for (int gate = 0; gate < 7; ++gate) {
@@ -1163,6 +1334,122 @@ void UntargetedReachRefuses() {
     InputInvalidateFrame();
 }
 
+// A stale published selection must not arm a later reach: the store's
+// freshness window binds the gesture to a live native row, not a reused
+// handle from an earlier callback.
+void StaleSelectionNeverTaps() {
+    using namespace dsvr;
+    const auto saved = config;
+    const bool saved_left_pose = left_pose_valid;
+    const bool saved_right_pose = right_pose_valid;
+    left_pose_valid = right_pose_valid = true;
+    ResetRoomscaleTestControls();
+    config.reach_interact = true;
+    config.arm_ik_enabled = true;
+    config.arm_ik_log_only = false;
+    config.arm_ik_block_animation = true;
+    config.motion_attacks = true;
+    applied_hands_valid = true;
+    applied_hands_epoch = 1;
+    InputInvalidateFrame();
+    const auto base = reinterpret_cast<XrSpace>(100);
+    long long time = 6000000000LL;
+    const std::uint64_t epoch = 1;
+    VirtualPadState pad{};
+    const auto poll = [&] {
+        InputPublishHeadDirectedLocomotion({0, 0, 1}, {0, 0, 1}, 1);
+        InputPollFrame(base, kHead, epoch, time);
+        time += 11111111LL;
+        Expect(InputLatestPad(pad), "valid actions keep the pad available");
+    };
+    for (int n = 0; n < 40; ++n) {
+        grip_position[0][0] = grip_position[0][1] = grip_position[0][2] = 0.0f;
+        grip_position[1][0] = grip_position[1][1] = grip_position[1][2] = 0.0f;
+        poll();
+    }
+    // Publish a bound selection, then let it go stale before thrusting:
+    // the gate must refuse even though a selection was once bound.
+    InteractionSelection stale{};
+    stale.row_handle = 111u;
+    stale.object_handle = 0x21d4c9beu;
+    stale.generation = 1u;
+    stale.dummy_valid = true;
+    stale.dummy_pos[0] = 0.5f;
+    InputPublishInteractionSelection(stale, time / 1000000LL - 1000LL);
+    bool any_a = false;
+    for (int n = 0; n < 30; ++n) {
+        grip_position[0][2] -= 0.027f;
+        poll();
+        any_a = any_a || ((pad.buttons & kPadA) != 0);
+    }
+    Expect(!any_a, "a stale selection never taps native interact");
+    InputInvalidateInteractionSelection();
+    config = saved;
+    left_pose_valid = saved_left_pose;
+    right_pose_valid = saved_right_pose;
+    applied_hands_valid = false;
+    InputInvalidateFrame();
+}
+
+// A fresh bound selection still refuses the reach tap: the eligibility
+// producer (prompt/LOS/lifecycle) does not exist yet, so the gesture +
+// selection pair must not tap A until that producer binds. This pins the
+// current fail-closed posture; when the producer lands, this test flips
+// to expect the tap.
+void FreshSelectionStillRefusesWithoutEligibility() {
+    using namespace dsvr;
+    const auto saved = config;
+    const bool saved_left_pose = left_pose_valid;
+    const bool saved_right_pose = right_pose_valid;
+    left_pose_valid = right_pose_valid = true;
+    ResetRoomscaleTestControls();
+    config.reach_interact = true;
+    config.arm_ik_enabled = true;
+    config.arm_ik_log_only = false;
+    config.arm_ik_block_animation = true;
+    config.motion_attacks = true;
+    applied_hands_valid = true;
+    applied_hands_epoch = 1;
+    InputInvalidateFrame();
+    const auto base = reinterpret_cast<XrSpace>(100);
+    long long time = 6000000000LL;
+    const std::uint64_t epoch = 1;
+    VirtualPadState pad{};
+    const auto poll = [&] {
+        InputPublishHeadDirectedLocomotion({0, 0, 1}, {0, 0, 1}, 1);
+        InputPollFrame(base, kHead, epoch, time);
+        time += 11111111LL;
+        Expect(InputLatestPad(pad), "valid actions keep the pad available");
+    };
+    for (int n = 0; n < 40; ++n) {
+        grip_position[0][0] = grip_position[0][1] = grip_position[0][2] = 0.0f;
+        grip_position[1][0] = grip_position[1][1] = grip_position[1][2] = 0.0f;
+        poll();
+    }
+    // Publish a fresh bound selection on every frame, then thrust: the
+    // store is live but eligibility has no producer, so the gate refuses.
+    bool any_a = false;
+    for (int n = 0; n < 30; ++n) {
+        grip_position[0][2] -= 0.027f;
+        InteractionSelection fresh{};
+        fresh.row_handle = 111u;
+        fresh.object_handle = 0x21d4c9beu;
+        fresh.generation = 1u;
+        fresh.dummy_valid = true;
+        fresh.dummy_pos[0] = 0.5f;
+        InputPublishInteractionSelection(fresh, time / 1000000LL);
+        poll();
+        any_a = any_a || ((pad.buttons & kPadA) != 0);
+    }
+    Expect(!any_a, "a fresh selection without eligibility never taps native interact");
+    InputInvalidateInteractionSelection();
+    config = saved;
+    left_pose_valid = saved_left_pose;
+    right_pose_valid = saved_right_pose;
+    applied_hands_valid = false;
+    InputInvalidateFrame();
+}
+
 // A weapon swap, stance change or new player actor must not leave an armed
 // swing from the previous equipment alive on the pad, and must not kill the
 // bridge for the new equipment either.
@@ -1182,7 +1469,7 @@ void EquipmentReprime() {
     config.dominant_hand_left = false;
     config.swing_attack_speed_min = 2;
     config.swing_attack_heavy_min = 4.5f;
-    config.swing_attack_cooldown_ms = 500;
+    
     applied_hands_valid = true;
     applied_hands_epoch = 9;
     g_combat_status = {};
@@ -1214,26 +1501,26 @@ void EquipmentReprime() {
             last_heavy = heavy;
         }
     };
-    reset(); move(1, 0, 40); move(1, 6, 4);
+    reset(); move(1, 0, 40); move(1, 9, 4);
     g_combat_status.equipment.weapon_id[1] = 42;
-    move(1, 6, 30);
-    Expect(light_edges == 0 && heavy_edges == 0,
-           "a weapon swap mid-swing discards the armed physical swing");
-    reset(); move(1, 0, 40); move(1, 6, 30);
+    move(1, 9, 30);
+    Expect(light_edges == 0 && heavy_edges == 1,
+           "a weapon swap does not replay the already-started physical swing");
+    reset(); move(1, 0, 40); move(1, 9, 30);
     Expect(heavy_edges == 1 && light_edges == 0,
-           "the new weapon arms and fires a fresh physical swing");
-    reset(); move(1, 0, 40); move(1, 6, 4);
+           "the new weapon starts immediately after a new motion edge");
+    reset(); move(1, 0, 40); move(1, 9, 4);
     g_combat_status.equipment.native_stance = 1;
-    move(1, 6, 30);
-    Expect(light_edges == 0 && heavy_edges == 0,
-           "a stance change mid-swing discards the armed physical swing");
-    reset(); move(1, 0, 40); move(1, 6, 4);
+    move(1, 9, 30);
+    Expect(light_edges == 0 && heavy_edges == 1,
+           "a stance change does not replay the active swing");
+    reset(); move(1, 0, 40); move(1, 9, 4);
     g_combat_status.equipment.player = 0x2000;
-    move(1, 6, 30);
-    Expect(light_edges == 0 && heavy_edges == 0,
-           "a new player actor mid-swing discards the armed physical swing");
-    reset(); move(1, 0, 40); move(1, 6, 30);
-    Expect(heavy_edges == 1, "the bridge remains live after the identity reprime");
+    move(1, 9, 30);
+    Expect(light_edges == 0 && heavy_edges == 1,
+           "a new player actor does not replay the active swing");
+    reset(); move(1, 0, 40); move(1, 9, 30);
+    Expect(heavy_edges == 1, "the bridge remains live after identity reprime");
     config = saved;
     g_combat_status = saved_status;
     left_pose_valid = saved_left_pose;
@@ -1410,6 +1697,10 @@ void CapturedInput() {
 
 namespace dsvr {
 Config DiagnosticsCurrentConfig() { return config; }
+bool VrTraceActive() { return trace_active; }
+bool VrTraceSessionActive() { return trace_active; }
+std::uint64_t VrTraceCaptureId() { return trace_capture_id; }
+void VrTraceRecord(VrTraceEvent event) { trace_events.push_back(event); }
 CombatNativeStatus CombatNativeGetStatus() { return g_combat_status; }
 bool ArmIkLatestHands(ArmIkHands& out) {
     out = {};
@@ -1418,6 +1709,7 @@ bool ArmIkLatestHands(ArmIkHands& out) {
     out.side[0].valid = out.side[1].valid = applied_hands_valid;
     return applied_hands_valid;
 }
+void ArmIkDrainBenchHaptics() {}  // iteration 2: no bench in input tests
 bool DiagnosticsReloadConfig() { return true; }
 void DiagnosticsLogMarker() {}
 void XrToggleSanctuary() { ++theater_toggles; }
@@ -1436,7 +1728,17 @@ void ModMenuControllerInput(float x, float y, bool select, bool back,
     menu_prev = prev_panel;
     menu_next = next_panel;
 }
-void LogWrite(LogLevel, const char*, int, const char*, ...) {}
+void LogWrite(LogLevel, const char*, int, const char* fmt, ...) {
+    if (!fmt || std::strstr(fmt, "InputBridges:") == nullptr) return;
+    char message[1024]{};
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(message, sizeof(message), fmt, ap);
+    va_end(ap);
+    bridge_log_lines.push_back(message);
+}
+std::vector<std::string> BridgeLogLines() { return bridge_log_lines; }
+void BridgeLogClear() { bridge_log_lines.clear(); }
 } // namespace dsvr
 
 extern "C" {
@@ -1520,7 +1822,7 @@ XRAPI_ATTR XrResult XRAPI_CALL xrCreateReferenceSpace(XrSession, const XrReferen
     return XR_SUCCESS;
 }
 XRAPI_ATTR XrResult XRAPI_CALL xrSyncActions(XrSession, const XrActionsSyncInfo*) {
-    return XR_SUCCESS;
+    return sync_result;
 }
 XRAPI_ATTR XrResult XRAPI_CALL xrLocateSpace(XrSpace space, XrSpace, XrTime, XrSpaceLocation* out) {
     out->locationFlags = XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
@@ -1533,6 +1835,13 @@ XRAPI_ATTR XrResult XRAPI_CALL xrLocateSpace(XrSpace space, XrSpace, XrTime, XrS
     if (space == reinterpret_cast<XrSpace>(static_cast<std::uintptr_t>(201)) && !right_pose_valid)
         out->locationFlags &= ~XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
     out->pose.orientation = {q[0], q[1], q[2], q[3]};
+    if (out->next) {
+      auto* velocity = reinterpret_cast<XrSpaceVelocity*>(out->next);
+      velocity->velocityFlags = XR_SPACE_VELOCITY_LINEAR_VALID_BIT |
+                                XR_SPACE_VELOCITY_ANGULAR_VALID_BIT;
+      velocity->linearVelocity = {1.0f, 2.0f, 3.0f};
+      velocity->angularVelocity = {.1f, .2f, .3f};
+    }
     const int side = space == reinterpret_cast<XrSpace>(200) ? 0 : 1;
     if (!is_aim && space != view_space)
       out->pose.position = {grip_position[side][0], grip_position[side][1], grip_position[side][2]};
@@ -1588,7 +1897,101 @@ int main() {
     Expect(dsvr::InputAvailable(), "fake runtime attaches the actual input implementation");
     ProfileBindings();
     {
+      const auto saved = config;
+      config.vr_enabled = true;
+      config.xr_input_enabled = true;
+      config.motion_attacks = false;
+      config.arm_ik_enabled = false;
+      left_stick_x = 0.25f;
+      left_stick_y = 0;
+      right_pose_valid = left_pose_valid = true;
+      trace_events.clear();
+      trace_active = true;
+      trace_capture_id = 700;
+      const auto base = reinterpret_cast<XrSpace>(100);
+      dsvr::InputPollFrame(base, kHead, 5, 1000000000LL);
+      dsvr::InputPollFrame(base, kHead, 5, 1010000000LL);
+      auto count_event = [](const char* name) {
+        return std::count_if(trace_events.begin(), trace_events.end(),
+            [name](const auto& event) { return std::strcmp(event.event, name) == 0; });
+      };
+      Expect(count_event("virtual_pad_state") == 1,
+             "session capture emits one initial effective pad state");
+      Expect(count_event("hand_tracking") == 2,
+             "session capture emits one initial hand-validity baseline per hand");
+      left_stick_x = 0.75f;
+      dsvr::InputPollFrame(base, kHead, 5, 1020000000LL);
+      Expect(count_event("virtual_pad_state") == 2,
+             "effective virtual-pad changes emit exactly once");
+      dsvr::InputPollFrame(base, kHead, 5, 1030000000LL);
+      Expect(count_event("hand_tracking") == 2,
+             "steady hand samples stay below the 30 Hz cap");
+      dsvr::InputPollFrame(base, kHead, 5, 1033333340LL);
+      Expect(count_event("hand_tracking") == 4,
+             "valid tracked hands sample at the bounded cadence");
+      right_pose_valid = false;
+      right_trigger = 1;
+      dsvr::InputPollFrame(base, kHead, 5, 1035000000LL);
+      Expect(count_event("hand_tracking") == 5,
+             "tracking-loss transition is recorded immediately");
+      const auto loss = std::find_if(trace_events.rbegin(), trace_events.rend(),
+          [](const auto& event) {
+            return std::strcmp(event.event, "hand_tracking") == 0 &&
+                   event.values[0] == 1.0f;
+          });
+      Expect(loss != trace_events.rend() && (loss->flags & 3u) == 2u &&
+             loss->epoch == 5 && loss->predicted_ns == 1035000000LL &&
+             loss->values[14] == 2.0f,
+             "hand event preserves loss, held input, space epoch, and XR timestamp");
+      const auto left = std::find_if(trace_events.rbegin(), trace_events.rend(),
+          [](const auto& event) {
+            return std::strcmp(event.event, "hand_tracking") == 0 &&
+                   event.values[0] == 0.0f && (event.flags & 1u);
+          });
+      Expect(left != trace_events.rend() && (left->flags & 12u) == 12u &&
+             left->values[8] == 1.0f && left->values[11] == .1f, "hand sample preserves validated linear and angular velocities");
+          menu_capture = true;
+          dsvr::InputPollFrame(base, kHead, 5, 1040000000LL);
+          auto last_pad = [&]() {
+            return std::find_if(trace_events.rbegin(), trace_events.rend(), [](const auto& event) {
+              return std::strcmp(event.event, "virtual_pad_state") == 0;
+            });
+          };
+          auto cleared = last_pad();
+          Expect(cleared != trace_events.rend() && cleared->epoch == 5 &&
+                 cleared->predicted_ns == 1040000000LL && cleared->values[3] == 0,
+                 "menu-capture pad clear preserves the current XR frame identity");
+          menu_capture = false;
+          left_stick_x = 0;
+          right_trigger = 0;
+          dsvr::InputPollFrame(base, kHead, 5, 1050000000LL);
+          left_stick_x = 0.5f;
+          dsvr::InputPollFrame(base, kHead, 5, 1060000000LL);
+          sync_result = XR_SESSION_NOT_FOCUSED;
+          dsvr::InputPollFrame(base, kHead, 5, 1070000000LL);
+          cleared = last_pad();
+          Expect(cleared != trace_events.rend() && cleared->flags == 0 && cleared->epoch == 5 &&
+                 cleared->predicted_ns == 1070000000LL,
+                 "focus-loss pad clear preserves the current XR frame identity");
+          const auto invalid_hand = std::find_if(trace_events.rbegin(), trace_events.rend(),
+              [](const auto& event) {
+                return std::strcmp(event.event, "hand_tracking") == 0 && event.values[0] == 0.0f;
+              });
+          Expect(invalid_hand != trace_events.rend() && !(invalid_hand->flags & 1u) &&
+                 invalid_hand->epoch == 5 && invalid_hand->predicted_ns == 1070000000LL,
+                 "focus-loss hand invalidation preserves available XR frame identity");
+          sync_result = XR_SUCCESS;
+      trace_active = false;
+      right_pose_valid = true;
+      right_trigger = 0;
+      left_stick_x = 0;
+      dsvr::InputInvalidateFrame();
+      config = saved;
+    }
+    {
       const auto saved=config;
+      const auto saved_status=dsvr::g_combat_status;
+      const bool saved_pose=right_pose_valid;
       config.arm_ik_enabled=true;
       right_stick_value=right_trigger=right_squeeze=0;
       dsvr::InputInvalidateFrame();
@@ -1601,6 +2004,28 @@ int main() {
         Expect(dsvr::InputLatestPad(pad) && pad.right_trigger==255 && (pad.buttons&dsvr::kPadRightShoulder),
             "IK preference cannot disable gameplay combat buttons while native physical combat is unbound");
       }
+      config.arm_ik_log_only=false;
+      config.physical_attacks=config.physical_defence=false;
+      right_pose_valid=false;
+      right_primary=true;
+      for (bool dominant_left : {false, true}) {
+        config.dominant_hand_left=dominant_left;
+        for (int bound=0; bound<3; ++bound) {
+          dsvr::g_combat_status.physical_damage_bound=bound==1;
+          dsvr::g_combat_status.shield_contact_bound=bound==2;
+          dsvr::InputPollFrame(reinterpret_cast<XrSpace>(100),kHead,1,
+                              1020000000LL+bound*10000000LL);
+          dsvr::VirtualPadState pad{};
+          dsvr::InputLatestPad(pad);
+          Expect((pad.buttons & dsvr::kPadA) &&
+                 (pad.buttons & (dominant_left ? dsvr::kPadLeftShoulder : dsvr::kPadRightShoulder)) &&
+                 (dominant_left ? pad.left_trigger : pad.right_trigger)==255,
+                 "explicit interact, attack, block and parry survive pose loss and incomplete native binding");
+        }
+      }
+      dsvr::g_combat_status=saved_status;
+      right_pose_valid=saved_pose;
+      right_primary=false;
       config=saved;right_trigger=right_squeeze=0;right_stick_value=1;
       dsvr::InputInvalidateFrame();
     }
@@ -1653,10 +2078,14 @@ int main() {
     ReferenceChords();
     CalibratedRoomscale();
     PhysicalAttacks();
+    BridgeReadinessLog();
     EquipmentReprime();
     PhysicalDefence();
     UntargetedReachRefuses();
+    StaleSelectionNeverTaps();
+    FreshSelectionStillRefusesWithoutEligibility();
     DigitalDpad();
+    AnalogDodgeRequest();
         CapturedInput();
     DeferredBindingEdits();
     if (failures != 0) return 1;

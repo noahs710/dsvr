@@ -1,6 +1,7 @@
-// Legacy DXGI observer and shared D3D11 frame dispatch for Present/ReShade.
+// Normal DXGI render-host dispatch plus a dedicated, UI-only observer-menu hook.
+// The observer-menu detours never enter the XR/render-host dispatch path.
 //
-// Legacy path (fresh implementation, standard DXGI practice):
+// Normal DXGI host path (fresh implementation, standard DXGI practice):
 //  1. Create a throwaway D3D11 device + swapchain on a hidden window.
 //  2. Read Present (vtable slot 8) and ResizeBuffers (slot 13) addresses.
 //  3. MinHook those addresses; every game's swapchain shares the vtable.
@@ -56,6 +57,7 @@ std::atomic_flag g_fps_busy = ATOMIC_FLAG_INIT;
 // Desktop-only readiness never configures or publishes an XR render host.
 std::atomic<bool> g_desktop_ready{false};
 std::atomic<bool> g_desktop_notified{false};
+std::atomic<bool> g_observer_menu_only{false};
 RenderHost g_host;
 ReShadeBridge g_reshade_bridge{g_host};
 
@@ -80,11 +82,10 @@ void RecordHostRateEvidence() {
       // beside the effective target and runtime rate, per README policy.
       EffectiveRate rate{};
       XrEffectiveRate(rate);
-      DSVR_LOG("RateEvidence: game_fps=%.1f effective=%d runtime=%.3fHz "
-               "requested=%d source=%s (frames total %llu)",
-               game_fps, rate.effective_fps, rate.runtime_hz,
-               rate.requested_fps, rate.from_runtime ? "runtime" : "fallback",
-               f);
+      DSVR_LOG("RateEvidence: game_fps=%.1f observed_app=%d runtime=%.3fHz "
+               "headset=%.3fHz source=%s (frames total %llu)",
+               game_fps, rate.effective_fps, rate.runtime_hz, rate.display_hz,
+               rate.from_runtime ? "runtime" : "no-runtime-sample", f);
       RenderMetrics metrics{};
       if (XrRenderMetricsSnapshot(metrics))
         DSVR_LOG("VRPerformance: mode=mono frame=%llu cpu=%.3fms "
@@ -240,10 +241,38 @@ void DescribeOnce(IDXGISwapChain* swap) {
   }
 }
 
+// Render only the existing menu into this process's backbuffer. Closed menus do
+// not inspect the swapchain or acquire any D3D/DXGI references.
+void RenderObserverMenu(IDXGISwapChain* swap) {
+  if (!ModMenuVisible()) return;
+  DXGI_SWAP_CHAIN_DESC desc{};
+  if (FAILED(swap->GetDesc(&desc)) ||
+      !RenderWindowBelongsToProcess(desc.OutputWindow))
+    return;
+  ID3D11Texture2D* backbuffer = nullptr;
+  const HRESULT buffer_result = swap->GetBuffer(
+      0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&backbuffer));
+  if (FAILED(buffer_result) || !backbuffer) {
+    if (backbuffer) backbuffer->Release();
+    return;
+  }
+  ID3D11Device* device = nullptr;
+  backbuffer->GetDevice(&device);
+  if (device) {
+    ModMenuRenderTexture(device, backbuffer);
+    device->Release();
+  }
+  backbuffer->Release();
+}
+
 std::atomic<bool> g_sync_logged{false};
 
 HRESULT STDMETHODCALLTYPE PresentDetour(IDXGISwapChain* swap,
                                         UINT sync_interval, UINT flags) {
+  if (g_observer_menu_only.load(std::memory_order_acquire)) {
+    if (!(flags & DXGI_PRESENT_TEST)) RenderObserverMenu(swap);
+    return g_present_orig(swap, sync_interval, flags);
+  }
   if (g_desktop_ready.load(std::memory_order_acquire)) {
     // Observe a real, successful desktop Present only. No trace/menu/XR calls,
     // host selection, device capture, or retained COM reference on this path.
@@ -313,37 +342,30 @@ HRESULT STDMETHODCALLTYPE PresentDetour(IDXGISwapChain* swap,
 HRESULT STDMETHODCALLTYPE ResizeDetour(IDXGISwapChain* swap, UINT buffers,
                                        UINT width, UINT height,
                                        DXGI_FORMAT format, UINT flags) {
+  if (g_observer_menu_only.load(std::memory_order_acquire))
+    return g_resize_orig(swap, buffers, width, height, format, flags);
   DSVR_LOG("Render: ResizeBuffers %ux%u format=%d buffers=%u", width, height,
            (int)format, buffers);
   g_described.store(false);  // re-describe after a resize
   g_host.Invalidate(RenderHostKind::Present,
                     reinterpret_cast<std::uintptr_t>(swap));
-  return g_resize_orig(swap, buffers, width, height, format, flags);
+  const HRESULT result = g_resize_orig(swap, buffers, width, height, format, flags);
+  // A resize that returns S_OK but leaves the old size means the game renders
+  // with a viewport that no longer matches its backbuffer, which presents as a
+  // black window. The HRESULT plus the re-described size is the only evidence
+  // that separates "the game refused to resize" from "our copy used a stale size".
+  DXGI_SWAP_CHAIN_DESC after{};
+  const bool described = SUCCEEDED(swap->GetDesc(&after));
+  DSVR_LOG("Render: ResizeBuffers result=0x%8.8lX afterwards=%ux%u buffers=%u",
+           (unsigned long)result, described ? after.BufferDesc.Width : 0,
+           described ? after.BufferDesc.Height : 0,
+           described ? after.BufferCount : 0);
+  return result;
 }
 
-}  // namespace
-
-bool RenderHookInstall(bool vr_enabled, bool verbose, bool reshade_host) {
-  if (vr_enabled && !g_host.Configure(true,
-          reshade_host ? RenderHostKind::ReShade : RenderHostKind::Present,
-          {nullptr, CaptureHostDevice, PollHost, SubmitHostMono})) {
-    DSVR_LOG("Render: host disabled or already configured; no new owner");
-    return false;
-  }
-  g_desktop_notified.store(false, std::memory_order_release);
-  g_desktop_ready.store(!vr_enabled, std::memory_order_release);
-  g_verbose = verbose;
-  LARGE_INTEGER qpf{};
-  QueryPerformanceFrequency(&qpf);
-  g_qpf = qpf.QuadPart > 0 ? qpf.QuadPart : 1;
-  if (vr_enabled && reshade_host) {
-    g_reshade_bridge.SetReady(true);
-    DSVR_LOG("Render: ReShade D3D11 host selected; awaiting add-on callbacks; "
-             "no DXGI hooks, no automatic fallback (mono source only)");
-    return true;
-  }
-
-  // Hidden window for the throwaway swapchain.
+bool InstallPresentResizeHooks(const char* hook_kind) {
+  // This throwaway swapchain supplies only shared DXGI vtable addresses; its
+  // device is released here and is never captured or submitted to an XR host.
   HWND hwnd = CreateWindowExW(0, L"STATIC", L"DSVR-dummy", WS_POPUP, 0, 0, 64,
                               64, nullptr, nullptr, GetModuleHandleW(nullptr),
                               nullptr);
@@ -351,7 +373,6 @@ bool RenderHookInstall(bool vr_enabled, bool verbose, bool reshade_host) {
     DSVR_ERROR("Render: dummy window failed (%lu); no hook", GetLastError());
     return false;
   }
-
   DXGI_SWAP_CHAIN_DESC desc{};
   desc.BufferCount = 1;
   desc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -370,10 +391,12 @@ bool RenderHookInstall(bool vr_enabled, bool verbose, bool reshade_host) {
   if (FAILED(hr) || !swap) {
     DSVR_ERROR("Render: dummy device failed (hr=0x%08lx); no hook",
                (unsigned long)hr);
+    if (swap) swap->Release();
+    if (context) context->Release();
+    if (device) device->Release();
     DestroyWindow(hwnd);
     return false;
   }
-
   void** vtable = *(void***)swap;
   g_present_target = vtable[8];
   g_resize_target = vtable[13];
@@ -408,12 +431,54 @@ bool RenderHookInstall(bool vr_enabled, bool verbose, bool reshade_host) {
     return false;
   }
   DSVR_LOG("Render: Present+ResizeBuffers hook installed (%s, level=0x%x)",
-           vr_enabled ? "mono diagnostic host" : "desktop readiness only", (unsigned)level);
+           hook_kind, (unsigned)level);
+  return true;
+}
+
+}  // namespace
+
+bool RenderHookInstall(bool vr_enabled, bool verbose, bool reshade_host) {
+  g_observer_menu_only.store(false, std::memory_order_release);
+  if (vr_enabled && !g_host.Configure(true,
+          reshade_host ? RenderHostKind::ReShade : RenderHostKind::Present,
+          {nullptr, CaptureHostDevice, PollHost, SubmitHostMono})) {
+    DSVR_LOG("Render: host disabled or already configured; no new owner");
+    return false;
+  }
+  g_desktop_notified.store(false, std::memory_order_release);
+  g_desktop_ready.store(!vr_enabled, std::memory_order_release);
+  g_verbose = verbose;
+  LARGE_INTEGER qpf{};
+  QueryPerformanceFrequency(&qpf);
+  g_qpf = qpf.QuadPart > 0 ? qpf.QuadPart : 1;
+  if (vr_enabled && reshade_host) {
+    g_reshade_bridge.SetReady(true);
+    DSVR_LOG("Render: ReShade D3D11 host selected; awaiting add-on callbacks; "
+             "no DXGI hooks, no automatic fallback (mono source only)");
+    return true;
+  }
+
+  return InstallPresentResizeHooks(
+      vr_enabled ? "mono diagnostic host" : "desktop readiness only");
+}
+
+bool ObserverMenuHookInstall() {
+  // Publish mode before enabling detours so a racing Present cannot enter the
+  // normal XR/render-host dispatch path.
+  g_desktop_ready.store(false, std::memory_order_release);
+  g_observer_menu_only.store(true, std::memory_order_release);
+  if (!InstallPresentResizeHooks("observer-menu UI only")) {
+    g_observer_menu_only.store(false, std::memory_order_release);
+    return false;
+  }
+  DSVR_LOG("Render: observer-menu UI hook active; RenderHost unconfigured; "
+           "no XR device capture or frame dispatch");
   return true;
 }
 
 void RenderHookUninstall() {
   g_desktop_ready.store(false, std::memory_order_release);
+  g_observer_menu_only.store(false, std::memory_order_release);
   g_reshade_bridge.SetReady(false);
   if (g_present_target) {
     MH_DisableHook(g_present_target);

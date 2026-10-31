@@ -22,15 +22,13 @@ struct Config {
   // Startup-only host selection; never hot-switch an existing XR session.
   bool reshade_host = false;  // requires DSVR-ReShade.addon64 + API 18 host
   int render_scale_percent = 100;  // 50..200, eye-buffer resolution scale
-  // Requested game/XR rate; the user's build/test default is 90 FPS.
-  // Native limiter application and the runtime's actual display cadence are
-  // separately verified; this value alone does not change either one.
-  // Allowed: 60/72/90/120/144/240.
-  int frame_limit_fps = 90;
+  // Legacy frame-rate keys are retained only for in-memory compatibility.
+  // Config I/O ignores them; DSR-FPS-Unlock owns the HMD/monitor cap.
+  int frame_limit_fps = 0;
+  bool auto_frame_limit_fps = true;
   // When false, the desktop swapchain Present is skipped entirely: the
   // game still renders its backbuffer (which XR copies), but no desktop
-  // composition or vsync wait is paid. The native frame limiter, not
-  // Present, paces the game. Toggle live with F7 after editing.
+  // composition or vsync wait is paid. DSR-FPS-Unlock owns game pacing.
   bool desktop_present = true;
   bool comfort_vignette = true;
   float vignette_strength = 0.65f;  // 0..1
@@ -42,9 +40,17 @@ struct Config {
   bool snap_turn = false;
   int snap_turn_degrees = 45;  // 15..90
   bool smooth_turn = true;
-  float smooth_turn_speed_dps = 240.0f;  // 30..360 deg/s
+  float smooth_turn_speed_dps = 360.0f;  // 30..360 deg/s
   bool head_directed_move = true;        // legacy setting; false is ignored and logged on load
-  bool headlook_enabled = false;         // HMD orientation drives CameraMan
+  // Immersive first person is the default gameplay view: the HMD orientation
+  // drives CameraMan and the game image fills each eye. Theater (the flat
+  // virtual screen) is only used for menus, the title screen and cutscenes,
+  // or when gameplay_theater is turned on by hand (or with F8 in game).
+  bool headlook_enabled = true;          // HMD orientation drives CameraMan
+  // Manual theater during gameplay. Menus always use the canvas regardless;
+  // this only forces the flat screen while the game is in play. F8 toggles
+  // the live override without editing this file.
+  bool gameplay_theater = false;
   float mono_screen_fov_deg = 60.0f;     // virtual screen width (mono mode)
   bool sanctuary_override = false;     // spatial canvas for any menu (F8)
   float menu_distance_m = 2.75f;        // 1..4 metres, independent of world scale
@@ -58,6 +64,10 @@ struct Config {
   // Alternating-eye mode (T4, experimental). Refused unless stereo is
   // active; see afr_policy.h.
   bool afr_enabled = false;
+  // Eye-buffer anti-aliasing: 0 = off, 1 = FXAA post pass, 2 = MSAA 2x,
+  // 3 = MSAA 4x (default). MSAA counts fall back to 1 sample + FXAA pass
+  // when the runtime lacks support. Restart required (swapchain shape).
+  int aa_mode = 3;
 
   // [controls]
   bool dominant_hand_left = false;       // true = left hand holds the weapon
@@ -162,7 +172,11 @@ struct Config {
   // records from arms (slot 4), so this clears part types only and never a
   // bone transform. The weapon lives on the primary render model, which this
   // filter never touches.
-  bool hide_torso_and_legs = false;
+  // Hidden by default since the public test build: the first-person camera is
+  // the tracked eye, so a native torso/leg shell in front of it is occlusion,
+  // not embodiment. Arms and weapon stay visible; the IK body still drives
+  // them. "Show all of it" in Setup (or the mod-menu tickbox) brings it back.
+  bool hide_torso_and_legs = true;
   bool forearm_only = false;
   bool hide_ui_in_vr = false;
   // The local player owns two render models (presence.cpp): the primary at
@@ -173,13 +187,11 @@ struct Config {
   // and the body stays -- then the models are the other way round.
   bool hide_second_model = true;
   // Which native measurement anchors the automatic world/avatar fit.
-  // "head" (default) sizes the world so the native Head bone lands on the
-  // calibrated view height: the first-person camera sits in the avatar's own
-  // head and the body occupies the space the wearer's body does. "arm" sizes
-  // by measured physical reach, so the hands match exactly and the head may
-  // sit off the native head bone. Both convert the whole world/avatar with one
-  // ratio; neither scales a bone base or collider, and neither independently
-  // resizes the skinned mesh (that still needs a verified render owner).
+  // "head" (default) is the only anchor: the native Head bone lands on the
+  // calibrated view height, and the measured arm reach constrains the same
+  // fit (see ResolveCalibrationMapping) so a long- or short-armed avatar
+  // cannot pull the head off the bone. Legacy "arm" files still parse but
+  // now yield the same combined fit; there is no separate hand-only mode.
   std::string embodiment_fit = "head";
 
   // [combat]
@@ -215,20 +227,20 @@ struct Config {
   int rehit_window_ms = 280;       // per-enemy minimum ms between IK hits
   // Opt-in native attack-input preview, not a physical-damage binding.
   // Requires a fresh committed weapon-hand IK pose with animation ownership.
-  // Rest then sustained head-relative blade speed requests one native attack;
-  // speed selects light/strong. Thrust bars are 0.75x when thrusts are enabled.
-  // Native animation windows, collision and outcomes remain unqualified.
+  // Crossing the head-relative start-speed bar requests a native attack now;
+  // keep it held until blade speed enters the stop band. Thrust bars are 0.75x
+  // when enabled. Native animation/collision outcomes remain unqualified.
   // Keep manual combat controls and leave this off until the live gate passes.
   bool physical_attacks = false;
   float swing_attack_speed_min = 2.0f;  // m/s tip speed for a light slash
   float swing_attack_heavy_min = 4.5f;  // m/s tip speed for a strong slash
-  int swing_attack_cooldown_ms = 500;   // ms before the same hand attacks again
+
   // Physical defence bridge: the mirror of the attack bridge for the shield
   // hand. A raised, still hand holds native block (LB); a qualified flick
   // taps native parry (LT). Same qualification limits:
   // native guard windows, chip damage and parry judgement stay unqualified.
   bool physical_defence = false;
-  int guard_settle_ms = 120;             // ms a raised hand must stay still
+  int guard_settle_ms = 0;               // ms of stillness required first (0 = the raise itself)
   float guard_flick_speed_min = 2.2f;    // m/s hand speed that reads as a flick
   int guard_parry_press_ms = 90;         // ms the parry tap is held
   int guard_parry_cooldown_ms = 700;     // ms before the same hand may parry again
@@ -242,6 +254,17 @@ struct Config {
   // Weapon/shield no-clip guard: minimum kept separation between the two
   // solved hand poses (0 = off). Flags when the blades would interpenetrate.
   float weapon_separation_min_m = 0.0f;
+  // Slice 1 weight/torque hooks (offline tuning, hooked not bound):
+  // per-weapon mass/inertia table path (EquipParam transcription, see
+  // weapon_weight_math.h), torque profile shaping how fast tip speed can
+  // rise (daggers ~1:1, great weapons lag and need commitment), halfsword
+  // envelope for the support-hand grab, deflect pulse shape. Weight gates
+  // energy, energy gates scale; weight never edits damage directly.
+  std::string weapon_mass_table_path;  // empty = equip-load fallback
+  float torque_response = 1.0f;  // 0.2..3.0 energy accumulation rate
+  float halfsword_envelope_m = 0.15f;  // 0.05..0.40 support-grab distance
+  float deflect_amplitude = 0.5f;  // 0..1 deflect pulse strength
+  int deflect_duration_ms = 30;  // 10..120 deflect pulse length
 
   // [diagnostics]
   bool verbose_logging = false;
@@ -251,6 +274,12 @@ struct Config {
   // Startup-only LAB observer domain: native contact + Step only, no renderer
   // probes. Broad constant-upload tracing overwhelmed the first B1 capture.
   bool combat_trace_only = false;
+  // Startup-only autonomous telemetry in the normal VR + LAB path. This
+  // records effective input/hand samples; it does not change gameplay behavior.
+  bool autonomous_session_capture = false;
+  // Launcher UI only: developer mode reveals the tuning internals. The
+  // default view is simplified; Ctrl+D flips this and it persists.
+  bool dev_mode = false;
 
   // [safety]
   bool offline_only_ack = false;  // installer sets this after showing warning
@@ -258,6 +287,43 @@ struct Config {
   // recorded). Only Setup changes this value; menu saves preserve it.
   std::string motion_blur_original;
 };
+
+// Autonomous telemetry needs normal VR and the LAB-only native observer.
+// XR input may be unavailable; that capability gap is recorded in the session.
+inline bool ConfigAutonomousSessionCaptureAllowed(const Config& c,
+                                                  bool lab_build) {
+  return c.autonomous_session_capture && lab_build && c.vr_enabled &&
+      !c.observer_only && !c.combat_trace_only;
+}
+
+// Factory-safe defaults: comfortable rendering, safe observer behavior and
+// qualified-only feature defaults. Frame rate is never a setup preset.
+inline Config FactorySafeDefaults() {
+  Config c{};
+  c.vr_enabled = true;
+  c.render_scale_percent = 100;  c.desktop_present = true;
+  c.comfort_vignette = false;
+  c.vignette_strength = 0.65f;
+  c.fov_scale = 1.0f;
+  c.snap_turn = false;
+  c.snap_turn_degrees = 45;
+  c.smooth_turn = true;
+  c.smooth_turn_speed_dps = 360.0f;
+  c.head_directed_move = true;
+  c.headlook_enabled = true;
+  c.mono_screen_fov_deg = 60.0f;
+  c.play_style = "standing";
+  c.movement_orientation = MovementOrientation::Head;
+  c.movement_controller = MovementController::NonDominant;
+  c.embodiment_fit = "head";
+  c.motion_attacks = true;
+  c.haptics = true;
+  c.xr_input_enabled = true;
+  c.hide_second_model = true;
+  c.hide_head = true;
+  c.hide_torso_and_legs = true;
+  return c;
+}
 
 // Effective process config only; never rewrites the requested on-disk settings.
 // Callers must preserve the startup observer_only value when reloading.
@@ -275,7 +341,12 @@ inline void ConfigRestrictObserver(Config& c) {
   c.sanctuary_override = false;
 }
 
-// Load TOML (subset) into `out`. Missing file -> defaults + false.
+// Last-known headset sidecar (DSVR.toml.headset-hz next to the toml). The
+// game records the shipped FB refresh rate on exit; the launcher reads it
+// without probing any runtime. Absent/unparsable = 0 (unknown). Zero and
+// negative rates are never persisted: unknown must not overwrite knowledge.
+int ReadLastHeadsetHz(const wchar_t* sidecar_path);
+bool WriteLastHeadsetHz(const wchar_t* sidecar_path, int hz);
 bool ConfigLoad(const wchar_t* toml_path, Config& out);
 // Write `cfg` as a fully commented DSVR.toml (used by installer/GUI/core).
 bool ConfigSave(const wchar_t* toml_path, const Config& cfg);

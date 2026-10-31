@@ -53,10 +53,9 @@ int main() {
   check(!IsParryCandidate(1.0f));
   check(!IsParryCandidate(NAN));
 
-  // Two hands need proximity AND the squeeze held.
-  check(IsTwoHanded({0, 1.2f, -0.4f}, {0.05f, 1.2f, -0.4f}, true));
-  check(!IsTwoHanded({0, 1.2f, -0.4f}, {0.05f, 1.2f, -0.4f}, false));
-  check(!IsTwoHanded({0, 1.2f, -0.4f}, {0.5f, 1.2f, -0.4f}, true));
+  // Two-hand point proxy retired: the committed blade-segment envelope
+  // (SupportGrip, combat_contact.h) replaces the 14 cm grip-point rule.
+  // Covered by test_combat_contact segment-envelope checks.
 
   std::printf("hand math: %d failures\n", failures);
   return failures ? 1 : 0;

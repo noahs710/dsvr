@@ -170,6 +170,9 @@ int main(int argc, char** argv) {
   Put(records, 0, generated_face_resource);
   const auto untouched = records;
   config.vr_enabled = config.headlook_enabled = config.hide_head = true;
+  // The fixture below checks head geometry only; the shipped default now also
+  // hides torso and legs, which would mask records this test must leave alone.
+  config.hide_torso_and_legs = false;
   config.arm_ik_enabled = config.xr_input_enabled = false;
   signature_ok = false; CHECK(!dsvr::BodyVisibilityHookInstall(true)); signature_ok = true;
   CHECK(!dsvr::BodyVisibilityHookInstall(false));
@@ -201,8 +204,10 @@ int main(int argc, char** argv) {
   records=untouched;
   queue_callback(nullptr, id, records.data(), 13); CHECK(MaskedCorrectly(untouched));
 
-  // The next native update restores unfiltered geometry on policy transitions.
-  theater = true; Tick(); CHECK(copied == untouched && queued_source == records.data());
+  // Policy transitions restore unfiltered geometry on the next native update.
+  // No menu-canvas gate: the filter follows the rows even with the menu open,
+  // so unticking restores geometry immediately instead of on menu close.
+  theater = true; Tick(); CHECK(MaskedCorrectly(untouched));
   theater = false; Tick(); CHECK(MaskedCorrectly(untouched));
   running = false; Tick(); CHECK(copied == untouched); running = true; Tick(); CHECK(MaskedCorrectly(untouched));
   config.observer_only = true; Tick(); CHECK(copied == untouched); config.observer_only = false; Tick();

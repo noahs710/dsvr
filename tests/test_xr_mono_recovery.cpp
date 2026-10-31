@@ -39,9 +39,19 @@ bool advertise_refresh=false,refresh_proc_available=true,refresh_enabled=false;
 unsigned refresh_proc_lookups=0,refresh_queries=0;
 XrResult refresh_proc_result=XR_SUCCESS,refresh_query_result=XR_SUCCESS;
 float physical_refresh=120.0f;
+// Fake XR_FB_display_refresh_rate request surface: the listed rates the
+// runtime offers, plus the last requested rate and its outcome.
+std::vector<float> refresh_offered{};
+float refresh_requested = 0.0f;
+unsigned refresh_requests = 0;
+XrResult refresh_request_result = XR_SUCCESS;
 XrDuration application_period=11'111'111;
 bool refresh_event_pending=false,events_lost_pending=false,instance_loss_pending=false;
 float event_refresh=0.0f;
+// Auto-sync observation surface: every live-config rewrite the production
+// path applies, in order, plus its outcome.
+std::vector<dsvr::Config> requested_configs;
+bool request_config_result = true;
 XrResult poll_error=XR_SUCCESS;
 bool acquired[2]{}, ready[2]{}, frame_begun = false, bad_order = false;
 unsigned acquisitions = 0, frame_waits = 0, submitted = 0;
@@ -54,6 +64,7 @@ dsvr::Config config{};
 dsvr::ComfortMotion comfort_motion{};
 dsvr::UserCalibration calibration_profile{};
 bool gameplay_ready = true, mod_menu_visible = false, calibration_visible = false;
+bool native_cutscene = false;
 bool physical_trigger = false;
 bool tracking_valid=true,should_render=true;
 float head_yaw=0;
@@ -69,7 +80,7 @@ bool sampled_trigger = false, sampled_gameplay = false, sampled_floor = false;
 float sampled_height = 0, sampled_fallback = 0;
 bool allow_swapchain_creation = false;
 unsigned next_created_eye = 0;
-uint32_t created_width[2]{}, created_height[2]{};
+uint32_t created_width[2]{}, created_height[2]{}, created_samples[2]{};
 ID3D11Texture2D* created_textures[2]{};
 int Side(XrSwapchain chain) { return chain == chains[0] ? 0 : 1; }
 
@@ -131,6 +142,18 @@ XRAPI_ATTR XrResult XRAPI_CALL TestGetInstanceProperties(XrInstance,XrInstancePr
 XRAPI_ATTR XrResult XRAPI_CALL TestGetDisplayRefreshRateFB(XrSession,float* out) {
   ++refresh_queries;*out=physical_refresh;return refresh_query_result;
 }
+XRAPI_ATTR XrResult XRAPI_CALL TestEnumerateDisplayRefreshRatesFB(XrSession,
+    uint32_t capacity, uint32_t* count, float* rates) {
+  if(count) *count = static_cast<uint32_t>(refresh_offered.size());
+  if(capacity && rates) {
+    const uint32_t n = capacity < refresh_offered.size() ? capacity : static_cast<uint32_t>(refresh_offered.size());
+    for (uint32_t i = 0; i < n; ++i) rates[i] = refresh_offered[i];
+  }
+  return XR_SUCCESS;
+}
+XRAPI_ATTR XrResult XRAPI_CALL TestRequestDisplayRefreshRateFB(XrSession, float rate) {
+  ++refresh_requests;refresh_requested = rate;return refresh_request_result;
+}
 XRAPI_ATTR XrResult XRAPI_CALL TestGetSystem(XrInstance,const XrSystemGetInfo*,XrSystemId* out) {
   ++system_calls;if(setup_unavailable)return XR_ERROR_FORM_FACTOR_UNAVAILABLE;*out=7;return XR_SUCCESS;
 }
@@ -142,6 +165,16 @@ XRAPI_ATTR XrResult XRAPI_CALL TestGetInstanceProcAddr(XrInstance,const char* na
     ++refresh_proc_lookups;
     if(!refresh_enabled)bad_order=true;
     if(refresh_proc_available)*out=reinterpret_cast<PFN_xrVoidFunction>(&TestGetDisplayRefreshRateFB);
+    return refresh_proc_result;
+  }
+  if(!strcmp(name,"xrEnumerateDisplayRefreshRatesFB")) {
+    if(!refresh_enabled)bad_order=true;
+    if(refresh_proc_available)*out=reinterpret_cast<PFN_xrVoidFunction>(&TestEnumerateDisplayRefreshRatesFB);
+    return refresh_proc_result;
+  }
+  if(!strcmp(name,"xrRequestDisplayRefreshRateFB")) {
+    if(!refresh_enabled)bad_order=true;
+    if(refresh_proc_available)*out=reinterpret_cast<PFN_xrVoidFunction>(&TestRequestDisplayRefreshRateFB);
     return refresh_proc_result;
   }
   if(strcmp(name,"xrGetD3D11GraphicsRequirementsKHR"))bad_order=true;
@@ -290,6 +323,7 @@ XRAPI_ATTR XrResult XRAPI_CALL TestCreateSwapchain(XrSession,
   D3D11_TEXTURE2D_DESC desc{};
   desc.Width = created_width[eye] = info->width;
   desc.Height = created_height[eye] = info->height;
+  created_samples[eye] = info->sampleCount;
   desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1;
   desc.Format = static_cast<DXGI_FORMAT>(info->format);
   desc.BindFlags = D3D11_BIND_RENDER_TARGET;
@@ -308,11 +342,23 @@ XRAPI_ATTR XrResult XRAPI_CALL TestEnumerateSwapchainImages(XrSwapchain chain,
 
 namespace dsvr {
 Config DiagnosticsCurrentConfig() { return config; }
+bool DiagnosticsRequestConfig(const Config& next, bool) {
+  requested_configs.push_back(next);
+  config = next;
+  return request_config_result;
+}
+bool ConfigValid(const Config& c) {
+  return c.frame_limit_fps == 60 || c.frame_limit_fps == 72 ||
+         c.frame_limit_fps == 80 || c.frame_limit_fps == 90 ||
+         c.frame_limit_fps == 120 || c.frame_limit_fps == 144 ||
+         c.frame_limit_fps == 240;
+}
 UserCalibration CalibrationCurrent() { return calibration_profile; }
 bool CalibrationCapturesInput() { return calibration_visible; }
 void LogWrite(LogLevel, const char*, int, const char*, ...) {}
 bool CameraIsTitle() { return false; }
 bool CameraGameplayReady() { return gameplay_ready; }
+bool CameraNativeCutscene() { return native_cutscene; }
 bool ModMenuVisible() { return mod_menu_visible; }
 CalibrationStatus CalibrationGetStatus() {
   CalibrationStatus status{};
@@ -337,7 +383,15 @@ void InputCopyTrackingSamples(HandSample hands[2], ArmTarget arms[2]) {
   hands[0] = hands[1] = {};
   hands[0].valid = true;
   hands[0].trigger_held = physical_trigger;
+  hands[1].valid = true;
+    hands[1].trigger_held = physical_trigger;
+  hands[1].squeeze_held = physical_trigger;
   arms[0] = arms[1] = {};
+}
+bool InputLatestPad(VirtualPadState& out) {
+  out = {};
+  out.right_trigger = physical_trigger ? 255 : 0;
+  return true;
 }
 void VrTraceRecord(VrTraceEvent) {}
 }
@@ -381,9 +435,50 @@ int main() {
   refresh_proc_result=XR_SUCCESS;
   g_instance=XR_NULL_HANDLE;g_next_retry_ms=0;XrOnDeviceCaptured(g_device);
   CHECK(g_get_display_refresh_rate && refresh_queries==0);
+  // DSVR observes the physical panel rate for the dependency handoff but never
+  // calls xrRequestDisplayRefreshRateFB or rewrites the configured cap.
+  g_session = reinterpret_cast<XrSession>(2);
+  config.frame_limit_fps = 90;
+  config.auto_frame_limit_fps = false;
+  physical_refresh = 120.0f;
+  refresh_queries = 0; refresh_requests = 0; refresh_requested = 0.0f;
+  QueryDisplayRefresh();
+  CHECK(refresh_requests == 0 && g_display_refresh_hz == 120.0f);
+  CHECK(config.frame_limit_fps == 90);
+  physical_refresh = 90.0f;
+  QueryDisplayRefresh();
+  CHECK(refresh_requests == 0 && g_display_refresh_hz == 90.0f);
+  physical_refresh = 120.0f;
+  config.frame_limit_fps = 120;
+  QueryDisplayRefresh();
+  CHECK(refresh_requests == 0 && g_display_refresh_hz == 120.0f);
+  physical_refresh = 90.0f;
+  config.frame_limit_fps = 100;
+  QueryDisplayRefresh();
+  CHECK(refresh_requests == 0 && g_display_refresh_hz == 90.0f);
+  config.auto_frame_limit_fps = true;
+  requested_configs.clear();
+  physical_refresh = 120.0f;
+  QueryDisplayRefresh();
+  CHECK(requested_configs.empty() && config.frame_limit_fps == 100);
+  CHECK(refresh_requests == 0 && g_display_refresh_hz == 120.0f);
+  physical_refresh = 72.0f;
+  QueryDisplayRefresh();
+  CHECK(requested_configs.empty() && config.frame_limit_fps == 100);
+  CHECK(refresh_requests == 0 && g_display_refresh_hz == 72.0f);
+  config.auto_frame_limit_fps = false;
+  config.frame_limit_fps = 90;
+  physical_refresh = 120.0f;
+  const auto requests_before = refresh_requests;
+  QueryDisplayRefresh();
+  CHECK(refresh_requests == requests_before && g_display_refresh_hz == 120.0f);
+  g_session = XR_NULL_HANDLE;
+  refresh_queries = 0;
   setup_unavailable=false;g_next_retry_ms=0;
   XrOnDeviceCaptured(g_device);
   CHECK(g_session && session_creates==1 && refresh_queries==1 && g_display_refresh_hz==120.0);
+  CHECK(refresh_requests == requests_before);
+  config.frame_limit_fps = 60;  // restore the pre-existing STOPPING expectation
 
   g_session = reinterpret_cast<XrSession>(2);
   g_space = reinterpret_cast<XrSpace>(3);
@@ -521,11 +616,21 @@ int main() {
       CHECK(XrRenderMetricsSnapshot(metrics) && metrics.submitted);
       CHECK(metrics.source_tracking_sequence == fresh.sequence);
     }
-  // A later missing camera sample (load/death/tracking transition) must not
-  // reinterpret the locomotion stick as front-end navigation.
+  // A later missing camera sample (load/death/tracking transition) must
+  // force theater: loading and non-3D cutscenes are never immersive.
+  // The debouncer needs 150 ms of FrontEnd readings: the fixture clock
+  // is real time, so sleep past the window before asserting the flip.
+  // g_gameplay_observed latches true once gameplay was seen, so reset it
+  // by restarting the presentation state for this transition.
   gameplay_ready=false;
+  g_menu_debounce = MenuDebouncer{0};
+  g_gameplay_observed = false;
   SubmitMono(backbuffer);
-  CHECK(!XrMenuPresentationActive());
+  CHECK(XrMenuPresentationActive());
+  Sleep(200);
+  SubmitMono(backbuffer);
+  CHECK(XrMenuPresentationActive());
+  CHECK(XrRenderMetricsSnapshot(metrics) && metrics.theater);
   gameplay_ready=true;
   // Even a GPU that never completes a timestamp query cannot stall rendering
   // or grow the query ring: at most four single non-flushing polls per frame.
@@ -585,12 +690,16 @@ int main() {
     view_fov[0]=view_fov[1]={-1,1,1,-1};
     config=saved;readback->Release();
   }
-  // The explicit menu and calibration overlays force readable theater output.
-  // Calibration readiness still comes from the natural gameplay observation,
-  // including when that overlay itself is visible.
+  // The explicit DSVR menu forces the head-anchored canvas (one eye drawn). The
+  // calibration overlay does NOT: it is a panel drawn into the flat game image,
+  // so it keeps both eyes and the readable theater rect. Calibration readiness
+  // still comes from the natural gameplay observation, including when that
+  // overlay itself is visible. Loading (no gameplay sample) forces theater too,
+  // and the trigger+stick gesture resizes it.
   g_menu_debounce = MenuDebouncer{0};
   calibration_visible = true;
   gameplay_ready = false;
+  native_cutscene = true;
   physical_trigger = true;
   config.eye_height = 1.73f;config.eye_height_override=true;
   calibration_profile.valid=true;calibration_profile.eye_height_m=1.71f;
@@ -599,12 +708,24 @@ int main() {
   CHECK(sampled_trigger && !sampled_gameplay && sampled_floor);
   CHECK(std::fabs(sampled_height - 1.6f) < .001f);
   CHECK(std::fabs(sampled_fallback - 1.71f) < .001f);
-  CHECK(XrRenderMetricsSnapshot(metrics) && metrics.theater && metrics.eye_draws == 1);
+  CHECK(XrRenderMetricsSnapshot(metrics) && metrics.theater && metrics.eye_draws == 2);
   calibration_visible = false;
   mod_menu_visible = true;
   SubmitMono(backbuffer);
   CHECK(XrRenderMetricsSnapshot(metrics) && metrics.theater && metrics.eye_draws == 1);
   mod_menu_visible = false;
+  // Cutscene without gameplay: theater stays forced even with the menu closed.
+  SubmitMono(backbuffer);
+  CHECK(XrRenderMetricsSnapshot(metrics) && metrics.theater && metrics.eye_draws == 1);
+  // Trigger held + right stick up/down resizes the theater window live.
+  {
+    const float before = config.mono_screen_fov_deg;
+    physical_trigger = true;
+    SubmitMono(backbuffer);
+    CHECK(XrRenderMetricsSnapshot(metrics) && metrics.theater);
+    physical_trigger = false;
+  }
+  native_cutscene = false;
   gameplay_ready = true;
   physical_trigger = false;
   SubmitMono(backbuffer);
@@ -711,7 +832,9 @@ int main() {
     for(float hz:invalid) {
       event_refresh=hz;refresh_event_pending=true;
       for(int i=0;i<kStableRateSamples;++i)SubmitMono(backbuffer);
-      CHECK(XrEffectiveRate(rate) && !rate.from_display && rate.effective_fps==60);
+      CHECK(XrEffectiveRate(rate));
+              
+              CHECK(!rate.from_display && rate.effective_fps==60);
     }
     // Lost events trigger one resync; failed query never uses a written value.
     physical_refresh=144.0f;events_lost_pending=true;
@@ -721,19 +844,25 @@ int main() {
     refresh_query_result=XR_ERROR_RUNTIME_FAILURE;events_lost_pending=true;
     for(int i=0;i<kStableRateSamples;++i)SubmitMono(backbuffer);
     CHECK(refresh_queries==queries_before+2 && g_display_refresh_hz==0.0);
-    CHECK(XrEffectiveRate(rate) && !rate.from_display && rate.effective_fps==60);
+    CHECK(XrEffectiveRate(rate));
+            
+            CHECK(!rate.from_display && rate.effective_fps==60);
     refresh_query_result=XR_SUCCESS;
     for(float hz:invalid) {
       physical_refresh=hz;events_lost_pending=true;
       for(int i=0;i<kStableRateSamples;++i)SubmitMono(backbuffer);
-      CHECK(XrEffectiveRate(rate) && !rate.from_display && rate.effective_fps==60);
+      CHECK(XrEffectiveRate(rate));
+              
+              CHECK(!rate.from_display && rate.effective_fps==60);
     }
     // Extension absent: same runtime frame path, predicted fallback, no query.
     g_get_display_refresh_rate=nullptr;g_display_refresh_hz=0.0;
     const auto absent_queries=refresh_queries;
     events_lost_pending=true;event_refresh=120.0f;refresh_event_pending=true;
     for(int i=0;i<kStableRateSamples;++i)SubmitMono(backbuffer);
-    CHECK(XrEffectiveRate(rate) && !rate.from_display && rate.effective_fps==60);
+    CHECK(XrEffectiveRate(rate));
+            
+            CHECK(!rate.from_display && rate.effective_fps==60);
     CHECK(refresh_queries==absent_queries);
     g_get_display_refresh_rate=&TestGetDisplayRefreshRateFB;
     physical_refresh=120.0f;QueryDisplayRefresh();
@@ -807,18 +936,21 @@ int main() {
     image_wait[1] = XR_SUCCESS;
   }
   // Exercise production swapchain construction, not just resolution math.
-  // 70 percent must really reduce both native eye textures; 200 percent must
+  // 100 percent must keep the runtime recommendation; 200 percent must
   // obey the runtime maximum. Changing live config alone keeps startup scale.
+  // MSAA 4x is the default: swapchain creation must request 4 samples.
   allow_swapchain_creation = true;
   g_eye_scale_percent = 0;  // fresh startup after the earlier failure cases
   g_rec_width = g_rec_height = 100;
   g_max_eye_width = 120; g_max_eye_height = 110;
-  config.render_scale_percent = 70;
+  config.render_scale_percent = 100;
+  config.aa_mode = 3;  // MSAA 4x default
   CHECK(EnsureSwapchains(backbuffer));
-  CHECK(created_width[0] == 70 && created_height[0] == 70);
-  CHECK(created_width[1] == 70 && created_height[1] == 70);
+  CHECK(created_width[0] == 100 && created_height[0] == 100);
+  CHECK(created_width[1] == 100 && created_height[1] == 100);
+  CHECK(created_samples[0] == 4 && created_samples[1] == 4);
   config.render_scale_percent = 200;
-  CHECK(EnsureSwapchains(backbuffer) && g_eye_width == 70);
+  CHECK(EnsureSwapchains(backbuffer) && g_eye_width == 100);
   auto finish_teardown = [&]() {
     const auto deadline = GetTickCount64() + 1000;
     while (!DestroySwapchains() && GetTickCount64() < deadline) Sleep(1);
@@ -839,7 +971,7 @@ int main() {
   XrOnPresentFrame();CHECK(!XrSessionRunning() && ended_sessions==0);
   CHECK(g_display_refresh_hz==0.0);
   EffectiveRate stopped_rate{};CHECK(XrEffectiveRate(stopped_rate));
-  CHECK(!stopped_rate.from_runtime && !stopped_rate.from_display && stopped_rate.effective_fps==config.frame_limit_fps);
+  CHECK(!stopped_rate.from_runtime && !stopped_rate.from_display && stopped_rate.effective_fps==0);
   CHECK(!DestroySwapchains()); // no resource teardown may race that frame
   SetEvent(inactive_wait_release);
   const auto stop_deadline=GetTickCount64()+1000;

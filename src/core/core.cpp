@@ -12,7 +12,7 @@
 #include "../common/version.h"
 #include "camhook.h"
 #include "core.h"
-#include "frame_rate.h"
+
 #include "crash.h"
 #include "diagnostics.h"
 #include "gate.h"
@@ -58,14 +58,24 @@ void dsvr::CoreOnRenderFrame() {
   const auto& config = g_startup_config;
   CalibrationStart(ConfigPathNextToExe() + L".calibration");
   WeaponGripsInitialize(GameExeDirectory() + L"\\DSVR-grips.txt");
+  // Slice 3: offline mass/inertia table (EquipParam transcription). Empty
+  // path or missing file = empty table; the bench falls back to the
+  // torque_response config. Never blocks startup.
+  if (!config.weapon_mass_table_path.empty())
+    WeaponMassLoad(WideFromUtf8(config.weapon_mass_table_path));
   CameraHookInstall(config.vr_enabled);
   PresenceHookInstall(config.vr_enabled);
   BodyVisibilityHookInstall(config.vr_enabled);
   XInputBridgeInstall(config.vr_enabled && config.xr_input_enabled);
-  FrameRateHookInstall(config.vr_enabled);
+  
   NativeUiHookInstall(config.vr_enabled);
   MotionBlurHookInstall(true);
-  VrTraceInstall(config.vr_enabled && config.verbose_logging);
+  if (config.autonomous_session_capture) {
+    if (!VrTraceInstallSession())
+      DSVR_WARN("Core: autonomous session hooks are unavailable; no session will be recorded");
+  } else {
+    VrTraceInstall(config.vr_enabled && config.verbose_logging);
+  }
   DSVR_LOG("Core: gameplay adapters activated on accepted render frame");
 }
 
@@ -79,6 +89,18 @@ void dsvr::CoreOnDesktopFrame() {
   const bool blur = MotionBlurHookInstall(true);
   DSVR_LOG("Core: desktop frame ready; motion_blur=%d; XR/gameplay remain disabled",
            (int)blur);
+}
+
+bool dsvr::CoreStartupRenderHost(bool& reshade_host) {
+  if (!g_started.load(std::memory_order_acquire)) return false;
+  reshade_host = g_startup_config.reshade_host;
+  return true;
+}
+
+bool dsvr::CoreStartupEyeScale(int& render_scale_percent) {
+  if (!g_started.load(std::memory_order_acquire)) return false;
+  render_scale_percent = g_startup_config.render_scale_percent;
+  return true;
 }
 
 // Loader entry point. 0 = gate passed, non-zero = refused (game continues
@@ -107,6 +129,17 @@ extern "C" __declspec(dllexport) unsigned long __stdcall DsvrCoreStart() {
     dsvr::ConfigSaveDefaults(cfg_path.c_str());
     dsvr::ConfigLoad(cfg_path.c_str(), config);
   }
+#if defined(DSVR_ENABLE_LAB)
+  constexpr bool lab_build = true;
+#else
+  constexpr bool lab_build = false;
+#endif
+  if (config.autonomous_session_capture &&
+      !dsvr::ConfigAutonomousSessionCaptureAllowed(config, lab_build)) {
+    DSVR_WARN("Core: autonomous session capture refused; requires normal VR "
+              "and an opt-in LAB build; this process will not record");
+    config.autonomous_session_capture = false;
+  }
   dsvr::ConfigRestrictObserver(config);
   DSVR_LOG("Core: config vr_enabled=%d render_scale=%d motion_attacks=%d "
            "haptics=%d hand=%s style=%s chain='%s' xr_input=%d "
@@ -116,12 +149,8 @@ extern "C" __declspec(dllexport) unsigned long __stdcall DsvrCoreStart() {
            config.dominant_hand_left ? "left" : "right",
            config.play_style.c_str(), config.loader_chain_proxy.c_str(),
            (int)config.xr_input_enabled, (int)config.hide_second_model);
-  DSVR_LOG("Core: frame_limit_fps=%d is the pre-session fallback%s; the "
-           "OpenXR runtime rate takes over when a session is live (see "
-           "RateMatch/RateEvidence log lines). Native rate application is "
-           "checked at the presentation owner; use measured game FPS for results.",
-           config.frame_limit_fps,
-           config.frame_limit_fps >= 120 ? " (POSSIBLY UNSAFE above 90)" : "");
+  DSVR_LOG("Core: DSR-FPS-Unlock owns all frame limiting and VariableFrameTime; "
+           "DSVR never applies a native game cap.");
   if (!config.vr_enabled && !config.observer_only)
     DSVR_LOG("Core: VR is DISABLED (flatscreen-safe). Enable it in "
              "DSVR-Setup, then restart the game.");
@@ -134,12 +163,14 @@ extern "C" __declspec(dllexport) unsigned long __stdcall DsvrCoreStart() {
   // host here: a late add-on callback or F7 must not acquire XR/gameplay rights.
   if (config.observer_only) {
     dsvr::DiagnosticsStart(config, cfg_path);
-    DSVR_LOG("Core: OBSERVER ONLY armed; %s; "
-              "no XR, gameplay writes, "
-             "injected input or render host; restart required to change mode. "
-              "This does not isolate saves or enforce offline play.",
-              config.combat_trace_only ? "automatic ten-minute combat recording after startup; no F9 required" :
-                                        "F9 installs observation hooks after startup");
+    const bool menu_hook_ready = dsvr::ObserverMenuHookInstall();
+      DSVR_LOG("Core: OBSERVER ONLY armed; %s; observer-menu UI hook installed=%d; "
+             "no XR render host, XR calls, gameplay writes, injected input, "
+              "or desktop-frame callbacks; restart required to change mode. "
+               "This does not isolate saves or enforce offline play.",
+               config.combat_trace_only ? "automatic ten-minute combat recording after startup; no F9 required" :
+                                         "F9 installs observation hooks after startup",
+               (int)menu_hook_ready);
     return 0;
   }
 

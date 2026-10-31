@@ -110,9 +110,10 @@ if ($pkg) {
 $tomlPath = Join-Path $GameDir "DSVR.toml"
 if (Test-Path $tomlPath) {
   $toml = Get-Content $tomlPath -Raw
-  if ($toml -match "frame_limit_fps\s*=\s*(\d+)") {
-    if ($Matches[1] -eq "90") { Say "OK" "Installed profile requests frame_limit_fps=90 (the standing user preference)." }
-    else { Say "WARN" ("Installed profile requests frame_limit_fps={0}, not 90. Set 90 for the performance route or record the lower target explicitly; never call a 72 Hz run a 90 Hz result." -f $Matches[1]) }
+  if ($toml -match "(?im)^\s*(frame_limit_fps|auto_frame_limit_fps)\s*=") {
+    Say "INFO" "Legacy DSVR rate preferences are ignored; DSR-FPS-Unlock selects headset/monitor refresh."
+    } else {
+      Say "OK" "No static DSVR frame cap; DSR-FPS-Unlock owns rate limiting."
   }
   if ($toml -notmatch "forearm_only") { Say "WARN" "Installed DSVR.toml predates forearm_only/hide_ui_in_vr keys. Saving settings from the new Home menu (or a fresh install) refreshes serialization; do not hand-edit offsets." }
   if ($toml -match "arm_ik_enabled\s*=\s*true" -and $toml -match "arm_ik_log_only\s*=\s*false") { Say "WARN" "Installed profile has live arm IK enabled (not log-only). Keep it only for runs whose route explicitly tests native arms." }

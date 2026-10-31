@@ -80,9 +80,8 @@ void Apply(Config& c, std::string_view section_raw, std::string_view key_raw,
     float f;
     if (k == "vr_enabled" && ParseBool(value, b)) c.vr_enabled = b;
     if (k == "reshade_host" && ParseBool(value, b)) c.reshade_host = b;
-    if (k == "frame_limit_fps" && ParseInt(value, i) &&
-        (i == 60 || i == 72 || i == 80 || i == 90 || i == 120 || i == 144 || i == 240))
-      c.frame_limit_fps = i;
+    
+    
     if (k == "render_scale_percent" && ParseInt(value, i))
       c.render_scale_percent = Clamp(i, 50, 200);
     if (k == "desktop_present" && ParseBool(value, b)) c.desktop_present = b;
@@ -103,6 +102,8 @@ void Apply(Config& c, std::string_view section_raw, std::string_view key_raw,
 
     if (k == "headlook_enabled" && ParseBool(value, b))
       c.headlook_enabled = b;
+    if (k == "gameplay_theater" && ParseBool(value, b))
+      c.gameplay_theater = b;
     if (k == "mono_screen_fov_deg" && ParseFloat(value, f))
       c.mono_screen_fov_deg = Clamp(f, 30.0f, 110.0f);
     if (k == "sanctuary_override" && ParseBool(value, b))
@@ -115,6 +116,8 @@ void Apply(Config& c, std::string_view section_raw, std::string_view key_raw,
       c.force_disable_motion_blur = b;
     if (k == "stereo_enabled" && ParseBool(value, b)) c.stereo_enabled = b;
     if (k == "afr_enabled" && ParseBool(value, b)) c.afr_enabled = b;
+    if (k == "aa_mode" && ParseInt(value, i))
+      c.aa_mode = Clamp(i, 0, 3);
   } else if (s == "controls") {
     bool b;
     int i;
@@ -223,10 +226,11 @@ void Apply(Config& c, std::string_view section_raw, std::string_view key_raw,
     if ((k == "hide_second_model" || k == "hide_weapon_model") &&
         ParseBool(value, b))
       c.hide_second_model = b;
-    // Unknown anchors retain the default, as with an unknown play_style.
+    // Legacy "arm" files parse to the same combined fit; only "head" is
+    // written. Unknown anchors retain the default, as with play_style.
     if (k == "embodiment_fit") {
       const std::string v = ToLower(Trim(value));
-      if (v == "head" || v == "arm") c.embodiment_fit = v;
+      if (v == "head" || v == "arm") c.embodiment_fit = "head";
     }
   } else if (s == "combat") {
     bool b;
@@ -261,8 +265,17 @@ void Apply(Config& c, std::string_view section_raw, std::string_view key_raw,
       c.combat_test_target_m = Clamp(f, 0.5f, 2.0f);
     if (k == "weapon_separation_min_m" && ParseFloat(value, f))
       c.weapon_separation_min_m = Clamp(f, 0.0f, 0.5f);
-    if (k == "swing_attack_cooldown_ms" && ParseInt(value, i))
-      c.swing_attack_cooldown_ms = Clamp(i, 150, 2000);
+      if (k == "weapon_mass_table_path")
+      c.weapon_mass_table_path = Trim(value);
+      if (k == "torque_response" && ParseFloat(value, f))
+      c.torque_response = Clamp(f, 0.2f, 3.0f);
+      if (k == "halfsword_envelope_m" && ParseFloat(value, f))
+      c.halfsword_envelope_m = Clamp(f, 0.05f, 0.40f);
+      if (k == "deflect_amplitude" && ParseFloat(value, f))
+      c.deflect_amplitude = Clamp(f, 0.0f, 1.0f);
+      if (k == "deflect_duration_ms" && ParseInt(value, i))
+      c.deflect_duration_ms = Clamp(i, 10, 120);
+
       if (k == "physical_defence" && ParseBool(value, b)) c.physical_defence = b;
       if (k == "guard_settle_ms" && ParseInt(value, i))
       c.guard_settle_ms = Clamp(i, 0, 500);
@@ -277,6 +290,9 @@ void Apply(Config& c, std::string_view section_raw, std::string_view key_raw,
     if (k == "verbose_logging" && ParseBool(value, b)) c.verbose_logging = b;
     if (k == "observer_only" && ParseBool(value, b)) c.observer_only = b;
     if (k == "combat_trace_only" && ParseBool(value, b)) c.combat_trace_only = b;
+    if (k == "autonomous_session_capture" && ParseBool(value, b))
+      c.autonomous_session_capture = b;
+    if (k == "dev_mode" && ParseBool(value, b)) c.dev_mode = b;
     if (k == "hotkeys_enabled" && ParseBool(value, b)) c.hotkeys_enabled = b;
     if (k == "log_marker_vk") {
       int i;
@@ -400,6 +416,17 @@ bool ConfigLoad(const wchar_t* toml_path, Config& out) {
         : out.movement_reference == MovementReference::RightHand
             ? MovementController::Right : MovementController::NonDominant;
   }
+  // A turning mode has to stay live. With snap_turn and smooth_turn both
+    // false, TurnTracker::Feed has no mode to integrate and returns zero for
+  // every stick deflection: the right stick does nothing at all, with no
+  // error logged anywhere (live report, 31 Oct 2026). Restore the factory
+  // mode instead of leaving the control silently dead; every other comfort
+  // setting in the file is left exactly as the operator wrote it.
+  if (!out.snap_turn && !out.smooth_turn) {
+    out.smooth_turn = true;
+    DSVR_WARN("Config: snap_turn and smooth_turn were both false; "
+              "smooth_turn re-enabled so the turn stick stays live");
+  }
   return true;
 }
 
@@ -420,8 +447,10 @@ bool ConfigSave(const wchar_t* toml_path, const Config& c) {
   fprintf(f, "[vr]\n");
   fprintf(f, "vr_enabled = %s\n", c.vr_enabled ? "true" : "false");
   fprintf(f, "render_scale_percent = %d\n", c.render_scale_percent);
-  fprintf(f, "# Requested game/XR target; default 90. Native limiter application and runtime cadence are separate.\n");
-  fprintf(f, "frame_limit_fps = %d\n", c.frame_limit_fps);
+  
+  
+  
+  
   fprintf(f, "# false skips the desktop swapchain Present (XR still copies the backbuffer).\n");
   fprintf(f, "desktop_present = %s\n", c.desktop_present ? "true" : "false");
   fprintf(f, "comfort_vignette = %s\n", c.comfort_vignette ? "true" : "false");
@@ -435,8 +464,12 @@ bool ConfigSave(const wchar_t* toml_path, const Config& c) {
   fprintf(f, "smooth_turn = %s\n", c.smooth_turn ? "true" : "false");
   fprintf(f, "smooth_turn_speed_dps = %s\n",
           FmtFloat(c.smooth_turn_speed_dps).c_str());
-  fprintf(f, "# headlook_enabled = true makes HMD rotation drive the camera (P3 test)\n");
+  fprintf(f, "# headlook_enabled = true makes HMD rotation drive the camera. This is the\n");
+  fprintf(f, "# gameplay view by default; turn it off for a permanent flat screen.\n");
   fprintf(f, "headlook_enabled = %s\n", c.headlook_enabled ? "true" : "false");
+  fprintf(f, "# gameplay_theater = true keeps the flat screen during gameplay. Menus, the\n");
+  fprintf(f, "# title screen and cutscenes use it automatically; F8 toggles it live.\n");
+  fprintf(f, "gameplay_theater = %s\n", c.gameplay_theater ? "true" : "false");
   fprintf(f, "# mono_screen_fov_deg: virtual cinema screen width in mono mode\n");
   fprintf(f, "mono_screen_fov_deg = %s\n\n",
           FmtFloat(c.mono_screen_fov_deg).c_str());
@@ -449,7 +482,9 @@ bool ConfigSave(const wchar_t* toml_path, const Config& c) {
   fprintf(f, "# Experimental: no native eye renderer bound yet; stereo logs a refusal and stays mono.\n");
   fprintf(f, "stereo_enabled = %s\n", c.stereo_enabled ? "true" : "false");
   fprintf(f, "# Experimental: alternating eyes; refused unless stereo is active.\n");
-  fprintf(f, "afr_enabled = %s\n\n", c.afr_enabled ? "true" : "false");
+  fprintf(f, "afr_enabled = %s\n", c.afr_enabled ? "true" : "false");
+  fprintf(f, "# Eye-buffer AA: 0 off, 1 FXAA, 2 MSAA 2x, 3 MSAA 4x (restart required).\n");
+  fprintf(f, "aa_mode = %d\n\n", c.aa_mode);
 
   fprintf(f, "[controls]\n");
   fprintf(f, "dominant_hand = \"%s\"\n",
@@ -523,17 +558,16 @@ bool ConfigSave(const wchar_t* toml_path, const Config& c) {
   fprintf(f, "# Second player render model (weapon/shield side) stays visible\n");
   fprintf(f, "# unless this is true. Flip it if your body shows but weapon does not.\n");
   fprintf(f, "hide_second_model = %s\n", c.hide_second_model ? "true" : "false");
-  fprintf(f, "# Body fit anchor: \"head\" (default) sizes the world so the native Head\n");
-  fprintf(f, "# bone lands on your eye height; \"arm\" sizes by measured hand reach.\n");
-  fprintf(f, "# Either way one ratio moves the whole world and player together; bones,\n");
-  fprintf(f, "# collision and an independent mesh resize are never changed by this.\n");
+  fprintf(f, "# Body fit: the native Head bone lands on your eye height, and your\n");
+  fprintf(f, "# measured arm reach constrains the same fit so the hands stay\n");
+  fprintf(f, "# reachable. One ratio moves the whole world and player together;\n");
+  fprintf(f, "# bones, collision and an independent mesh resize are never changed.\n");
   fprintf(f, "embodiment_fit = \"%s\"\n\n", c.embodiment_fit.c_str());
 
   fprintf(f, "[combat]\n");
   fprintf(f, "motion_attacks = %s\n", c.motion_attacks ? "true" : "false");
   fprintf(f, "swing_speed_min = %s\n", FmtFloat(c.swing_speed_min).c_str());
-  fprintf(f, "swing_damage_gain = %s\n",
-          FmtFloat(c.swing_damage_gain).c_str());
+  fprintf(f, "swing_damage_gain = %s\n", FmtFloat(c.swing_damage_gain).c_str());
   fprintf(f, "thrust_enabled = %s\n", c.thrust_enabled ? "true" : "false");
   fprintf(f, "thrust_speed_min = %s\n", FmtFloat(c.thrust_speed_min).c_str());
   fprintf(f, "haptics = %s\n", c.haptics ? "true" : "false");
@@ -554,7 +588,7 @@ bool ConfigSave(const wchar_t* toml_path, const Config& c) {
           FmtFloat(c.swing_attack_speed_min).c_str());
   fprintf(f, "swing_attack_heavy_min = %s\n",
           FmtFloat(c.swing_attack_heavy_min).c_str());
-  fprintf(f, "swing_attack_cooldown_ms = %d\n", c.swing_attack_cooldown_ms);
+
   fprintf(f, "# Physical defence bridge: a raised shield hand holds the native\n");
   fprintf(f, "# shield button wherever it is held; a flick taps it as a parry.\n");
   fprintf(f, "physical_defence = %s\n", c.physical_defence ? "true" : "false");
@@ -566,7 +600,13 @@ bool ConfigSave(const wchar_t* toml_path, const Config& c) {
   fprintf(f, "combat_test_bench = %s\n", c.combat_test_bench ? "true" : "false");
   fprintf(f, "combat_test_target_m = %s\n", FmtFloat(c.combat_test_target_m).c_str());
   fprintf(f, "# Min kept separation between solved hands; 0 = off.\n");
-  fprintf(f, "weapon_separation_min_m = %s\n\n", FmtFloat(c.weapon_separation_min_m).c_str());
+  fprintf(f, "weapon_separation_min_m = %s\n", FmtFloat(c.weapon_separation_min_m).c_str());
+  fprintf(f, "# Slice 1 weight/torque hooks: offline mass table, energy rate, grab envelope, deflect shape.\n");
+  fprintf(f, "weapon_mass_table_path = \"%s\"\n", c.weapon_mass_table_path.c_str());
+  fprintf(f, "torque_response = %s\n", FmtFloat(c.torque_response).c_str());
+  fprintf(f, "halfsword_envelope_m = %s\n", FmtFloat(c.halfsword_envelope_m).c_str());
+  fprintf(f, "deflect_amplitude = %s\n", FmtFloat(c.deflect_amplitude).c_str());
+  fprintf(f, "deflect_duration_ms = %d\n\n", c.deflect_duration_ms);
 
   fprintf(f, "[diagnostics]\n");
   fprintf(f, "verbose_logging = %s\n", c.verbose_logging ? "true" : "false");
@@ -575,6 +615,11 @@ bool ConfigSave(const wchar_t* toml_path, const Config& c) {
   fprintf(f, "observer_only = %s\n", c.observer_only ? "true" : "false");
   fprintf(f, "# Startup-only LAB combat observer; no render/constant-upload probes.\n");
   fprintf(f, "combat_trace_only = %s\n\n", c.combat_trace_only ? "true" : "false");
+  fprintf(f, "# Startup-only normal-VR LAB session telemetry; no case prompts.\n");
+  fprintf(f, "autonomous_session_capture = %s\n\n",
+          c.autonomous_session_capture ? "true" : "false");
+  fprintf(f, "# Launcher UI only: developer mode reveals the tuning internals.\n");
+  fprintf(f, "dev_mode = %s\n\n", c.dev_mode ? "true" : "false");
 
   fprintf(f, "[safety]\n");
   fprintf(f, "offline_only_ack = %s\n", c.offline_only_ack ? "true" : "false");
@@ -588,9 +633,10 @@ bool ConfigValid(const Config& c) {
   auto range = [](float v, float lo, float hi) {
     return std::isfinite(v) && v >= lo && v <= hi;
   };
+  if (c.observer_only && c.vr_enabled) return false;
+  if (c.combat_trace_only && !c.observer_only) return false;
+  if (c.aa_mode < 0 || c.aa_mode > 3) return false;
   return c.render_scale_percent >= 50 && c.render_scale_percent <= 200 &&
-      (c.frame_limit_fps == 60 || c.frame_limit_fps == 72 || c.frame_limit_fps == 80 || c.frame_limit_fps == 90 ||
-       c.frame_limit_fps == 120 || c.frame_limit_fps == 144 || c.frame_limit_fps == 240) &&
       range(c.vignette_strength, 0, 1) && range(c.fov_scale, 0.7f, 1.3f) &&
       c.snap_turn_degrees >= 15 && c.snap_turn_degrees <= 90 &&
       range(c.smooth_turn_speed_dps, 30, 360) && range(c.mono_screen_fov_deg, 30, 110) &&
@@ -604,15 +650,18 @@ bool ConfigValid(const Config& c) {
       c.rehit_window_ms >= 50 && c.rehit_window_ms <= 2000 &&
       range(c.swing_attack_speed_min, .5f, 8) &&
       range(c.swing_attack_heavy_min, 1.f, 12) &&
-      c.swing_attack_cooldown_ms >= 150 && c.swing_attack_cooldown_ms <= 2000 &&
       c.guard_settle_ms >= 0 && c.guard_settle_ms <= 500 &&
       range(c.guard_flick_speed_min, .8f, 6) &&
       c.guard_parry_press_ms >= 40 && c.guard_parry_press_ms <= 250 &&
       c.guard_parry_cooldown_ms >= 250 && c.guard_parry_cooldown_ms <= 2000 &&
       range(c.combat_test_target_m, 0.5f, 2.0f) && range(c.weapon_separation_min_m, 0.0f, 0.5f) &&
+      range(c.torque_response, 0.2f, 3.0f) &&
+      range(c.halfsword_envelope_m, 0.05f, 0.40f) &&
+      range(c.deflect_amplitude, 0.0f, 1.0f) &&
+      c.deflect_duration_ms >= 10 && c.deflect_duration_ms <= 120 &&
       c.log_marker_vk >= 0 && c.log_marker_vk <= 255 && c.config_reload_vk >= 0 && c.config_reload_vk <= 255 &&
       (c.play_style == "standing" || c.play_style == "seated" || c.play_style == "roomscale") &&
-      (c.embodiment_fit == "head" || c.embodiment_fit == "arm") &&
+      (c.embodiment_fit == "head") &&
       (c.movement_reference == MovementReference::Head ||
        c.movement_reference == MovementReference::LeftHand ||
        c.movement_reference == MovementReference::RightHand) &&
@@ -629,6 +678,32 @@ bool ConfigValid(const Config& c) {
 
 bool ConfigSaveDefaults(const wchar_t* toml_path) {
   return ConfigSave(toml_path, Config{});
+}
+
+int ReadLastHeadsetHz(const wchar_t* sidecar_path) {
+  if (!sidecar_path || !*sidecar_path) return 0;
+  FILE* f = nullptr;
+  if (_wfopen_s(&f, sidecar_path, L"r") != 0 || !f) return 0;
+  char line[64]{};
+  const bool ok = fgets(line, sizeof(line), f) != nullptr;
+  fclose(f);
+  if (!ok) return 0;
+  const long hz = strtol(line, nullptr, 10);
+  return hz >= 10 && hz <= 1000 ? static_cast<int>(hz) : 0;
+}
+
+bool WriteLastHeadsetHz(const wchar_t* sidecar_path, int hz) {
+  if (!sidecar_path || !*sidecar_path) return false;
+  // Unknown is not persisted, but that is the correct end state, not a
+  // failure: a first run with no shipped reading leaves no sidecar behind.
+  if (hz <= 0) return true;
+    if (hz < 10 || hz > 1000) return false;
+  FILE* f = nullptr;
+  if (_wfopen_s(&f, sidecar_path, L"w") != 0 || !f) return false;
+  const int written = fprintf(f, "%d\n", hz);
+  const bool flushed = fflush(f) == 0;
+  fclose(f);
+  return written > 0 && flushed;
 }
 
 }  // namespace dsvr

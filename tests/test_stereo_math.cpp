@@ -190,6 +190,70 @@ int main() {
     check(NativeEyeClip(eye,original,{}, {1,0,0},u,{0,0,1},eye));
   }
 
+  // Pixel parity for the theater quad: the game image is copied into a sub-rect
+  // of the eye buffer, so a quad wider than the source has pixels upsamples it.
+  // Live report 31 Oct 2026: a "huge, blurry, badly jagged" panel.
+  {
+    const float t = std::tan(50.0f * kDeg);          // symmetric 100deg frustum
+    const float aspect = 2144.0f / 2292.0f;          // Quest 3 eye aspect
+    const EyeFrustum eyes[2] = {{-t, t, t, -t}, {-t, t, t, -t}};
+    const ScreenTangentExtents req{t, t / aspect};   // 100deg requested, game shape
+
+    // 1280x720 into a 2144x2292 eye: the vertical axis binds first.
+    const auto got = FitTheaterScreenToPixels(req, eyes, 2144, 2292, 1280, 720);
+    const float limit_v = 720.0f * (2.0f * t) / (2.0f * 2292.0f);
+    check(got.tan_half_v > 0.0f && got.tan_half_v < req.tan_half_v);
+    check(near(got.tan_half_v, limit_v));
+    check(near(got.tan_half_h / got.tan_half_v, req.tan_half_h / req.tan_half_v));
+    check(got.tan_half_h <= 1280.0f * (2.0f * t) / (2.0f * 2144.0f));
+
+    // A source with more pixels than the quad needs must not be touched.
+    const auto same = FitTheaterScreenToPixels(req, eyes, 2144, 2292, 4096, 4096);
+    check(same.tan_half_h == req.tan_half_h && same.tan_half_v == req.tan_half_v);
+
+    // Unknown sizes or frusta leave the request alone rather than collapsing it.
+    const auto no_src = FitTheaterScreenToPixels(req, eyes, 2144, 2292, 0, 0);
+    check(no_src.tan_half_h == req.tan_half_h);
+    const EyeFrustum dead[2] = {{0, 0, 0, 0}, {0, 0, 0, 0}};
+    const auto no_eye = FitTheaterScreenToPixels(req, dead, 2144, 2292, 1280, 720);
+    check(no_eye.tan_half_h == req.tan_half_h);
+    const ScreenTangentExtents zero{0.0f, 0.0f};
+    check(FitTheaterScreenToPixels(zero, eyes, 2144, 2292, 1280, 720).tan_half_h == 0.0f);
+
+    // Asymmetric eyes: the narrower frustum binds, not the wider one.
+    const EyeFrustum asym[2] = {{-t, t, t, -t}, {-0.5f * t, 0.5f * t, 0.5f * t, -0.5f * t}};
+    const auto tight = FitTheaterScreenToPixels(req, asym, 2144, 2292, 1280, 720);
+    check(tight.tan_half_v < got.tan_half_v);
+  }
+
+  // The theater panel IS the game image: source aspect, tangent-mapped rows,
+  // centred on buffer mid-height. xr.cpp used to inline this with a dead y_top
+  // and derive the aspect from the eye frustum (0.925 on the live runtime),
+  // which produced a near-square panel with the 2.39:1 image letterboxed
+  // inside it -- "too wide and far away and blurry" (31 Oct 2026).
+  {
+    const float t = std::tan(50.0f * kDeg);
+    const EyeFrustum eye{-t, t, t, -t};
+    const float source_aspect = 3440.0f / 1440.0f;  // live backbuffer
+    const auto screen = TheaterScreenExtents(80.0f * kDeg, source_aspect);
+    const PixelRect r = TheaterRectForEye(screen, eye, 2144.0f, 2292.0f);
+    // Angular aspect equals the source aspect, so the image is not stretched.
+    check(near((r.w / 2144.0f) / (r.h / 2292.0f),
+               screen.tan_half_h / screen.tan_half_v));
+    check(r.w > r.h);  // a landscape panel, not the old near-square one
+    // Centred on buffer mid-height (the user-tuned midpoint), and symmetric
+    // horizontally about the frustum centre.
+    check(near(r.y + r.h * 0.5f, 2292.0f * 0.5f));
+    check(near(r.x + r.w * 0.5f, 2144.0f * 0.5f));
+    check(r.w > 0.0f && r.w < 2144.0f && r.h > 0.0f && r.h < 2292.0f);
+    // Degenerate inputs collapse to an empty rect rather than NaN or a divide.
+    const EyeFrustum dead{0.0f, 0.0f, 0.0f, 0.0f};
+    check(TheaterRectForEye(screen, dead, 2144.0f, 2292.0f).w == 0.0f);
+    const ScreenTangentExtents zero{0.0f, 0.0f};
+    check(TheaterRectForEye(zero, eye, 2144.0f, 2292.0f).h == 0.0f);
+    check(TheaterRectForEye(screen, eye, 0.0f, 0.0f).x == 0.0f);
+  }
+
   std::printf("stereo math: %d failures\n", failures);
   return failures ? 1 : 0;
 }

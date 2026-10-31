@@ -357,11 +357,19 @@ bool VerifyExe(const std::wstring& exe, const LogFn& log) {
   }
   GetFileSizeEx(f, &size);
   CloseHandle(f);
-  bool size_ok =
-      (unsigned long long)size.QuadPart == dsvr::kExpectedFileSize;
-  log(L"  Size: " + std::to_wstring(size.QuadPart) + L" (want " +
-      std::to_wstring(dsvr::kExpectedFileSize) + L") " +
-      (size_ok ? L"OK" : L"MISMATCH"));
+  std::wstring supported;
+  for (unsigned i = 0; i < dsvr::kSupportedBuildCount; ++i) {
+    if (i) supported += L"; ";
+    supported += dsvr::WideFromUtf8(dsvr::kSupportedBuilds[i].label) + L" (" +
+        std::to_wstring(dsvr::kSupportedBuilds[i].file_size) + L" bytes)";
+  }
+  bool size_ok = false;
+  for (unsigned i = 0; i < dsvr::kSupportedBuildCount; ++i)
+    if (dsvr::kSupportedBuilds[i].file_size ==
+        static_cast<unsigned long long>(size.QuadPart))
+      size_ok = true;
+  log(L"  Size: " + std::to_wstring(size.QuadPart) + L" (supported: " +
+      supported + L") " + (size_ok ? L"OK" : L"MISMATCH"));
   log(L"  Hashing 50 MB...");
   std::string sha;
   if (!ShaOf(exe, sha)) {
@@ -369,11 +377,19 @@ bool VerifyExe(const std::wstring& exe, const LogFn& log) {
     return false;
   }
   log(L"  SHA256: " + dsvr::WideFromUtf8(sha));
-  bool ok = size_ok && sha == dsvr::kExpectedSha256;
-  log(ok ? L"PASS: pinned build supported (App 1.03.1 / build 10943698)."
-         : L"FAIL: unsupported game version. DSVR only supports the "
-           L"pinned Steam build -- see README. Nothing was changed.");
-  return ok;
+  int match = -1;
+  for (unsigned i = 0; i < dsvr::kSupportedBuildCount; ++i)
+    if (dsvr::kSupportedBuilds[i].file_size ==
+            static_cast<unsigned long long>(size.QuadPart) &&
+        sha == dsvr::kSupportedBuilds[i].sha256)
+      match = static_cast<int>(i);
+  log(match >= 0
+          ? L"PASS: pinned build supported (" +
+                dsvr::WideFromUtf8(dsvr::kSupportedBuilds[match].label) + L")."
+          : L"FAIL: unsupported game version. DSVR is qualified against " +
+                supported + L" only -- a Steam patch moves the image layout, so "
+                L"nothing is assumed about an untested build. Nothing was changed.");
+  return match >= 0;
 }
 
 // Motion blur (T1): the game preference lives in DarkSouls.ini under
@@ -496,15 +512,22 @@ bool FirewallBlocked() {
 }
 
 bool FirewallSupported(const std::wstring& exe, const LogFn& log, bool add) {
+  // Adding the block is idempotent: when both rules already exist there is
+    // nothing to prompt or change, so skip straight to success. Only ask
+    // when the user has not already accepted (rules absent).
+    if (add && FirewallBlocked()) {
+    log(L"  Firewall block already active (both rules present) -- no change.");
+      return true;
+  }
   if (!IsElevated()) {
     log(L"Firewall change needs Administrator. Right-click DSVR-Setup -> "
-        L"Run as administrator, then retry. (Optional extra safety -- "
-        L"Steam Offline still works without it.)");
+          L"Run as administrator, then retry. (Optional extra safety -- "
+          L"Steam Offline still works without it.)");
     return false;
-  }
+    }
   bool ok = true;
   if (add) {
-    ok = FirewallOne(exe, kRuleOut, L"out", true, log) && ok;
+      ok = FirewallOne(exe, kRuleOut, L"out", true, log) && ok;
     ok = FirewallOne(exe, kRuleIn, L"in", true, log) && ok;
   } else {
     ok = FirewallOne(exe, kRuleOut, L"out", false, log) && ok;
@@ -601,7 +624,11 @@ int DoInstall(const std::wstring& exe, const InstallOptions& opts,
   // test) is hidden while the weapon-side model stays visible.
   cfg.forward_offset_m = 0.0f;
   cfg.hide_second_model = true;
-  // 0.14.0: full body visible in first person (camera inside the head).
+  // The camera is the tracked eye: the native head shell and the torso/leg
+  // shell are hidden by default, while arms and the weapon stay drawn.
+  // Whole-model hiding remains an escape hatch, not the default.
+  cfg.hide_head = true;
+  cfg.hide_torso_and_legs = true;
   cfg.hide_player_model = false;
   if (!ApplyBlurOnInstall(cfg, cfg_path, log)) return 1;
   log(had_cfg ? L"  Kept your DSVR.toml (offline ack recorded)."

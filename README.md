@@ -9,7 +9,7 @@ Keep native world, AI, progression, equipment, damage, stamina, poise, collision
 ## Read these in order
 
 1. This file: product scope and documentation authority.
-2. [Execution guide](docs/superpowers/plans/2026-10-21-native-conversion-execution.md): the **only active execution plan**, milestones A–K, dependencies, task loop, completion ledger and Qwen starting prompt.
+2. [Cockpit orchestration plan](MODDING_PLAN.md) and lane files (.empryo/cockpit/lanes/A-K.md): the **only active execution plan**, milestones A–K, dependencies, task loop, completion ledger, evidence index and starting prompt.
 3. [Engineering](docs/ENGINEERING.md): architectural invariants and module ownership.
 4. [Testing policy](docs/TESTING.md) and [verification runbook](docs/VERIFICATION_RUNBOOK.md): protected operation, acceptance thresholds and run procedure.
 5. [Current handoff](MODLOG.md): where to resume and what remains unverified.
@@ -29,6 +29,7 @@ Update the owning documents in place. New focused native contract/evidence notes
 - Head-oriented smooth locomotion by default. The left stick is always steered by exactly one live reference: your head, or the selected left/right/non-dominant hand, falling back to head if that hand is lost. Choose it in DSVR-Setup or the mod menu and it persists in DSVR.toml. Travel is interpreted in the heading of the camera the mod writes, so turning the view with the right stick turns where you walk and the native capsule follows that request. Snap/smooth turning and collision-resolved physical walking.
 - Calibrated native avatar, armor, hands and weapons with coherent body ownership. Estimated legs/feet must not be described as measured tracking.
 - Physical slash/thrust, directional shield block/parry, native costs/reactions/status and confirmed-outcome haptics; two-hand/off-hand and weapon-family support, ranged/catalyst aiming.
+- Core combat target (28 October operator direction): continuous whole-blade sweeps at speed; silent sparks while dragging along stone/walls; direct wall impacts spend extra stamina while allowing continued attacks without a wall stun. Shields block at their actual tracked surface with native mitigation/costs; parry by moving the shield toward an incoming attack at speed. Dodges follow continuous stick direction through 360 degrees, including while locked on.
 - Head obstruction protection, coherent physical crouch/collision/hurt geometry, adjustable comfort effects, reliable tracking/load/death recovery.
 - Controller-only routine progression, interaction selection/manipulation where supported, readable HUD, menus, quick slots and recenter/calibration.
 - Campaign traversal, bosses and special actions qualified on the supported matrix; reproducible install, rollback and support package.

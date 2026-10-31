@@ -1,7 +1,7 @@
 # Native stereo boundary evidence
 
 Evidence reference, not another execution plan. Work order is milestone D in
-the [execution guide](superpowers/plans/2026-10-21-native-conversion-execution.md).
+the [cockpit plan](../MODDING_PLAN.md) (lane D, D1a-D2b).
 Status: **unresolved; no native two-eye replay binding is enabled**.
 
 ## 25 October autonomous continuation: natural runnable dispatch edge
@@ -672,3 +672,18 @@ both eye copies complete. Existing `tools/native_stereo.py` only validates
 Still unknown: active main-scene plan/camera selection, camera history ownership,
 all worker lifetimes, GPU completion, view-dependent culling/resources and a
 render-only replay contract. No native run or headset qualification occurred.
+
+## 27 October iteration 3: production stereo caller audit
+
+Source-only `grep` across `src/` for `XrBeginNativeStereoFrame` and
+`XrEndNativeStereoFrame` found declarations in `xr.h`, definitions in `xr.cpp`,
+comments in `stereo_gate.h`, `stereo_render.h`, and `render.cpp`, but no production
+call expression. `SubmitHostMono` still has `kNativeEyeRendererBound = false`
+and sends the host image to `XrSubmitMonoFrame`. The XR frame API exists but is
+orphaned; this is not a missing config toggle that can be safely flipped.
+
+D1/D2 remain unresolved. Do not connect the API or submit/copy the mono image as
+stereo. First recover and observe the natural per-view producer and prove its
+resource, worker, simulation and GPU lifetimes; only then can a stereo caller be
+specified. This audit was read-only: no game launch, native replay, database edit
+or save.

@@ -1,8 +1,109 @@
 # Native melee contract investigation
 
-Evidence reference only; execution order belongs to the [sole execution guide](superpowers/plans/2026-10-21-native-conversion-execution.md), operating policy to [TESTING](TESTING.md).
+## 28 October bounded health-writer caller observation
+
+The retained Run 2 already has paired contact/context records and four HP-change
+comparisons. It does not identify the instruction that requested those HP
+values. The broad hit/miss/block/parry/dodge sequence is therefore not being
+repeated.
+
+GhidraMCP identifies `FUN_140322910` as an HP-state setter: RCX is the actor,
+EDX the requested HP, and the body clamps to actor max HP, applies invulnerability
+and keep-alive rules, writes actor `+0x3E8`, and may force it to one. Its Ghidra
+return type is explicitly unresolved. At the known predecessor callsite
+`14028E823 -> 14031F6B2`, RCX comes from RBX and EDX from `[RAX+0x14]`; this
+provenance is still not a melee attribution by itself.
+
+The pinned executable SHA-256 remains
+`a45aaa36dd2f6cc151670a639ea5547043cf38ea79ff4178b963c6ed71f98d7b`.
+Entry bytes at RVA `0x322910` match Ghidra:
+`89 54 24 10 53 48 83 EC 20 F6 81 24 05 00 00 40 48 8B D9`.
+The PE exception directory contains three contiguous runtime-function ranges:
+`0x322910–0x32296C` (unwind RVA `0x177CCD4`),
+`0x32296C–0x3229A8` (`0x177CCDC`), and
+`0x3229A8–0x3229EF` (`0x177CCF0`). They cover the recovered 223-byte function.
+Both trailing unwind records carry chain info back to the first range.
+The probe verified raw entry and epilogue bytes against the installed image.
+Ghidra's undefined return annotation is retained; the observer calls the
+trampoline once with unchanged arguments and returns its raw 64-bit RAX.
+
+The LAB-only detour records setter calls only while an admitted detailed natural
+`ContactDetour` call is on this thread's stack. Each optional
+`native_combat_health_write` row shares the contact's (capture, thread, seq,
+record) key and is admitted in the same atomic queue batch. Schema 1 stores
+actor pointer, caller return address, signed requested HP, zero-based call
+index, total scoped calls and an overflow flag in 16 float-exact 16-bit limbs.
+The per-contact bound is four; larger totals are explicitly partial. The
+capture header advertises schema/hook state and the runtime image base. Legacy
+captures remain `unknown_or_observer_unavailable`; no setter event means only
+that this setter was not called synchronously during that detailed callback.
+
+The adapter regression verifies signature refusal, inactive pass-through,
+unchanged arguments, exactly-once forwarding, raw RAX, target pointer/request,
+four-row overflow marking, old-capture unknown state and all-or-nothing queue
+admission. Debug and Release full suites and the Release LAB suite passed on the
+sealed source candidate. A later raw trace exists below, but its missing footer
+and absent case labels make it incomplete, not accepted native evidence. A fresh
+closed ordinary hit is still needed; a setter request alone does not prove a
+tracked physical sword caused the result. Alternate/asynchronous health paths
+remain outside this scope.
+
+## 29 October partial observer trace: scoped HP setter during contact
+
+Artifact: build/verification/combat-health-writer-20261028/DSVR-trace-22516-40378187-1.jsonl, SHA-256 1b74ed7abd32c06fe22f0a0b159954e3b74860a44b8c24adfb53d11ca3d506d7. Header time 2026-10-29 03:26:02 UTC, PID 22516, combat health hook/schema 1 enabled. It contains 17,963 valid JSONL records: 247 natural contact batches and exactly one native_combat_health_write. The trace has no footer; python tools/vr_trace.py reports complete=false, valid=false, “capture has no closing footer,” and combat observation integrity FAIL. The associated transaction receipt remains Preparing with no PID/save/file snapshots. Its combat-cases.json declares one natural_hit interval [403571273709, 403772494795], but the trace header starts at 403782190754, 0.9695959 s after the interval ended; the health-write event is 18.1740426 s after that end. The trace therefore has no overlap with the declared case and cannot label the setter event. Do not treat it as a completed natural hit.
+
+The sole writer row shares QPC, thread 8752, sequence 221 and record 0x15f0a0 with the contact, identity, motion, diagnostics and context rows. The local player is actor side 0 (0xf783470, vtable 0x1413251f0, handle 0x10044000). Side 1 is the target (0xf72a970, vtable 0x141322e68, handle 0x10040008). Contact-side HP is 659→659 for the player and 44→31 for the target; target stamina remains 71. The health row actor pointer equals side 1, requests HP 31, has call index 0 / scoped count 1 / no overflow, and records caller return address 0x140322a9d. The same contact context decodes as attack type 0, BehaviorParam 505, AtkParam 305, table selector 1, geometry selector -1, weapon id 212000, event handle 0; the raw contact return is 1. On the same observed thread 8752, the contact QPC falls 14.167 ms after GameStep kind 2/seq 1876 and 6.090 ms before StayStep kind 1/seq 1877. This establishes ordering only, not the native update owner. This is strong same-callback/target correlation, but the missing footer, zero overlap with the declared natural_hit interval and absent tracked-hand context prevent attributing it to the physical VR sword or accepting causality.
+
+Targeted GhidraMCP resolution: FUN_140322a9d lies immediately after CALL 0x140322910 in the 11-byte wrapper FUN_140322a98, which then calls FUN_1428e9d39. Its only caller is the 16-byte block FUN_142e191ae: load current HP from [RBX+0x3e8], add EDI, pass RBX as actor, then tail-jump to the wrapper. The setter FUN_140322910 clamps and stores actor HP at +0x3e8. Ghidra shows no direct caller for FUN_142e191ae; its inbound path is a trampoline at 0x140322a8d, with continuation setup around it. The source/value of EDI and update/thread owner remain unresolved. After the setter, the wrapper enters a continuation chain: FUN_1428e9d39 → FUN_142847d55 → FUN_142eafac2 → FUN_1410c1814 → FUN_140219ac6 → FUN_14293b49c → FUN_1427bf86c. The final block dispatches through an unrecovered target in RAX; this is not a recovered scheduler contract. FUN_142e191ae has one direct code xref, the trampoline at 0x140322a8d, and no direct caller. Independent game-side outcome remains unverified because the trace has no footer or case label. No submission binding follows from this observation.
+
+## Case-window race in the protected observer runner
+
+The retained combat-cases.json proves the natural_hit window ended 0.9695959 s before the trace header. Cause: tools/run_combat_capture.ps1 called RunCasePlan immediately after process startup, before the observer had created a trace header (it starts after the local player appears). The runner now waits for a new, unclosed trace header whose PID matches the live, receipt-owned game process before starting any case QPC window, and journals the header filename/PID/QPC. Its delayed-header SelfTest fails on the old ordering and passes on the fixed ordering. This repairs case capture timing only; it creates no combat outcome and does not qualify the stale candidate.
+
+Evidence reference only; execution order belongs to the [cockpit plan](../MODDING_PLAN.md) (lanes B/C), operating policy to [TESTING](TESTING.md).
 
 Status: **unresolved**. No native damage binding is verified by this note. Static paths below come from the pinned Ghidra project; the first bounded native observation is separately classified with its loss limitation.
+
+## 28 October source continuation: continuous whole-blade geometry
+
+Source evidence only. Regressions reproduced missed mid-shaft translation in
+ClassifyWeaponContact and missed interior rotational contact in QualifyContact
+for both sphere and capsule slots. Four intermediate poses and endpoint paths
+were insufficient. Both now use SweepBladeContact conservative advancement:
+linear grip/length, shortest-arc rotation, whole-segment distance, 1e-4 caller-
+unit tolerance and 256 iterations. Ambiguous near-half-turns or budget exhaustion
+report Unresolved; bool adapters accept only Hit. Analytic-path tests cover
+eight partitions, combined translation/rotation/length change, off-plane misses,
+duplicate queries and rehit refusal. Native volumes, geometry units, solid
+interception and damage/context submission remain unqualified.
+
+The existing kind-assignment evidence below already answers the previous plan's
+1405290C0/140529670 question. No new binary trace was possible here: the live
+GhidraMCP DSRFull GUI (PID 13564) connects and reports function/xref/program
+groups loaded, but those analysis methods are not exposed to this chat after
+loading. Only instance/group readiness was queried, no program bytes/functions.
+The existing native contact ABI and outcome unknowns are unchanged.
+
+The operator's wall-drag/impact, shield-surface and shield-motion-parry contract
+is recorded in ENGINEERING and the runbook. It requires verified effect/audio,
+cost/reaction and incoming-contact owners. The source sweep fix alone cannot
+implement those native behaviors. B/C/G remain open.
+
+## 27 October dummy-id owner probe: negative result, unknown recorded
+
+Read-only live GhidraMCP against `DSRFull` (no save/repair/launch/invocation).
+AtkParam row selection is pinned: `1403C93B0` obtains BehaviorParam via
+`140528A30`, reads refId at +C, selects AtkParam via `140528910` (binary-search
+row lookup, selector+7 table). The row carries tip/tail dummy-polygon ids at
+`0x2C..`/`0x34..` (s16), but no consumer resolving those ids to world positions
+was found: string search for dummy/GummyPoly/GetDummy/DummyId returns only
+`CreateSfx_DummyPoly` (SFX path, single DATA xref from `14001C100`, no callers
+— not the weapon-model resolver). The equipped-weapon model's dummy-id to
+world-position owner remains UNKNOWN. Per the spec fail-closed rule, unresolved
+or stale-model dummy = slot invalid, `QualifyContact` stays
+`slot_resolved=false`; sphere fallback only on explicit caller opt-in. Next:
+enumerate `140528910`'s 33 callers for a model-geometry consumer, or correlate
+via footer-valid B1/H1 runtime captures.
 
 **Evidence correction (latest):** Several 26 October conclusions below
 overstate the evidence and are retained only as history. The v2 payload's
@@ -87,6 +188,31 @@ then follow the type-64 `+30` consumer and ordinary character-contact path.
 Do not repeat the already classified effect-like `+640` lead as if it were
 a new attack API. B/C stay open until context lifetime, simulation ownership,
 defense decisions and independent outcomes qualify a real submission seam.
+
+### 27 Oct type-64 `+30` consumer probe: static dead end, value is inert in dispatch
+
+Read-only live GhidraMCP against `DSRFull` (no save/repair/launch/invocation).
+The builder's `+30` store is confirmed in the listing at `1405292A5..1405292B6`:
+`CMP dword [RDI+0x34],0x40 / JNZ` skips `1402DEB20`, whose result lands at
+`[RDI+0x30]` only for attack type 64. The value is `attackBaseParry`: actor
+vtable `+0x10` must return exactly 1, then vtable `+0x268` (`PlayerIns
+14035F1F0 -> 1402DEB70`) resolves the weapon row and returns byte `+0xF2` as a
+float (0.0 on any refusal).
+
+Field-offset xref is not resolvable, so readers of record `+0x30` were
+enumerated by decompile/listing text across every dispatch consumer:
+`1403C4020`, `1403C4210` (kind 0/1/2), `1402F84B0`, `1402F84F0`, `1402FC360`,
+`140420A20`, `140420B30`. **None reads `+0x30`.** The only same-offset reads
+found belong to the unrelated ObjAct row layout. So the type-64 parry value is
+written at build time and has no consumer in the recovered dispatch tree: it is
+inert data for hit/block/parry decisions, not a hidden parry handler. The
+kind-1 thunk continuation (`1429E5D7E -> 1402F8494 -> 142C58024`) is an
+unrecovered computed jumptable (Ghidra: "Too many branches"), unchanged.
+
+Verdict: static follow-up on `+30` is exhausted — negative result. Parry/block
+discrimination can now only come from runtime correlation (footer-valid
+hit/miss/block/failed-parry/parry-only captures with selected PARAM/event
+identity), exactly the B1 comparison. No binding proposed; B/C remain open.
 
 ## Real-character defense follow-ups: operator reports exceed trace coverage
 
@@ -1230,9 +1356,257 @@ in the contact/dispatch chain:
   observer (mask 15 genuine). Deliberately eliciting kind-2 requires
   the submission entry, not a different play pattern.
 
-Next: one bulk probe on 1404D0BB0/1404D0F20/14068BDCF contexts plus
-the 1405290C0 body past the 35-instruction head. No HP/stamina
-attribution or submission binding claimed; B/C/H stay open.
+27 Oct bounded static follow-up (GhidraMCP, `DarkSoulsRemastered.exe`, read-only):
+
+- `FUN_1404D0BB0` constructs `NS_FRPG::FrpgEventConditionObjDam`; on a matching object-type byte `6`, it calls `FUN_1403C93B0` and stores the returned context. This is an event-condition constructor, not a player damage submission.
+- `FUN_1404D0F20` re-evaluates the object/geometry condition, may retire an old context through `FUN_1403C9FE0`, then rebuilds through `FUN_1403C93B0`. It does not show an HP write.
+- `FUN_14068BDCF` is a register-preserving wrapper to `FUN_14042099B`, which reaches eligibility gate `FUN_140327AD0`; this is not a damage writer.
+- The complete decompilation of `FUN_1405290C0` copies selected AtkParam/actor values into the event payload and returns success; no HP/health write is observed.
+- The ASCII strings `OnCharacterHP_CheckAttacker` and `CreateDamage_NoCollision` xref to static registration functions `FUN_1400173D0` and `FUN_1400200C0`, each invoking a virtual `+0x58` registration call. That identifies event wiring only, not the registered handler's effect. Read-only vtable bytes at `141A2E0A0` and `141A2FD10` yielded pointer candidates, but `get_functions` did not resolve those targets as analyzed functions.
+
+Vtable follow-up (same read-only GhidraMCP session): `CreateDamage_NoCollision`'s registered data address `141A2FD10` has a `+8` slot pointing at `1404B0EC0`; `read_memory` bytes at that slot show a tail jump to `140490F40` (`get_functions` xref at `1404B0EC7`). `140490F40` resolves two actor references and calls `1403C9B50`; `1403C9B50` obtains a context from `1403C93B0`, which selects PARAM rows and builds the payload, then conditionally calls `140529670` and a split continuation thunk. This is a newly supported event-handler-to-context path, not proof of a player swing dispatcher or HP mutation. The `OnCharacterHP_CheckAttacker` registration at `141A2E0A0` leads to event-condition methods (including `1404A9240/1404A92F0`), not a recovered HP writer. `140322910` still only serves as a clamping/keep-alive health-state setter; its broad caller set is not attribution evidence.
+
+Next: follow the `1403C93B0` successful branch through the split continuation and determine which observer/callback applies the resulting context; separately connect that path to a concrete `0x3E8` health-field write with a caller/object identity. No native invocation, game-memory write, independent HP/stamina attribution or physical submission binding claimed; B/C/G remain open.
+
+29 Oct read-only re-probe of the same three owners (program
+`DarkSoulsRemastered.exe`, image base `140000000`, 310894 functions, revision
+token `1793151129646:7d5a7905:3`): `get_functions`/`get_xrefs_to` on
+`1403C93B0` confirms exactly four inbound references — the recorded
+`1403C9B50` call plus `1404D0BB0` (at `1404D0CC1`) and `1404D0F20` (at
+`1404D0FF0`), and one DATA reference from `141D54374`. `1404D0BB0` has no
+in-function callers; its inbound set is two DATA slots (`141D66080`,
+`1417CB768`) plus one `UNCONDITIONAL_CALL` from `14049B5C2`, and
+`get_functions` reports **no analyzed function at or containing `14049B5C2`** —
+that call site sits in unanalyzed territory, so the second owner is not yet a
+resolved function and cannot be named. `1404D0F20` is reached from
+`1404D0D40` (itself referenced only as DATA from `141D66098`, `1417CB7B0`,
+`1417CB808`, `141364848`). Both condition owners also call the same small
+helper `FUN_140481060` (34 bytes, 14 callers, callees `FUN_14030C1B0` /
+`FUN_14030C290`), which is a shared accessor, not a writer. Net: no new HP write
+found; the concrete blocker for B is now narrowed to *analyzing the region
+containing `14049B5C2`* before any further owner claim. Still no native
+invocation, no game-memory write, no HP/stamina attribution and no submission
+binding; B/C/G remain open.
+
+Same session, second probe — the three call sites themselves
+(`get_assembly_context`, 12 instructions each side) and the resolver behind them:
+
+- `1404D0CC1` (inside `1404D0BB0`): the call is preceded by
+  `CMP byte ptr [RCX + 0x8], 0x6` on the singleton at `[0x141C7A050]`, and the
+  surrounding code writes a fresh record through `RBX` at `+0x18`, `+0x24`,
+  `+0x2c`, `+0x44`, `+0x48`. `1403C93B0`'s return value is stored at
+  `[RBX + 0x2c]` and `RBX` is returned — a record constructor with a type-tag
+  check, not a damage writer.
+- `1404D0FF0` (inside `1404D0F20`): calls `FUN_1403C9FE0` first, then
+  `1403C93B0`, stores the result at `[RDI + 0x2c]` and compares it against `-1`.
+  Same record-field shape.
+- `14049B5C2`: the instructions are real and disassembled — argument marshalling
+  (`R9D = 0x1b`, three stack dwords, two `MOVSS` floats), the `CALL 0x1404d0bb0`,
+  a null test on the returned pointer, then `CALL 0x1404d0f10`. What is missing is
+  function *attribution*: the last analyzed function below is `FUN_14049AFD0`
+  ending at `14049B012`, and probes at `14049B200`, `14049B400`, `14049B600` and
+  `14049B800` all report no function. So this is an analysis gap of at least
+  `14049B012..14049B5F5`, not a thunk.
+- `FUN_1403C9FE0` (109 bytes, 6 callers: `14031F389`, `140424060`, `1404D0CF0`,
+  `1404D0D40`, `1404D0F20`, `1404D1160`) is a handle-to-record resolver:
+  `handle >> 16 < 0x80` indexes a slot table at `param_1[2] + index * 0x230` with a
+  generation check (`*puVar2 != handle` means miss); `== 0x80` walks a linked list
+  through `+0x88`. On a hit it calls `FUN_1403C5C90`, `FUN_1403C5D20` and
+  `FUN_1403C7ED0`.
+- Those three handlers are **release/reset**, not damage: `FUN_1403C5C90` unlinks
+  the record from a `+0x1f0`/`+0x1f8` intrusive list; `FUN_1403C5D20` (737 bytes)
+  resets fields to `-1.0f` (`0xbf800000`) and `1.0f` (`0x3f800000`), unlinks the
+  `+0x7e` list, and decrements three refcount slots (mask `0x3fffffff`, freed via
+  `FUN_1403C48F0` at zero). No `0x3E8` health write appears in any of them.
+  `FUN_1403C7ED0` decompiles to nonsense ending in `halt_baddata()` — a
+  misdisassembly, so its behavior is **unresolved** and must not be claimed.
+
+Two offline static probes are now named and unstarted: function-start detection
+over `14049B012..14049B5F5`, and pinned bytes at `1403C7ED0`. Neither was run this
+session; both are read-only. Still no HP write, no native invocation, no
+game-memory write, no HP/stamina attribution, no submission binding.
+
+29 Oct third probe — the gap is resolved, and the second owner has a name.
+`read_memory 14049B400,448` plus `get_functions` on the decoded boundaries:
+
+- The second owner is **`FUN_14049B510`** (real prologue `MOV RAX,RSP` /
+  `PUSH RDI` / `SUB RSP,0x80` at `14049B510`), called from `FUN_1404854D0`.
+  Ghidra's recorded body is `14049B510..14049B551` (size 66) only, because the
+  `CALL 0x140CC3E10` at `14049B54D` is treated as no-return — the same
+  omitted-fallthrough cliff already documented for `1411CD8A0`. The body
+  demonstrably continues: the `R9D = 0x1b` argument block sits at `14049B5B3` and
+  the `CALL 0x1404D0BB0` at `14049B5C2`, both inside the truncated range. So the
+  earlier "no function at `14049B5C2`" is a **body-extent artifact, not an
+  unanalyzed region**, and the second owner is `FUN_14049B510`.
+- Immediately before it, `14049B506` is a 10-byte stub Ghidra already holds as
+  `FUN_14049B506` (0 callers): `MOV qword ptr [RSP],RAX` / `PUSHFQ` /
+  `JMP 0x142B3D2E0`, and `0x142B3D2E0` has no function. That is a hot-patch /
+  detour-style trampoline, and an INT3 at `14049B4D4` (right after an
+  `FF 15` import call) is the padding that ended the previous function.
+- `1403C9FE0`'s third handler is reached by a **tail call**, not a call:
+  `1403CA022: JMP 0x1403C7ED0` after `ADD RSP,0x20` / `POP RBX`. The resolver's
+  linked-list stride is `+0x220` (the decompiler's `puVar2 + 0x88` is `uint*`
+  arithmetic) and the slot-table probe is `IMUL RBX,RAX,0x230` + `ADD RBX,[RCX+0x10]`
+  with the generation compare `CMP dword ptr [RBX],EDX` / `CMOVNZ RBX,0`.
+- Pinned bytes at `1403C7ED0` (`read_memory`, 64 bytes) are
+  `04 57 29 AE 04 0E E9 33 AF 3B 99 42 40 DB 47 19 ...` — no recognizable
+  prologue for the first 43 bytes; a real prologue (`MOV RAX,RSP` /
+  `ADD RAX,-8` / `MOV RSP,RAX` / `MOV [RSP],RBP` / `JMP rel32`) begins at
+  `1403C7EFB`. So the `JMP` target `1403C7ED0` is **not an instruction boundary**
+  as Ghidra holds it, and `FUN_1403C7ED0`'s decompiled body is meaningless. Its
+  behavior stays unresolved and unclaimed.
+
+Actionable for the manual GUI pass (read-only from here, no program edits made):
+extend `FUN_14049B510`'s body past `14049B551` to cover at least `14049B5F5`, and
+re-examine the `1403C7ED0` entry boundary against `1403C7EFB`. Neither was done
+this session.
+
+29 Oct GUI pass actually run (program mutated, **not saved**). `clear_flow_and_repair`
+on the seed `14049B510..14049B620` **refused** with
+`Repair would delete defined continuation after no-return call(s):
+{call_address=14049b54d, callee_address=140cc3e10, callee_name=FUN_140cc3e10}` —
+`FUN_140CC3E10` is a genuine `noreturn` leaf with 1907 callers (stack-protector
+failure path), so the truncation is not a wrong no-return flag and the repair
+command is the wrong tool. `disassemble_bytes 14049B551..14049B620` decoded 207
+bytes of real continuation, `get_xrefs_to 14049B552` returned **0 references**, and
+`delete_function 14049B510` + `create_function 14049B510` reproduced the same
+66-byte body — confirming the continuation is reachable only by fallthrough past a
+no-return call, which Ghidra will never fold into the head function. The applied
+action was therefore `create_function 14049B552`, which produced
+**`FUN_14049B552`** (body `14049B552..14049B65F`, 269 bytes).
+
+Decompiled `FUN_14049B552` — this is the owner the earlier entries were hunting:
+
+```c
+if (in_RAX == 0) { puVar2 = 0; }
+else { puVar2 = FUN_1404d0bb0(in_RAX, unaff_RDI, unaff_EBP, 0x1b, unaff_ESI,
+                               unaff_EBX, in_stack_...b0, ...b8, ...c0, ...c8,
+                               ...d0, ...d8); }
+if (puVar2 != 0) {
+  FUN_1404d0f10(puVar2, in_stack_...e0, in_stack_...e8);
+  plVar1 = *(longlong **)(unaff_RDI + 0x28);
+  in_stack_00000060 = puVar2;
+  lVar3 = FUN_14049c250((unaff_RDI + 0x20), plVar1, plVar1[1], &stack0x00000060);
+  if (*(longlong *)(unaff_RDI + 0x30) == 0xaaaaaaaaaaaaaa9)
+    std::_Xlength_error("list<T> too long");
+  *(longlong *)(unaff_RDI + 0x30) += 1;
+  plVar1[1] = lVar3;
+  **(longlong **)(lVar3 + 8) = lVar3;
+}
+```
+
+`FUN_14049C250` + the `0xaaaaaaaaaaaaaa9` sentinel + `_Xlength_error("list<T> too
+long")` is an MSVC `std::list` `splice`/`push_back` at `this+0x20` with size at
+`+0x30` and sentinel node at `+0x28`. So the second owner **constructs an object and
+appends it to a `std::list`** — a contact/event queue, not a damage write.
+
+`FUN_1404D0BB0` (301 bytes, now 1 caller: `FUN_14049B552`) is the constructor, and
+it names the type: `*param_1 = NS_FRPG::FrpgEventConditionObjDam::vftable`
+(vftable at `0x141364840`). It calls `FUN_1404C7C20` (base `FrpgEventCondition`
+ctor), writes `param_5` at `+0x20`, `param_6` at `+0x24`, `-1` at `+0x2c`,
+`param_10` at `+0x30`, `1.0f` at `+0x4c` and `+0x54`, then — only when
+`DAT_141C7B1B0 != 0` and `FUN_140481060(DAT_141C7B1B0, param_5)` resolves a record
+whose `[[7]+8]` byte is `0x06` — calls
+`FUN_1403C93B0(DAT_141C7A050, param_7, param_6, param_9, plVar3, -1, 0)` and stores
+the returned handle at `+0x2c`. Otherwise it sets `+0x18 = 1` and returns.
+
+The vftable has exactly 6 xrefs from 3 functions, which closes the object's
+lifetime: `FUN_1404D0BB0` (constructor), `FUN_1404D0CF0` (destructor — sets the
+Dam vftable, calls `FUN_1403C9FE0(DAT_141C7A050, *(uint*)(this+0x2c))`, then
+restores `NS_FRPG::FrpgEventCondition::vftable`), and `FUN_1404D1160` (deleting
+destructor — same release, then `free(param_1)` when `param_2 & 1`).
+
+That resolves the earlier open question about `FUN_1403C9FE0`: the handle-release
+handlers traced on 29 Oct are the **`FrpgEventConditionObjDam` destructor releasing
+its `1403C93B0` handle**, which is exactly why they only unlink and reset fields and
+never write HP. Still no HP write anywhere on this trace; the queue append and the
+handle register/release pair are event-condition plumbing.
+
+29 Oct same session — `CreateDamage_NoCollision` reached from its own string, and it
+is **not** a damage write either.
+
+- `list_strings CreateDamage` → two copies, `14135C690` / `14135C710`. The first has
+  exactly one xref: `1400200E1` in `FUN_1400200C0`, a 78-byte Lua/script binding
+  registrar that calls `(**(*plVar1 + 0x58))(plVar1, &PTR_vftable_141a2fd10,
+  "CreateDamage_NoCollision", L"CreateDamage_NoCollision", -2)` on the singleton
+  `DAT_141C7B478` (created by `FUN_1404C78E0` if null) and then `atexit`.
+  `OnCharacterHP_CheckAttacker` is the same shape at `FUN_1400173D0` with
+  `&PTR_vftable_141a2e0a0`.
+- The binding table at `141A2FD10` holds name-pointer / function-pointer pairs. Its
+  first code slot `1404B0EC0` had **no function** — created it this session
+  (`FUN_1404B0EC0`, 12 bytes). It is a thunk:
+  `FUN_140490F40(DAT_141C7B1B0, float, int, int, undefined4, undefined4, undefined4)`.
+- `FUN_140490F40` (383 bytes) resolves two entity ids: id `10000` means the player
+  (`*(DAT_141C77E50 + 0x68)`), `id > 10000` goes through `FUN_140371BD0(id-0x2711)`,
+  otherwise `FUN_140371200` + `FUN_140371360`. With both pointers non-null it builds a
+  16-byte struct from `param_5/6/7` and calls
+  `FUN_1403C9B50(DAT_141C7A050, param_2, attacker, target, struct, -1, 0)`.
+- `FUN_1403C9B50` (187 bytes) is the same handle machinery as `1403C93B0` plus a
+  lookup: it calls `FUN_1403C93B0(param_1, param_2, 0xffffffff, 0x3f000000, param_3,
+  param_6, param_7)` (so `1.0f` as the third scalar), then resolves the returned
+  handle through the slot table `param_1[2] + (handle>>16)*0x230` with the
+  generation compare `*puVar4 == uVar1`, or the `0x80` linked list at `+0x88`, and
+  finally `FUN_1403C6DA0(record, param_4)`.
+- `FUN_1403C6DA0` (107 bytes, 3 callers: `1403C9AF0`, `1403C9B50`, `1403C9C20`) is an
+  **assertion path, not damage**: `if (param_2 != 0) { if (*(param_1+0x118)) {
+  (**(*DAT_141B68F20 + 0x68))(); *(param_1+0x118) = 0; } FUN_140CC3E10(0x20,0x10,
+  DAT_141B68F20); }` — the noreturn stack-protector/report leaf again. It returns
+  false only when `param_2 == 0`.
+
+Net: the exported `CreateDamage_NoCollision` entry creates an event-condition handle
+and validates the target slot; the damage, if any, is applied later by whatever
+consumes the `std::list` that `FUN_14049B552` appends to. Two sibling slots in the
+same binding table (`1404B0EE0`, `1404B0F00`) had no function either; both were
+created this session as 12-byte thunks → `FUN_1404910D0` and `FUN_140491330`. Their
+table entries are pointers rather than inline strings, so their exported names stay
+unresolved and are recorded as an open item, not guessed. No HP write found; no
+native invoked.
+
+29 Oct caller context for the list-append wrapper. `FUN_1404854D0` (the 41-byte
+wrapper around `FUN_14049B510`/`FUN_14049B552`) has 4 callers. `FUN_1404AD1A0` is a
+227-byte script accessor that calls it then `FUN_1404E8350`. The substantive one is
+**`FUN_1407D23C0`** (1377 bytes, 1 caller `FUN_1407CDCE0`): a 16-case dispatcher on
+`**(param_3+0xb0)+4` that resolves an entity via `FUN_1407C9910(param_3+0x50, ...)`
+and `FUN_1407D60E0`, then dispatches into the FRPG singleton `DAT_141C7B1B0` across
+22 callees (`14047EE40`, `14047F040`, `14047FAB0`, `14047FD20`, `140480C20`,
+`1404854D0`, `140485520`, `1404857A0`, `1404857E0`, `140485900`, `14048CF40`,
+`14048CFB0`, `140490810`, `140491D60`, `140491DE0`, `140491E60`, `1404ABDC0`,
+`1404ABE20`, `1404AD450`, …). Case 9 is the arm that reaches our wrapper: it calls
+`FUN_1404854D0(DAT_141C7B1B0)` then `FUN_14047EE40(singleton, id,
+*(int*)(param_3+0x60))`. So the `FrpgEventConditionObjDam` append is one arm of a
+script-visible event dispatcher, and the damage-application candidate set is now that
+callee list — none opened for an HP write yet.
+
+29 Oct probe of that callee list (5 of the 22 decompiled: `14047EE40`, `140485520`,
+`1404857A0`, `1404857E0`, `140485900`) is a **negative result**: all five are
+script/entity accessors on the FRPG singleton, not damage application.
+`14047EE40` is a `std::list` insert at `singleton+0x440` keyed by an int id (with the
+same no-return-cookie and `_Xlength_error` shape). `140485520` resolves an entity by id
+(`10000` → `DAT_141C77E50+0x68`, `>10000` → `FUN_140371BD0(id-0x2711)`, else
+`FUN_140371200`/`FUN_140371360`) then compares/sets a 12-float transform via
+`FUN_1402FBA70`/`FUN_1402FDA20`/`FUN_1402FBAA0`. `1404857A0` ORs bit `0x10` into a byte
+at `entity+0x45`. `1404857E0` forwards to `FUN_1402FCE20(entity, id, value)`.
+`140485900` reads an entity transform, converts it (`FUN_140094520`) and calls
+`FUN_1402FBD80(entity, pos, a, b, float, float)`. None writes an HP field. So the
+dispatcher arm that reaches the `FrpgEventConditionObjDam` append is script plumbing on
+the entity/transform side, and the HP write is **not** in this dispatcher's direct
+callee set — it must be downstream of the list consumer. Named next probe: find the
+iterator over the `std::list` at `singleton+0x20` (the field `FUN_14049B552` appends
+to, sentinel `+0x28`, size `+0x30`) rather than searching the dispatcher.
+
+29 Oct follow-up on the wrapper's other callers: `FUN_1404AD290` (123 bytes) and
+`FUN_1404AD320` (124 bytes) are both `if (DAT_141C7B1B0) return FUN_1404854D0(singleton)`
+null-check wrappers taking no arguments of their own — script-API shims, not list
+consumers. `get_xrefs_to DAT_141C7B1B0` returns **993** references, so a field-level
+sweep of the singleton is not tractable through this bridge; the consumer must be found
+by walking the class's own method neighbourhood instead. The static route from
+`CreateDamage_NoCollision` to an HP write is exhausted for this session: every function
+reachable from the exported entry and from the append wrapper resolves to handle
+create/reset, entity-id resolution, transform accessors or assertion paths. Lane B's
+remaining gates need the protected deployment evidence (LAB health-setter observer plus
+one labelled natural hit), not more static reading. The Ghidra program is now saved
+(modification 475, `unsaved_changes:false`), so the functions created this session
+(`14049B552`, `1404B0EC0`, `1404B0EE0`, `1404B0F00`) are persisted.
 
 ### 26 Oct kind assignment RECOVERED: PARAM-driven vocabulary, gate identified
 
@@ -1331,6 +1705,10 @@ kind-assignment hop (1405290C0 tail / 140529670) is untouched by this
 subtree and remains the next probe. No submission binding claimed;
 B/C/H stay open.
 
+### 30 Oct HP-writer caller fan-in (read-only)
+
+`FUN_142cb5171` copies incoming `EDX` into `EDI` and `RCX` into `RBX`; `FUN_142e191ae` then adds `EDI` to the actor’s current HP before calling the clamping setter. The thunk has five code callers: `FUN_14024f6b0` supplies `EDX=999999` before a separate zero setter; the `ChrManipulator` method `FUN_14038dae0` receives an event object reporting ID 1000/subtype 2 and supplies a payload-derived delta; `FUN_14034bf96` and `FUN_140329b48` remain opaque wrappers; `FUN_1406981a0` supplies current HP minus its cached value while processing message `0x1f58`. Static callers narrow the setter’s inputs but do not attribute the retained hit to any path. The trace lacks caller identity and this pass did not run the game. Next: identify the producer and semantics of the `FUN_14038dae0` 1000/2 event; preserve the live-hit correlation as unresolved.
+
 ### 26 Oct selector continuation byte-trace correction
 
 Static trace against the installed executable (SHA-256
@@ -1360,3 +1738,103 @@ invocation:
 The ignored local probe `build/selector_probe.py` reports the EXE hash,
 selected arms and decoded bytes. This corrects the earlier static narrative;
 it does not establish that either branch executed in a live encounter.
+
+## 29 October 2026 — the attack-shape object: slot pool, owner, and param seed
+
+Static only, from the pinned `DSRFull` analysis; nothing here was observed in a
+live encounter, and no damage or HP semantics are claimed.
+
+`FUN_1403c6e70` (815 B) builds a contact frame from a live attack object and hands
+it to the shape object's own `vtable+0x468`. It has four xrefs: one call from
+`FUN_1403c9c20` and three `DATA` references (`141d5411c`, `14179915c`,
+`14179919c`), so it is itself a table entry.
+
+`FUN_1403c9c20` is the only driver and shows the object's storage: a slot array at
+`manager+0x10`, **stride `0x230`**, at most `0x80` slots, with the handle's bits
+16-22 as the slot index, the low 16 bits as a serial, and the full handle stored at
+object `+0x00` and re-validated on every access. Index `0x80` selects a linked
+overflow list walked through object `+0x88`. A raw pointer is therefore not a
+usable seam — an object must live in that array with a matching handle.
+
+Per-frame branch: `FUN_1403c6da0` (lifetime/release; releases the `+0x118` holder
+through `DAT_141b68f20` `vtable+0x68`) decides between `FUN_1403c5c90` (unlink from
+a doubly-linked list at `+0x1f0`/`+0x1f8`) and `FUN_1403c6e70`. `FUN_1403c7900` is
+the frame-skip filter and reveals **three** parallel tagged sets on the object at
+`+0x1d8`, `+0x1e0`, `+0x1e8`, all queried with the *contains* helper
+`FUN_1403c48c0`.
+
+The seed is a param row: `FUN_1403c9670` resolves a `BehaviorParam` row
+(registry index `param_3 + 0xc`), reads its `+0xc` as the AtkParam row id, resolves
+that row in **`AtkParam_Npc`** (registry index `param_2 + 7`, no Pc/Npc branch —
+the `vtable+0x18` selector belongs to `FUN_1403c93b0` alone), and copies five
+dwords at row `+0x18..0x28` into an 8-slot array whose remaining three slots are
+`0xffffffff`.
+
+Those five offsets are independently corroborated outside Ghidra: the field walk in
+`build/dsr-data/AtkParam_layout.json`, produced by `tools/dsr_paramdef.py` from
+`AtkParam.paramdef` (71 fields), places `spEffectId0..spEffectId4` (all `s32`) at
+exactly `0x18, 0x1c, 0x20, 0x24, 0x28`. A native field read and a paramdef parse
+agree on the same five offsets.
+
+Caveat carried forward: `FUN_1403c6da0` ends with Ghidra's "subroutine does not
+return" and `return in_RAX & 0xffffffffffffff00`. That is the same no-return
+fallthrough artifact already documented for `1411CD8A0` — the `char` result belongs
+to the callee, and the mask is not a real computation.
+
+Still open: which shape class owns `vtable+0x468`, and who writes the attack
+object's `+0x118` / `+0x40`.
+
+### Producer probe for `FUN_14038dae0` (31 Oct 2026, negative)
+
+`FUN_14038dae0` reports `caller_count = 0`. Its only cross-references are three DATA
+sites: `141d51368`, which `analyze_data_region` shows is typed
+`_IMAGE_RUNTIME_FUNCTION_ENTRY` (the PE unwind entry for the function, not a dispatch
+site), `14178f264`, the first slot of `IPToStateMapEntry_ARRAY_14178f264`
+(`IPToStateMapEntry[221]`, pointed at by `DAT_14132e350`), and `14132e388` in the same
+block. No xref exists to `14132e350`, `14132e348`, `14132e340`, `14178f258`, `14178f260`,
+or anywhere in the `14132e200`-`14132e28f` block. These observations do not establish how the table is accessed;
+the producer of event 1000 / subtype 2 remains unknown. The element type
+`IPToStateMapEntry` is a name only - `get_struct_layout` rejects it as a non-structure -
+so no field semantics back the map reading either. Treat only the tested xref result as negative
+result; the named array semantics remain unverified, and the
+attribution gate is still one closed labeled hit from an authorized game run.
+
+### `IPToStateMapEntry_ARRAY_14178f264` dumped; contact `+0x130` / `+0x138` owners (31 Oct 2026)
+
+Read-only `read_memory` of 1768 bytes at `14178f264` decodes as 219 eight-byte slots
+`(uint IPoint RVA, uint state id)`, not the 221 the type name claims. Every IPoint lies
+inside `0x14038dae0`-`0x140390c20`, i.e. one function region, and the state ids run
+`0..0x5b` (0..91) with no gaps: 92 distinct ids, 91 of them nonzero, plus 64 slots holding
+`0xffffffff` and 64 holding `0`. So the map is a per-type descriptor table (its owner block
+`DAT_14132e350` carries the ASCII `ChrManipulator`), not a global id space, and it does not
+reach the `caseD_*` selector range `0..0x93` — ids `0x5c..0x93` belong to other type
+descriptors. The cheapest static handle named in the lane note therefore cannot bind a
+`caseD_*` selector to a producer. Recorded as a closed negative probe; do not re-dump it.
+
+The B3 shape-owner probe resolved the two offsets the LAB record reads:
+
+- In `FUN_1403c7520` (836 bytes, `1403c7520`-`1403c7871`) the stack record base is
+  `local_208`, so record `+0x130` is `local_d8` and `+0x138` is `local_d0`.
+- `local_d8 = FUN_1402c4870(param_1[0x10])` — the source object resolved from the uint id at
+  frame `+0x40`. `FUN_1402c4870` (83 bytes) dispatches on `id >> 28`: 0 →
+  `FUN_1403ed0f0(DAT_141c7a0b0)`, 1 → `FUN_1403714b0(DAT_141c77e50)`, 2 →
+  `FUN_14030c320(DAT_141c75dd8)`, 3 → `FUN_14042a7e0(DAT_141c7a488)`, else 0. It has 13
+  callers, all inside the contact family (`1403c5190`, `1403c6030`, `1403c6850`, `1403c6e70`,
+  `1403c7460`, `1403c7520`, `1403c7d30`) plus the `140421620`/`140423540`/`140423850`/
+  `140426fa0`/`14042a1c0` eligibility group.
+- `local_d0 = param_2`, the caller-supplied target. In `FUN_1403c7460` (174 bytes,
+  `caller_count = 0`, reached only through the `1417991f0`/`141799224` DATA slots) the target
+  is `**(FUN_1402a9cc0(handle) + 0x10)`, gated on `FUN_1402c4870(frame+0x40) != 0`,
+  `FUN_1402a9cc0 != 0`, and the record type at `lVar4+8` being `< 3 || == 4`; the sixth
+  argument is `FUN_1402a9d60(handle)` only when `FUN_1402a9e00(handle) == 1`, else `-1`.
+- `FUN_1403c5190` (53 bytes, `caller_count = 0`) is a list validator: it walks a node list and
+  returns 1 for the first node whose `+8` id resolves through `FUN_1402c4870`. It is not a
+  writer of `+0x40`.
+
+So `+0x130`/`+0x138` are resolved object pointers, not shapes, and neither is fed directly
+from an AtkParam hit slot at this level. The unresolved owner is the writer of the source id
+at frame `+0x40` (and of the handle consumed by `FUN_1402a9cc0`), which is the same open item
+already recorded as "who writes the attack object's `+0x118` / `+0x40`". No function was
+created, disassembled or renamed; the program is unmodified (`unsaved_changes:false`,
+modification 3). No game-memory read of a live process, no launch, no commit.
+

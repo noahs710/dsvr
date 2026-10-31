@@ -33,6 +33,26 @@ int main() {
   CHECK(!c.vr_enabled);
   CHECK(!c.reshade_host);
   CHECK(!c.observer_only);
+  CHECK(!c.autonomous_session_capture);
+  {
+    dsvr::Config capture{};
+    capture.autonomous_session_capture = true;
+    capture.vr_enabled = true;
+    capture.xr_input_enabled = true;
+    CHECK(!dsvr::ConfigAutonomousSessionCaptureAllowed(capture, false));
+    CHECK(dsvr::ConfigAutonomousSessionCaptureAllowed(capture, true));
+    capture.observer_only = true;
+    CHECK(!dsvr::ConfigAutonomousSessionCaptureAllowed(capture, true));
+    capture.observer_only = false;
+    capture.vr_enabled = false;
+    CHECK(!dsvr::ConfigAutonomousSessionCaptureAllowed(capture, true));
+    capture.vr_enabled = true;
+    capture.xr_input_enabled = false;
+    CHECK(dsvr::ConfigAutonomousSessionCaptureAllowed(capture, true));
+    capture.xr_input_enabled = true;
+    capture.combat_trace_only = true;
+    CHECK(!dsvr::ConfigAutonomousSessionCaptureAllowed(capture, true));
+  }
   CHECK(c.render_scale_percent == 100);
   CHECK(c.snap_turn_degrees == 45);
   CHECK(c.movement_orientation == dsvr::MovementOrientation::Head);
@@ -47,18 +67,46 @@ int main() {
   CHECK(!c.offline_only_ack);
   CHECK(!c.sanctuary_override && c.menu_distance_m == 2.75f);
   CHECK(c.menu_reading_fov_deg == 52.0f);
-  CHECK(c.frame_limit_fps == 90);
+  CHECK(c.frame_limit_fps == 0);
+  CHECK(c.auto_frame_limit_fps);
   CHECK(c.grip_roll_correction_deg == 12.0f);
   CHECK(!c.force_disable_motion_blur && c.motion_blur_original.empty());
   CHECK(!c.stereo_enabled);
   CHECK(!c.afr_enabled);
+  // Immersive first person is the shipped gameplay view: headlook is on and
+  // the manual theater escape is off. Theater is chosen by menus, the title
+  // screen and cutscenes, or by hand (gameplay_theater / F8).
+  CHECK(c.headlook_enabled);
+  CHECK(!c.gameplay_theater);
+  CHECK(dsvr::FactorySafeDefaults().headlook_enabled);
+  CHECK(!dsvr::FactorySafeDefaults().gameplay_theater);
+  // Every key the file writes must be a key the loader recognises: a written
+  // key nobody reads is a promise the setup would break. ConfigSave and
+  // ConfigLoad are checked against each other by round-tripping a config whose
+  // booleans are all flipped (below), and the written text must name the new
+  // gameplay-view key.
+  {
+    FILE* f = _wfopen(path.c_str(), L"rb");
+    CHECK(f != nullptr);
+    std::string text;
+    if (f) {
+      char buf[4096];
+      size_t got = 0;
+      while ((got = fread(buf, 1, sizeof(buf), f)) > 0) text.append(buf, got);
+      fclose(f);
+    }
+    CHECK(text.find("gameplay_theater") != std::string::npos);
+    CHECK(text.find("headlook_enabled = true") != std::string::npos);
+        CHECK(text.find("frame_limit_fps") == std::string::npos);
+        CHECK(text.find("auto_frame_limit_fps") == std::string::npos);
+  }
 
   // Hand-edited values.
   {
     FILE* f = nullptr;
     CHECK(_wfopen_s(&f, path.c_str(), L"w") == 0 && f);
     fputs("[vr]\nvr_enabled = true\nreshade_host = true\nrender_scale_percent = 150\n"
-          "frame_limit_fps = 144\n"
+          "frame_limit_fps = 144\nauto_frame_limit_fps = false\n"
           "snap_turn_degrees = 30\nhead_directed_move = false\n"
           "[camera]\neye_height = 1.8\nworld_scale = 1.2\n"
           "eye_clearance_m = 0.6\n"
@@ -74,7 +122,8 @@ int main() {
   CHECK(c.vr_enabled);
   CHECK(c.reshade_host);
   CHECK(c.render_scale_percent == 150);
-  CHECK(c.frame_limit_fps == 144);
+  CHECK(c.frame_limit_fps == 0);
+  CHECK(c.auto_frame_limit_fps);
   CHECK(c.snap_turn_degrees == 30);
   CHECK(c.movement_orientation == dsvr::MovementOrientation::Head);
   CHECK(!c.head_directed_move);
@@ -88,7 +137,7 @@ int main() {
   CHECK(c.forward_offset_m == 0.12f && !c.hide_player_model);
   CHECK(c.eye_clearance_m == 0.6f);
   CHECK(!c.hide_head);
-  CHECK(c.embodiment_fit == "arm");
+  CHECK(c.embodiment_fit == "head");  // legacy "arm" spelling: combined fit
   CHECK(c.swing_damage_gain == 1.5f);
   CHECK(!c.haptics);
   CHECK(c.offline_only_ack);
@@ -113,10 +162,96 @@ int main() {
   CHECK(c.eye_clearance_m == 1.2f);
   CHECK(c.swing_damage_gain == 0.1f);
 
+  // A turning mode has to stay live. With both turn modes off the turn
+  // tracker has nothing to integrate and the stick is silently dead, so the
+  // loader restores one rather than shipping a control that does nothing.
+  {
+    FILE* f = nullptr;
+    CHECK(_wfopen_s(&f, path.c_str(), L"w") == 0 && f);
+    fputs("[vr]\nsnap_turn = false\nsmooth_turn = false\nsnap_turn_degrees = 30\n"
+          "smooth_turn_speed_dps = 120\n",
+          f);
+    fclose(f);
+  }
+  CHECK(dsvr::ConfigLoad(path.c_str(), c));
+  CHECK(c.snap_turn || c.smooth_turn);
+  CHECK(c.snap_turn_degrees == 30);      // untouched comfort values
+  CHECK(c.smooth_turn_speed_dps == 120.0f);
+  // One mode on is a choice, not a mistake: the loader must not force both.
+  {
+    FILE* f = nullptr;
+    CHECK(_wfopen_s(&f, path.c_str(), L"w") == 0 && f);
+    fputs("[vr]\nsnap_turn = true\nsmooth_turn = false\n", f);
+    fclose(f);
+  }
+  CHECK(dsvr::ConfigLoad(path.c_str(), c));
+  CHECK(c.snap_turn && !c.smooth_turn);
+
   // Missing file keeps defaults and reports false.
   DeleteFileW(path.c_str());
   CHECK(!dsvr::ConfigLoad(path.c_str(), c));
   CHECK(!c.vr_enabled && c.render_scale_percent == 100);
+
+  // Observer mode is a startup-only desktop path, never a VR companion:
+  // the effective process config must refuse any mix, so a stale or
+  // hand-edited file can never boot flatscreen while claiming VR.
+    {
+    dsvr::Config mixed{};
+    mixed.vr_enabled = true;
+    mixed.observer_only = true;
+    CHECK(!dsvr::ConfigValid(mixed));
+    mixed.observer_only = false;
+    mixed.combat_trace_only = true;
+    CHECK(!dsvr::ConfigValid(mixed));
+    mixed.combat_trace_only = false;
+    mixed.vr_enabled = false;
+    mixed.observer_only = true;
+    CHECK(dsvr::ConfigValid(mixed));
+    }
+
+    // Factory-safe defaults: the average-user shipping posture. VR on, Auto
+    // Smooth cadence, vignette/snap off (calm baseline), honest features.
+    {
+    const dsvr::Config safe = dsvr::FactorySafeDefaults();
+    CHECK(safe.vr_enabled && !safe.observer_only);
+    CHECK(safe.frame_limit_fps == 0 && safe.auto_frame_limit_fps);
+    CHECK(safe.render_scale_percent == 100);
+    CHECK(!safe.comfort_vignette && safe.vignette_strength == 0.65f);
+    CHECK(!safe.snap_turn && safe.snap_turn_degrees == 45);
+    CHECK(safe.smooth_turn && safe.smooth_turn_speed_dps == 360.0f);
+      CHECK(dsvr::Config{}.smooth_turn_speed_dps == 360.0f);
+    CHECK(safe.play_style == "standing" && safe.head_directed_move);
+    CHECK(safe.movement_orientation == dsvr::MovementOrientation::Head);
+    CHECK(safe.movement_controller == dsvr::MovementController::NonDominant);
+    CHECK(!safe.dominant_hand_left && safe.embodiment_fit == "head");
+    CHECK(!safe.arm_ik_enabled && safe.arm_ik_log_only && safe.arm_ik_block_animation);
+    CHECK(safe.motion_attacks && safe.haptics);
+    CHECK(!safe.physical_attacks && !safe.physical_defence && !safe.combat_test_bench);
+    CHECK(!safe.autonomous_session_capture && !safe.verbose_logging);
+    CHECK(!safe.reach_interact && !safe.arm_swing_sprint && !safe.stereo_enabled);
+    CHECK(!safe.combat_trace_only && !safe.hide_player_model && safe.hide_second_model);
+    CHECK(dsvr::ConfigValid(safe));
+    CHECK(dsvr::ConfigSave(path.c_str(), safe));
+    CHECK(dsvr::ConfigLoad(path.c_str(), c) && c == safe);
+  }
+
+  // Manual theater is a persisted choice, not only a live F8 override: it must
+  // survive a save/load cycle, and the immersive default must survive it too.
+  {
+    dsvr::Config view = dsvr::FactorySafeDefaults();
+    view.gameplay_theater = true;
+    CHECK(dsvr::ConfigValid(view));
+    CHECK(dsvr::ConfigSave(path.c_str(), view));
+    dsvr::Config back{};
+    CHECK(dsvr::ConfigLoad(path.c_str(), back));
+    CHECK(back.gameplay_theater);
+    CHECK(back.headlook_enabled);
+    CHECK(back == view);
+    view.gameplay_theater = false;
+    CHECK(dsvr::ConfigSave(path.c_str(), view));
+    CHECK(dsvr::ConfigLoad(path.c_str(), back));
+    CHECK(!back.gameplay_theater);
+  }
 
   // QoL batch 1 + GUI fields: chain, hand, style, hotkey hex, round-trip.
   {
@@ -151,12 +286,20 @@ int main() {
   CHECK(dsvr::ConfigLoad(path.c_str(), c));
   CHECK(c.play_style == "standing");
 
-  // An invalid embodiment_fit keeps the documented default, the same way an
-  // unknown play_style does: a typo must not silently disable the fit.
+  // A legacy "arm" file yields the combined fit; a typo keeps the default,
+  // the same way an unknown play_style does: neither silently disables it.
   {
     FILE* f = nullptr;
     CHECK(_wfopen_s(&f, path.c_str(), L"w") == 0 && f);
-    fputs("[camera]\nembodiment_fit = \"knees\"\n", f);
+    fputs("[camera]\nembodiment_fit = \"arm\"\n", f);  // legacy: combined fit
+    fclose(f);
+  }
+  CHECK(dsvr::ConfigLoad(path.c_str(), c));
+  CHECK(c.embodiment_fit == "head");
+  {
+    FILE* f = nullptr;
+    CHECK(_wfopen_s(&f, path.c_str(), L"w") == 0 && f);
+    fputs("[camera]\nembodiment_fit = \"knees\"\n", f);  // typo: default
     fclose(f);
   }
   CHECK(dsvr::ConfigLoad(path.c_str(), c));
@@ -186,9 +329,10 @@ int main() {
   // ConfigSave -> ConfigLoad round-trip (GUI persists through this path).
   {
     dsvr::Config want;
-    want.vr_enabled = true;
+    want.vr_enabled = false;  // observer mode is desktop-only; VR mix is refused
     want.reshade_host = true;
     want.observer_only = true;
+    want.autonomous_session_capture = true;
     want.render_scale_percent = 125;
     want.loader_chain_proxy = "other.dll";
     want.dominant_hand_left = true;
@@ -214,6 +358,7 @@ int main() {
     want.arm_ik_block_animation = false;
     want.stereo_enabled = true;
     want.afr_enabled = true;
+    want.aa_mode = 1;
     want.force_disable_motion_blur = true;
     want.motion_blur_original = "1";
     want.contact_speed_min = 1.2f;
@@ -228,19 +373,25 @@ int main() {
     want.binding_live_reattach = true;
     want.swing_attack_speed_min = 2.6f;
     want.swing_attack_heavy_min = 6.0f;
-    want.swing_attack_cooldown_ms = 700;
+    
     want.physical_defence = true;
     want.guard_settle_ms = 200;
     want.guard_flick_speed_min = 3.0f;
     want.guard_parry_press_ms = 120;
     want.guard_parry_cooldown_ms = 900;
-    want.embodiment_fit = "arm";
+    want.weapon_mass_table_path = "mass.tbl";
+    want.torque_response = 1.5f;
+    want.halfsword_envelope_m = 0.2f;
+    want.deflect_amplitude = 0.7f;
+    want.deflect_duration_ms = 40;
+    want.embodiment_fit = "head";  // combined fit: the only value written
     CHECK(dsvr::ConfigSave(path.c_str(), want));
     dsvr::Config got;
     CHECK(dsvr::ConfigLoad(path.c_str(), got));
-    CHECK(got.vr_enabled && got.render_scale_percent == 125);
+    CHECK(!got.vr_enabled && got.render_scale_percent == 125);
     CHECK(got.reshade_host);
     CHECK(got.observer_only);
+    CHECK(got.autonomous_session_capture);
     CHECK(got.loader_chain_proxy == "other.dll");
     CHECK(got.dominant_hand_left && got.play_style == "roomscale");
     CHECK(got.movement_orientation == dsvr::MovementOrientation::Controller);
@@ -261,14 +412,20 @@ int main() {
     CHECK(!got.bind_profile_wmr && got.binding_live_reattach);
     CHECK(got.bind_profile_quest3 && got.bind_profile_index &&
           got.bind_profile_simple);
-    CHECK(got.swing_attack_heavy_min == 6.0f && got.swing_attack_cooldown_ms == 700);
+    CHECK(got.swing_attack_heavy_min == 6.0f);
     CHECK(got.physical_defence && got.guard_settle_ms == 200);
     CHECK(got.guard_flick_speed_min == 3.0f && got.guard_parry_press_ms == 120);
     CHECK(got.guard_parry_cooldown_ms == 900);
-    CHECK(got.embodiment_fit == "arm");
+    CHECK(got.weapon_mass_table_path == "mass.tbl");
+    CHECK(got.torque_response == 1.5f);
+    CHECK(got.halfsword_envelope_m == 0.2f);
+    CHECK(got.deflect_amplitude == 0.7f);
+    CHECK(got.deflect_duration_ms == 40);
+    CHECK(got.embodiment_fit == "head");  // "arm" now yields the combined fit
     CHECK(got.force_disable_motion_blur && got.motion_blur_original == "1");
     CHECK(got.stereo_enabled);
     CHECK(got.afr_enabled);
+    CHECK(got.aa_mode == 1);
   }
   // P4 input gate: defaults ON since 0.11.0 (off = Quest controllers
   // produced no input at all), parses under both key spellings, and
@@ -287,8 +444,8 @@ int main() {
           gate.bind_profile_wmr && gate.bind_profile_simple);
     CHECK(!gate.binding_live_reattach);
     CHECK(gate.swing_attack_heavy_min == 4.5f);
-    CHECK(gate.swing_attack_cooldown_ms == 500);
-    CHECK(!gate.physical_defence && gate.guard_settle_ms == 120);
+    
+    CHECK(!gate.physical_defence && gate.guard_settle_ms == 0);
     CHECK(gate.guard_flick_speed_min == 2.2f && gate.guard_parry_press_ms == 90);
     CHECK(gate.guard_parry_cooldown_ms == 700);
     FILE* f = nullptr;
@@ -333,11 +490,29 @@ int main() {
     CHECK(dsvr::ConfigLoad(path.c_str(), c));
     CHECK(c.menu_distance_m == 4.0f && c.menu_reading_fov_deg == 45.0f);
   }
-  // 80 Hz is a native Quest display rate and must survive fallback persistence.
+  // Legacy rate keys are ignored and not serialized.
   c.frame_limit_fps = 80;
+  c.auto_frame_limit_fps = false;
   CHECK(dsvr::ConfigValid(c));
   CHECK(dsvr::ConfigSave(path.c_str(), c));
-  CHECK(dsvr::ConfigLoad(path.c_str(), c) && c.frame_limit_fps == 80);
+  CHECK(dsvr::ConfigLoad(path.c_str(), c) && c.frame_limit_fps == 0 &&
+        c.auto_frame_limit_fps);
+  // Last-known headset sidecar: the game records the shipped refresh rate
+  // beside the toml; the launcher reads it without probing any runtime.
+  {
+    const std::wstring sidecar = std::wstring(path) + L".headset-hz";
+    DeleteFileW(sidecar.c_str());
+    CHECK(dsvr::ReadLastHeadsetHz(sidecar.c_str()) == 0);  // absent = unknown
+    CHECK(dsvr::WriteLastHeadsetHz(sidecar.c_str(), 53));
+          CHECK(dsvr::ReadLastHeadsetHz(sidecar.c_str()) == 53);
+          CHECK(dsvr::WriteLastHeadsetHz(sidecar.c_str(), 120));
+    CHECK(dsvr::ReadLastHeadsetHz(sidecar.c_str()) == 120);
+    CHECK(dsvr::WriteLastHeadsetHz(sidecar.c_str(), 0));  // never persist unknown
+    CHECK(dsvr::ReadLastHeadsetHz(sidecar.c_str()) == 120);
+    CHECK(dsvr::WriteLastHeadsetHz(sidecar.c_str(), -90));  // negative is unknown too
+    CHECK(dsvr::ReadLastHeadsetHz(sidecar.c_str()) == 120);
+    DeleteFileW(sidecar.c_str());
+  }
   DeleteFileW(path.c_str());
 
   printf("test_config: PASS\n");

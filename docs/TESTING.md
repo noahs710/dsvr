@@ -1,6 +1,6 @@
 # DSVR testing and operation
 
-Current: 21 October 2026. [Documentation authority](../README.md#authority-and-maintenance). This is the sole operating/testing policy. Follow the [execution guide](superpowers/plans/2026-10-21-native-conversion-execution.md) for task order and the [runbook](VERIFICATION_RUNBOOK.md) for cases/thresholds.
+Current: 21 October 2026. [Documentation authority](../README.md#authority-and-maintenance). This is the sole operating/testing policy. Follow the [cockpit plan](../MODDING_PLAN.md) for task order and the [runbook](VERIFICATION_RUNBOOK.md) for cases/thresholds.
 
 ## Authorization and run boundaries
 
@@ -63,11 +63,11 @@ is only the inner loop. Slow labels live beside each `add_test` in
 tests/CMakeLists.txt — label a new test `slow` if it waits on production
 timing rather than asserting instantly.
 
-tools/auto_verify.ps1 configures/builds Release, runs CTest and setup doctor, then refreshes dist/DSVR-latest and its ZIP/verification/CTest receipts on success. Code-only turns can pass `-SkipDoctor -SkipPackage` (build + full CTest only; the doctor/package stages stay default). It does not install or launch, and does not replace Debug/native/headset qualification. Never reuse historical suite totals as current results. sources/tests define config defaults.
+tools/auto_verify.ps1 configures/builds Release, runs CTest and setup Doctor. Successful nonformal runs refresh `dist/DSVR-latest` and its ZIP/verification/CTest receipts. Formal `-Package -Version` runs skip the mutable latest package and publish immutable versioned assets after the release gate. Code-only turns can pass `-SkipDoctor -SkipPackage` (build + full CTest only). It does not install or launch, and does not replace Debug/native/headset qualification. Never reuse historical suite totals as current results. sources/tests define config defaults.
 
 With DSR closed, setup supports `--doctor`, `--install [--game <folder>]` and `--uninstall`; inspect current implementation/help before use. `--yes` acknowledges setup prompts; it does not prove run preconditions. Setup deploys loader/core; an optional ReShade host/add-on requires its own pinned matched binaries and reversible manifest. Select one host at startup; restart for host/action/resource changes rather than assuming reload fully reinitializes XR.
 
-Formal versioned packages are immutable and require a passed release gate plus a new version. Use `pwsh -File tools/auto_verify.ps1 -Package -Version <new-version>` only after qualification. Development-package refresh is not a release claim. Include original mod code/config/notices and install/rollback/control/support instructions; exclude game assets, decompilation, credentials and saves. Upload/publication is separately authorized.
+Formal versioned packages are immutable and require a passed release gate plus a new version. After qualification, run `pwsh -File tools/auto_verify.ps1 -Package -Version <new-version>`: it requires every A-J/K1-K4 checkbox closed, full CTest and Doctor pass, authenticated `gh`, and the existing pre-pushed `v<version>` tag, then automatically publishes the ZIP, Setup executable and SHA-256 manifest to the repository configured by `origin`. It never creates or pushes tags. If upload fails before GitHub creates a release, retry `python -B tools/publish_release.py publish --lanes .empryo/cockpit/lanes --out dist --version <version> --ctest-log build/latest-ctest.txt --doctor-log build/latest-doctor.txt` after fixing tag/auth; the immutable candidate remains. Development-package refresh is not a release claim. Include original mod code/config/notices and install/rollback/control/support instructions; exclude game assets, decompilation, credentials and saves.
 
 ## Native/headset acceptance
 
@@ -77,4 +77,4 @@ Use the runbook cases and the execution ledger A–K on the exact candidate/pack
 
 Record a reproducible native session of at least ten minutes for an integrated candidate, plus paired eye captures and a 20–45 second gameplay clip before a user-facing playable claim. Final campaign qualification also requires the campaign/special-action matrix and a longer progression session; a ten-minute arena run alone is insufficient.
 
-Support evidence includes DSVR.log, DSVR-crash dumps, doctor output, exact config/package identity and complete trace; tools/vr_trace.py can analyze captures. For black images isolate source/eye/compositor with bounded observation. For walking lag collect matched tracking/root/view timings. Uninstall test-owned extra DLLs before online use; Steam verification does not necessarily remove extra proxies.
+Support evidence includes DSVR.log, DSVR-crash dumps, doctor output, exact config/package identity and complete trace; the overhauled tools/vr_trace.py analyzes captures and autonomous session indexes (external-writer transport receipts included). All trace runs go through the overhauled path; the standalone classify/profile/split/prune scripts were culled 27 Oct. For black images isolate source/eye/compositor with bounded observation. For walking lag collect matched tracking/root/view timings. Uninstall test-owned extra DLLs before online use; Steam verification does not necessarily remove extra proxies.

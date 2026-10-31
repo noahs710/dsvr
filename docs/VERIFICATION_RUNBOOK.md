@@ -1,6 +1,6 @@
 # DSVR verification runbook
 
-Current: 21 October 2026. [Authority](../README.md#authority-and-maintenance). This file owns acceptance procedures/thresholds. [TESTING](TESTING.md) owns protected operation; the [execution guide](superpowers/plans/2026-10-21-native-conversion-execution.md) owns sequence and gates. Cases below are requirements, not claims of implemented features.
+Current: 21 October 2026. [Authority](../README.md#authority-and-maintenance). This file owns acceptance procedures/thresholds. [TESTING](TESTING.md) owns protected operation; the [cockpit plan](../MODDING_PLAN.md) owns sequence and gates. Cases below are requirements, not claims of implemented features.
 
 ## Prepare and restore
 
@@ -69,33 +69,93 @@ touching the rate policy. A `NOT-MATCHING-RUNTIME-CADENCE` tag beside a correct
 `RateMatch:` line means the setter did not take effect on the owner. Growing
 `rejected` with steady `frames` means the game stalled past 100 ms and the window
 refused to average it. Paste the `Pacing:` lines and the preflight summary into the
-run record and MODLOG; `frame_limit_fps=90` is the installed profile and 100 Hz is
-not in the supported rate set.
+run record and MODLOG. DSR-FPS-Unlock must receive the last headset-reported
+refresh in VR or the current monitor refresh on desktop; DSVR applies no native
+frame cap. With no known VR refresh, the unlocker must remain disabled rather
+than select a preset; the first observed HMD rate is applied next launch.
 
 ## Detailed combat, roomscale, body and comfort matrix
 
 ### Diagnostic capture before native combat qualification
 
+All trace runs use the overhauled autonomous session path: the external
+`DSVR-TraceWriter.exe` owns the capture file (pipe + checkpoint ack +
+transport receipt), segments rotate at the 600-second writer maximum with
+genuine footers, and a unique append-only session index binds
+session/epoch/segment identity. Analyze with
+`python tools/vr_trace.py <session-index.jsonl>` (auto-detected by the
+`session_start` first record) or `python tools/vr_trace.py <capture.jsonl>`
+for a single segment; its exit 2 is expected while full VR acceptance is
+incomplete — inspect individual checks. The declared `capture_domain` sets
+the scope: `session` admits native combat/interaction/input-blocker/pad/grip
+events only; a `combat` capture installs no render or camera probes, so
+`submission_coverage` is `NOT_APPLICABLE` there and its absence is not a
+defect, while a `full` or legacy capture with no submissions stays invalid.
+Either way `gpu_stereo`, `native_scenario` and `comfort` remain `UNVERIFIED`.
+The standalone `classify_cases.py` was culled 27 Oct; per-window case binding
+comes from the overhauled analyzer's case report, never a separate script.
+
 Use `verbose_logging=true` and the existing F9/menu capture: maximum 20 seconds.
 The ordinary build logs capability/queue health but deliberately excludes the
 natural native contact hook. A separately verified `DSVR_ENABLE_LAB=ON` build is
 required for contact observations; preserve the regular build's option/cache.
-The capture header records `combat_hook`, `combat_detail_schema` and
-`combat_context_schema`: verify
-these instead of assuming verbose mode installed the contact observer.
+The capture header records `combat_hook`, `combat_detail_schema`,
+`combat_context_schema`, `combat_health_schema` and `combat_health_hook`:
+check them rather than assuming verbose mode installed an observer. With health
+schema 1, inspect each sample's `health_writer_observation` for the caller,
+actor-side pointer match and requested HP. The caller is the return address in
+the game code; resolve it with GhidraMCP against the pinned executable. A request
+does not prove that HP changed or that the contact caused it. Legacy captures
+without these fields remain unknown.
 
-Capture the existing B1 original-controls cases separately (hit, miss, block,
-parry, dodge/invulnerability) under TESTING's disposable-save transaction. Record
-the intended case, actor/equipment and independent visible result; do not label
-a callback or HP delta as an attributable weapon hit. The contact observer reads
-at most 256 natural calls per capture, without injecting calls or haptics.
+The retained B1 runs already cover hit, miss, wall, block and parry-only windows.
+Do not repeat that matrix. The only requested new gameplay observation is one
+ordinary, unblocked hit during a 20-second `natural_hit` window, to correlate the
+setter caller with the contact/context and existing HP delta:
 
-Analyze with `python tools/vr_trace.py <capture.jsonl>`. Its exit 2 is expected
-while full VR acceptance is incomplete; inspect individual checks. The declared
-`capture_domain` sets the scope: a `combat` capture installs no render or camera
-probes, so `submission_coverage` is `NOT_APPLICABLE` there and its absence is
-not a defect, while a `full` or legacy capture with no submissions stays invalid.
-Either way `gpu_stereo`, `native_scenario` and `comfort` remain `UNVERIFIED`.
+```powershell
+$receipt = 'build/verification/combat-health-writer-20261028/receipt.json'
+$candidate = 'build/verification/combat-health-writer-20261028/candidate-sealed-3.json'
+pwsh -NoProfile -File tools/run_combat_capture.ps1 -Mode Check -CandidateReceipt $candidate -Receipt $receipt -Cases 'natural_hit:20' -WindowMinutes 2
+pwsh -NoProfile -File tools/run_combat_capture.ps1 -Mode Run -CandidateReceipt $candidate -Receipt $receipt -Cases 'natural_hit:20' -WindowMinutes 2
+```
+
+`candidate-sealed.json` and `candidate-sealed-2.json` are superseded by
+`candidate-sealed-3.json`: each earlier seal predated a documentation-only edit,
+so its source manifest no longer hashed clean. The LAB core and loader hashes are
+identical in all three, and the qualification runs (Debug 113/113, Release
+113/113, LAB Release 111/111) apply to that same build tree. Never rewrite any of
+them; a stale manifest is resealed forward, never repaired.
+
+The preflight is read-only and refuses until Steam is genuinely offline: set
+Steam `Go Offline` (the `WantsOfflineMode` preference plus a `[Logged Off,`
+line in `Steam\logs\connection_log.txt`), keep the exact-game outbound block,
+and leave the game closed. It also requires the default disposable seed vault
+under `%USERPROFILE%\.dsvr-backups\desktop-observer-20261023-140650`, which an
+agent session may not read.
+
+When the runner prints `CASE natural_hit`, land one ordinary hit on the repeatable
+target and do nothing else during that window. Then request a clean stop and
+close the game normally:
+
+```powershell
+pwsh -NoProfile -File tools/run_combat_capture.ps1 -Mode Finish -Receipt $receipt
+# Wait for the runner to print its restored/hash-verified receipt.
+$trace = Get-ChildItem (Split-Path $receipt) -Filter 'DSVR-trace-*.jsonl' -File |
+  Sort-Object LastWriteTime -Descending | Select-Object -First 1
+python tools/vr_trace.py $trace.FullName
+```
+
+The `Finish` command runs from a second PowerShell window while `Run` is active;
+define `$receipt` again in that window. The Run transaction writes the footer
+and restores the original files and save roots automatically after normal game
+exit. Do not launch the game a second time to inspect the trace.
+
+Only continue if the preflight prints CHECK PASS, the game header reports both
+combat hooks enabled, and the trace closes with zero drops/errors. If the
+candidate or preflight refuses, stop there; do not substitute an older LAB DLL.
+The contact observer reads at most 256 natural calls per short capture and
+injects no calls, damage or haptics.
 Require
 `capture_integrity` and `combat_observation_integrity` PASS for usable detailed
 correlation, then inspect `coverage_limitations`, `contact_limit_reached`, actor
@@ -131,6 +191,12 @@ These are proposed engineering pass thresholds, not measured performance or plat
 | Physical rules | Repeat against shield block, parry, dodge invulnerability, solid wall and two-handed stance; inspect native costs/reaction/status. | Correct native mitigation/invulnerability, stamina/poise/reaction, no through-wall hit or duplicate side effects. |
 | Resting and false hits | Hold overlap 10 s; walk, strafe and right-stick turn with a still weapon; recenter; lose/recover tracking; swap equipment and reuse actor addresses. | Zero unintended attacks, resting repeat damage or stale-target calls. A fresh valid swing can attack again. |
 | Sweep and timing | Replay the same captured slash/thrust, including fast rotational motion, with varied tracking/native rates and duplicate render visits. | Same target/contact episode and attack variant; no tunneling/duplicate outcomes. Deterministic native fixture has equal damage/costs; noisy human repetitions are analyzed separately. |
+| Whole-blade sweep | Cross small/thin targets between samples with the tip and middle of the blade; combine translation/rotation, cross multiple eligible targets, and repeat with a solid between blade and target. | Every intersected eligible target gets its native outcome once per contact episode; no endpoint-only gaps, through-wall hit or duplicate render cost. Unresolved geometry is recorded, not counted as a clean miss. |
+| Stone/wall drag | Drag the side/tip tangentially along stone floor and wall, then break contact and recontact. Capture native effects, audio and contact identity. | Contact sparks persist while scraping; no scrape sound. Contact break/re-entry cannot farm stamina costs or repeated first-impact reactions. |
+| Direct wall impact | Strike the wall directly, continue moving the blade, and immediately attack a reachable target. Compare native stamina and reaction state against an unobstructed swing. | Additional stamina cost for the wall impact, attributed once; continued attack control, no wall-stun animation, no damage through the wall. |
+| Shield surface | Intercept an incoming blade/projectile at centre and rim while holding the shield at different heights/angles and moving it; repeat just outside its surface. | Actual shield contact produces native blocking/mitigation/cost/guard break as appropriate; outside-surface attacks retain native behavior. No canonical raised/still pose requirement. |
+| Shield motion parry | Meet a parryable attack with a fast shield motion toward it. Compare a stationary shield, equally fast motion away, slow approach, held overlap and an unparryable attack. | Only eligible contact with sufficient motion toward the attack qualifies; native reaction attribution and one parry per attack/contact episode. No rest-return requirement or raise-timer credit. |
+| Omnidirectional dodge | Dodge at cardinal, diagonal and intermediate stick angles with lock-on on/off and both movement references; measure resolved root displacement and native stamina/invulnerability. | Dodge heading follows the requested continuous angle within 2 degrees, with native collision, costs and invulnerability. No snapping to four or eight axes; analog input delivery alone does not pass this gate. |
 | HMD-relative stick | All cardinal/diagonal stick directions at HMD yaw 0/90/180/270, both hands pointing elsewhere, head pitched up/down. | Horizontal intent within 2 degrees of expected HMD-relative direction; diagonal speed no greater than full cardinal speed; no controller-derived steering. |
 | Controller-relative stick | Repeat cardinal/diagonal tests with the selected controller heading fixed and HMD scanning left/right/up/down; then intentionally yaw the reference controller. Test non-dominant and explicit left/right. | Head scanning changes view without changing the intended travel heading; intent follows selected controller yaw within 2 degrees. The unselected controller does not steer. |
 | Reference stability/preferences | Lower/raise the selected hand through vertical, lose/recover controller tracking, change orientation/reference/handedness while holding forward, then release/rearm and restart. Set the reference in DSVR-Setup and in the mod menu, reload (F7) and restart, and confirm a fresh install default. | No accidental forward reversal. The left stick is never dead: an untracked or vertically-aimed selected hand returns steering to the head reference, and a reacquired hand re-engages only after a neutral stick. Artificial translation neutralizes only when the locomotion packet is stale or epoch-mismatched, while valid physical walking continues. Setting changes apply after neutral, persist to DSVR.toml, and legacy hand settings migrate as specified; fresh installs default to Head-oriented smooth locomotion. |

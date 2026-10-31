@@ -38,6 +38,9 @@ if(TARGET openxr_loader)
     MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
+add_executable(dsvr_trace_writer trace_writer.cpp)
+set_target_properties(dsvr_trace_writer PROPERTIES OUTPUT_NAME "DSVR-TraceWriter")
+
 add_library(dsvr_core SHARED
   core.cpp
   gate.h
@@ -46,6 +49,8 @@ add_library(dsvr_core SHARED
   crash.cpp
   diagnostics.h
   diagnostics.cpp
+  autonomous_capture.h
+  autonomous_capture.cpp
   mod_menu.cpp
   mod_menu.h
   ui_suppression.h
@@ -83,6 +88,8 @@ add_library(dsvr_core SHARED
   camhook.cpp
   frame_rate.h
   frame_rate.cpp
+  input_frame_acquisition.h
+  input_frame_acquisition.cpp
   input.h
   input.cpp
   xinput_bridge.h

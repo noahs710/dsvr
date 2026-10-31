@@ -20,8 +20,7 @@ namespace dsvr {
 //   - The bars a swing must clear go UP with load. A heavy weapon needs a more
 //     committed motion to register at all, and a much more committed motion to
 //     read as a strong attack, so a controlled heavy strike is the reward.
-//   - The rest window, settle time and cooldown grow with load: the weapon is
-//     slower to bring to bear and slower to recover.
+//   - The stop-speed threshold stays fixed; load adds no timed delay or cooldown.
 //   - Damage gain rises with load, so the one clean hit a heavy weapon lands
 //     is worth more than the flurry a light one can spam.
 //   - Reach NEVER shrinks. A longer weapon keeps its range advantage at every
@@ -36,12 +35,8 @@ inline constexpr float kEquipLoadMax = 28.0f;
 
 struct WeaponWeightParams {
   float load_max = kEquipLoadMax;
-  float speed_gain = 0.65f;     // +65% swing bars at full load
-  float settle_gain = 1.0f;     // +100% settle time at full load
-  float cooldown_gain = 1.25f;  // +125% recovery at full load
-  float rest_gain = 0.35f;      // rest band rises too, or a heavy arm at rest
-                                // reads as a slow swing
-  float damage_gain = 0.80f;    // +80% damage scale at full load
+  float speed_gain = 0.65f;  // +65% swing start bars at full load
+  float damage_gain = 0.80f; // +80% native hit scale at full load
 };
 
 struct WeaponWeight {
@@ -65,30 +60,15 @@ inline WeaponWeight WeaponWeightFromLoad(float load,
   return w;
 }
 
-// Bars rise with load, and the ordering the swing trigger validates stays
-// intact: rest < thrust light bar <= light bar <= heavy bar.
+// Start-speed bars rise with load. Stop speed remains the trigger's fixed band.
 inline SwingAttackParams WeaponWeightSwingParams(
     const SwingAttackParams& base, const WeaponWeight& weight,
     const WeaponWeightParams& p = {}) {
   SwingAttackParams out = base;
   if (!weight.reported) return out;
   const float speed = 1.0f + p.speed_gain * weight.fraction;
-  const float rest = 1.0f + p.rest_gain * weight.fraction;
   out.slash_speed_min = base.slash_speed_min * speed;
   out.slash_heavy_min = base.slash_heavy_min * speed;
-  out.rest_speed_max = base.rest_speed_max * rest;
-  // A heavy weapon's rest band must stay under its own quietest possible
-  // qualifying swing, or the detector would call a slow drag a rest and a
-  // slow drag a swing at the same time.
-  out.rest_speed_max =
-      std::min(out.rest_speed_max, out.slash_speed_min * out.thrust_ratio * 0.5f);
-  const float settle = 1.0f + p.settle_gain * weight.fraction;
-  out.settle_ms = base.settle_ms + long long(base.settle_ms * (settle - 1.0f));
-  out.rest_ms_min =
-      base.rest_ms_min + long long(base.rest_ms_min * (settle - 1.0f));
-  out.cooldown_ms =
-      base.cooldown_ms +
-      long long(base.cooldown_ms * p.cooldown_gain * weight.fraction);
   return out;
 }
 
@@ -108,6 +88,25 @@ inline float WeaponWeightDamageScale(float base_gain, const WeaponWeight& weight
 inline float WeaponWeightReach(float blade_length_m, const WeaponWeight&,
                                const WeaponWeightParams& = {}) {
   return blade_length_m;
+}
+
+// Slice 1 torque profile: weight shapes how fast tip speed can RISE, not the
+// damage it deals. A heavy weapon lags the hand (low response) and needs a
+// committed swing to reach the same tip speed a dagger reaches 1:1; the
+// energy gate (contact_speed_min -> DamageScaleContinuous) then decides the
+// scale. `response` is the per-weapon rate from the offline mass/inertia
+// table (torque_response config, 0.2..3.0); <= 0 or non-finite refuses.
+// Returns the gated speed the scale should be measured at.
+inline float TorqueGatedSpeed(float measured_speed, float response) {
+  if (!std::isfinite(measured_speed) || !std::isfinite(response) ||
+      response <= 0.0f)
+    return 0.0f;
+  if (measured_speed <= 0.0f) return 0.0f;
+  // response = 1 is transparent; below 1 lags (heavy), above 1 leads (light).
+  // Clamped so a mis-tuned table can never manufacture speed from rest.
+  const float gated = measured_speed * response;
+  if (!std::isfinite(gated) || gated < 0.0f) return 0.0f;
+  return gated;
 }
 
 }  // namespace dsvr

@@ -116,6 +116,126 @@ void DeterministicPerClass() {
         "the same per-class eligibility always gives the same answer");
 }
 
+dsvr::InteractionSelection BoundSelection() {
+  dsvr::InteractionSelection s;
+  s.row_handle = 111u;
+  s.object_handle = 0x21d4c9beu;
+  s.generation = 1u;
+  s.dummy_valid = true;
+  s.dummy_pos[0] = 0.5f;
+  s.dummy_pos[1] = 0.0f;
+  s.dummy_pos[2] = 1.0f;
+  return s;
+}
+
+void UnboundSelectionRefuses() {
+  check(!dsvr::SelectionBound(dsvr::InteractionSelection()),
+        "an unbound selection never counts as selected");
+  check(!dsvr::SelectTargetEligibleWithSelection(
+            Eligible(), dsvr::InteractionSelection()),
+        "an eligible gesture with no selected row never interacts");
+}
+
+void SelectionRequiresIdentity() {
+  {
+    auto s = BoundSelection();
+    s.row_handle = 0u;
+    check(!dsvr::SelectionBound(s),
+          "a selection with no row handle never counts as selected");
+  }
+  {
+    auto s = BoundSelection();
+    s.object_handle = 0u;
+    check(!dsvr::SelectionBound(s),
+          "a selection with no object handle never counts as selected");
+  }
+  {
+    auto s = BoundSelection();
+    s.generation = 0u;
+    check(!dsvr::SelectionBound(s),
+          "a selection with no object generation never counts as selected");
+  }
+  {
+    auto s = BoundSelection();
+    s.dummy_valid = false;
+    check(!dsvr::SelectionBound(s),
+          "a selection with no dummy position never counts as selected");
+  }
+  {
+    auto s = BoundSelection();
+    s.dummy_pos[0] = std::nanf("");
+    check(!dsvr::SelectionBound(s),
+          "a selection with a non-finite dummy never counts as selected");
+  }
+}
+
+void BoundSelectionPassesWhenEligible() {
+  check(dsvr::SelectTargetEligibleWithSelection(Eligible(), BoundSelection()),
+        "prompt + LOS + valid lifecycle + bound selection + in-range target is eligible");
+}
+
+void BoundSelectionStillNeedsEligibility() {
+  auto e = Eligible();
+  e.prompt_visible = false;
+  check(!dsvr::SelectTargetEligibleWithSelection(e, BoundSelection()),
+        "a bound selection with no prompt never interacts");
+  check(!dsvr::SelectTargetEligibleWithSelection(
+            Eligible(), dsvr::InteractionSelection()),
+        "eligibility with no selection never interacts");
+}
+
+void UnknownClassStillRefusesWithSelection() {
+  check(!dsvr::SelectTargetEligibleForClassWithSelection(
+            Eligible(), dsvr::InteractionClass::Unknown, BoundSelection()),
+        "an unknown interaction class never interacts even when selected");
+}
+
+void StaleSelectionRefuses() {
+  dsvr::InteractionSelectionStore store;
+  auto s = BoundSelection();
+  store.Publish(s, 1000LL);
+  check(store.Bound(1000LL + dsvr::kInteractionSelectionFreshMs - 1),
+        "a fresh selection stays bound inside its window");
+  check(!store.Bound(1000LL + dsvr::kInteractionSelectionFreshMs),
+        "a selection at exactly its age bound is stale and refuses");
+  check(!dsvr::SelectTargetEligibleWithStoredSelection(
+            Eligible(), store, 1000LL + dsvr::kInteractionSelectionFreshMs),
+        "an eligible gesture with a stale selection never interacts");
+}
+
+void RepublishRearms() {
+  dsvr::InteractionSelectionStore store;
+  store.Publish(BoundSelection(), 1000LL);
+  check(!store.Bound(1000LL + dsvr::kInteractionSelectionFreshMs),
+        "a selection past its age bound refuses before republish");
+  auto s = BoundSelection();
+  s.row_handle = 110u;
+  store.Publish(s, 1000LL + dsvr::kInteractionSelectionFreshMs);
+  check(store.Bound(1000LL + dsvr::kInteractionSelectionFreshMs),
+        "a republished selection re-arms the gate");
+  dsvr::InteractionSelection out{};
+  check(store.Latest(out) && out.row_handle == 110u,
+        "the store returns the latest published selection");
+}
+
+void InvalidateRefuses() {
+  dsvr::InteractionSelectionStore store;
+  store.Publish(BoundSelection(), 1000LL);
+  check(store.Bound(1200LL), "a published selection binds inside its window");
+  store.Invalidate();
+  check(!store.Bound(1200LL),
+        "an invalidated selection refuses even inside its window");
+  check(!dsvr::SelectTargetEligibleWithStoredSelection(Eligible(), store, 1200LL),
+        "an eligible gesture with an invalidated selection never interacts");
+}
+
+void ClockWarpRefuses() {
+  dsvr::InteractionSelectionStore store;
+  store.Publish(BoundSelection(), 2000LL);
+  check(!store.Bound(1000LL),
+        "a clock step behind the publish time refuses fail-closed");
+}
+
 }  // namespace
 
 int main() {
@@ -126,6 +246,15 @@ int main() {
   UnknownClassRefuses();
   LeverDefaultRangeRefuses();
   DeterministicPerClass();
+  UnboundSelectionRefuses();
+  SelectionRequiresIdentity();
+  BoundSelectionPassesWhenEligible();
+  BoundSelectionStillNeedsEligibility();
+  UnknownClassStillRefusesWithSelection();
+  StaleSelectionRefuses();
+  RepublishRearms();
+  InvalidateRefuses();
+  ClockWarpRefuses();
   if (g_fail) {
     std::printf("%d interaction_target test(s) failed\n", g_fail);
     return 1;

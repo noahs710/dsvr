@@ -42,6 +42,10 @@ bool CameraIsTitle();
 // Fresh natural follow-camera sample with a validated local player root.
 // Unknown/title/loading/stale returns false; independent of XR presentation.
 bool CameraGameplayReady();
+// Non-3D cutscene detector: scripted camera takes the follow-cam off its
+// gameplay path (native cutscene flag / camera teleport without player
+// motion). Forces theater; never immersive. False when unknown.
+bool CameraNativeCutscene();
 // Read-only diagnostic geometry/identity, NOT a verified gameplay/safe-scene gate.
 void CameraReadLabObservation(void* follow_cam_self, LabObservation& out);
 

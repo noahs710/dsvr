@@ -20,8 +20,10 @@ namespace {
 
 using XInputGetStateFn = DWORD(WINAPI*)(DWORD, XINPUT_STATE*);
 using XInputGetCapabilitiesFn = DWORD(WINAPI*)(DWORD, DWORD, XINPUT_CAPABILITIES*);
-std::atomic<XInputGetStateFn> g_original{nullptr};
-std::atomic<XInputGetCapabilitiesFn> g_caps_original{nullptr};
+// Untyped like the IAT slots: both routes of one export share one detour body
+// (MergeRoute), which names the function type at the call site.
+std::atomic<void*> g_original{nullptr};
+std::atomic<void*> g_caps_original{nullptr};
 void* g_target = nullptr;
 void* g_caps_target = nullptr;
 std::atomic<unsigned long long> g_last_hash{0};
@@ -281,25 +283,38 @@ DWORD MergeXInputState(DWORD user_index, XINPUT_STATE* state, DWORD result) {
   return ERROR_SUCCESS;
 }
 
-DWORD WINAPI XInputGetStateDetour(DWORD user_index, XINPUT_STATE* state) {
-  if (!state) return ERROR_BAD_ARGUMENTS;
-  const auto original = g_original.load(std::memory_order_acquire);
+// One body for both routes of an export: call the saved original, then merge
+// only while this route is enabled. The inline and IAT detours differ only in
+// which slot holds the original and which flag gates the merge, so the pair
+// cannot drift apart when the merge contract changes.
+// The pointer argument is checked and forwarded last; the leading args (user
+// index, and for capabilities the flags) pass through untouched. Fn is named
+// explicitly because the slot stores an untyped pointer for both routes.
+template <typename Fn, typename Merge, typename Pointer, typename... Lead>
+DWORD MergeRoute(std::atomic<void*>& original_slot, const std::atomic<bool>& enabled,
+                 Merge merge, Pointer* argument, Lead... lead) {
+  if (!argument) return ERROR_BAD_ARGUMENTS;
+  const auto original = reinterpret_cast<Fn>(original_slot.load(std::memory_order_acquire));
   if (!original) return ERROR_DEVICE_NOT_CONNECTED;
-  const DWORD result = original(user_index, state);
-  if (!g_inline_enabled.load(std::memory_order_acquire)) return result;
-  return MergeXInputState(user_index, state, result);
+  const DWORD result = original(lead..., argument);
+  if (!enabled.load(std::memory_order_acquire)) return result;
+  return merge(lead..., argument, result);
+}
+
+DWORD WINAPI XInputGetStateDetour(DWORD user_index, XINPUT_STATE* state) {
+  return MergeRoute<XInputGetStateFn>(g_original, g_inline_enabled,
+                                      MergeXInputState, state, user_index);
 }
 
 DWORD WINAPI XInputIatDetour(DWORD user_index, XINPUT_STATE* state) {
-  if (!state) return ERROR_BAD_ARGUMENTS;
-  const auto original = reinterpret_cast<XInputGetStateFn>(
-      g_state_iat.original.load(std::memory_order_acquire));
-  if (!original) return ERROR_DEVICE_NOT_CONNECTED;
-  const DWORD result = original(user_index, state);
-  if (!g_state_iat.enabled.load(std::memory_order_acquire)) return result;
-  if (user_index == 0 && !g_logged_first_iat_poll.exchange(true))
-    DSVR_LOG("XInput: first game poll through IAT fallback (user=0, native_result=%lu; XR state separate)", result);
-  return MergeXInputState(user_index, state, result);
+  return MergeRoute<XInputGetStateFn>(
+      g_state_iat.original, g_state_iat.enabled,
+      [](DWORD user, XINPUT_STATE* s, DWORD result) {
+        if (user == 0 && !g_logged_first_iat_poll.exchange(true))
+          DSVR_LOG("XInput: first game poll through IAT fallback (user=0, native_result=%lu; XR state separate)", result);
+        return MergeXInputState(user, s, result);
+      },
+      state, user_index);
 }
 
 // A Quest-only player has no physical XInput device, so the native call answers
@@ -333,23 +348,22 @@ DWORD MergeXInputCapabilities(DWORD user_index, XINPUT_CAPABILITIES* caps,
 
 DWORD WINAPI XInputGetCapabilitiesDetour(DWORD user_index, DWORD flags,
                                          XINPUT_CAPABILITIES* caps) {
-  if (!caps) return ERROR_BAD_ARGUMENTS;
-  const auto original = g_caps_original.load(std::memory_order_acquire);
-  if (!original) return ERROR_DEVICE_NOT_CONNECTED;
-  const DWORD result = original(user_index, flags, caps);
-  if (!g_caps_inline_enabled.load(std::memory_order_acquire)) return result;
-  return MergeXInputCapabilities(user_index, caps, result, "inline hook");
+  return MergeRoute<XInputGetCapabilitiesFn>(
+      g_caps_original, g_caps_inline_enabled,
+      [](DWORD user, DWORD, XINPUT_CAPABILITIES* c, DWORD result) {
+        return MergeXInputCapabilities(user, c, result, "inline hook");
+      },
+      caps, user_index, flags);
 }
 
 DWORD WINAPI XInputCapsIatDetour(DWORD user_index, DWORD flags,
                                  XINPUT_CAPABILITIES* caps) {
-  if (!caps) return ERROR_BAD_ARGUMENTS;
-  const auto original = reinterpret_cast<XInputGetCapabilitiesFn>(
-      g_caps_iat.original.load(std::memory_order_acquire));
-  if (!original) return ERROR_DEVICE_NOT_CONNECTED;
-  const DWORD result = original(user_index, flags, caps);
-  if (!g_caps_iat.enabled.load(std::memory_order_acquire)) return result;
-  return MergeXInputCapabilities(user_index, caps, result, "IAT fallback");
+  return MergeRoute<XInputGetCapabilitiesFn>(
+      g_caps_iat.original, g_caps_iat.enabled,
+      [](DWORD user, DWORD, XINPUT_CAPABILITIES* c, DWORD result) {
+        return MergeXInputCapabilities(user, c, result, "IAT fallback");
+      },
+      caps, user_index, flags);
 }
 
 // Intercept one xinput export: an owned MinHook trampoline when trampoline
@@ -357,7 +371,7 @@ DWORD WINAPI XInputCapsIatDetour(DWORD user_index, DWORD flags,
 // failure on one export never tears down the other.
 template <typename Fn>
 bool BridgeExport(HMODULE module, const char* name, void*& target,
-                  std::atomic<Fn>& original_out, void* detour,
+                  std::atomic<void*>& original_out, void* detour,
                   void* iat_detour, std::atomic<bool>& inline_flag, IatPatch& iat) {
   if (iat.slot) return iat.enabled.load(std::memory_order_acquire);
   if (original_out.load(std::memory_order_acquire))
@@ -391,7 +405,7 @@ bool BridgeExport(HMODULE module, const char* name, void*& target,
     target = nullptr;
     return false;
   }
-  original_out.store(original, std::memory_order_release);
+  original_out.store(reinterpret_cast<void*>(original), std::memory_order_release);
   return EnableInlineBridge(target, inline_flag, name);
 }
 

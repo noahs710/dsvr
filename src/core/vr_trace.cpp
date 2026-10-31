@@ -2,6 +2,7 @@
 
 #include <windows.h>
 #include <MinHook.h>
+#include <intrin.h>
 
 #include <array>
 #include <atomic>
@@ -12,10 +13,12 @@
 #include <optional>
 #include <string>
 
+// TraceSink is included after the hook globals so the writer thread owns it.
 #include "../common/logging.h"
 #include "../common/memory.h"
 #include "../common/version.h"
 #include "combat_native.h"
+#include "trace_sink.h"
 
 namespace dsvr {
 namespace {
@@ -32,11 +35,15 @@ std::atomic<std::uint64_t> g_native_state_samples{0};
 std::atomic<std::uint64_t> g_native_step_samples{0};
 std::atomic<std::uint64_t> g_camera_consumptions{0};
 FILE* g_file = nullptr;  // diagnostic thread only
+TraceSink g_sink;  // diagnostic thread only
+std::wstring g_external_writer;  // set once at startup, read by writer only
+bool g_sink_active = false;  // diagnostic thread only
 unsigned g_capture = 0;
 std::atomic<std::uint64_t> g_capture_id{0};
 std::atomic<unsigned> g_recorders{0};
 std::atomic<TraceCaptureState> g_state{TraceCaptureState::Idle};
 std::uint64_t g_written = 0;  // writer thread only
+std::map<std::string, std::uint64_t> g_event_counts;  // writer thread only
 bool g_io_error = false;
 bool g_interrupted = false;
 long long g_qpc_hz = 0;
@@ -48,7 +55,9 @@ struct CombatTraceHealth {
   long long native_max = 0, observer_max = 0;
 };
 CombatTraceHealth g_combat_health;  // writer thread only
-std::atomic<int> g_hook_domain{-1}; // -1 unselected, 0 full, 1 combat; immutable
+std::atomic<int> g_hook_domain{-1}; // -1 unselected, 0 full, 1 combat, 2 session
+std::atomic<bool> g_session_hooks_ready{false};
+std::atomic<unsigned> g_session_capabilities{0};
 
 // A multi-record observation is admitted atomically or dropped in full.
 // Producers never wait, format text, allocate, or perform file I/O.
@@ -81,6 +90,22 @@ using StepFn = void(__fastcall*)(void*, float, void*);
 StepFn g_stay_step = nullptr, g_game_step = nullptr, g_load_step = nullptr;
 using ContactFn = std::uint64_t(__fastcall*)(void*);
 ContactFn g_contact = nullptr;
+// 140322910's pinned direct callsites pass actor in RCX and requested HP in
+// EDX. The wrapper returns raw RAX so even callers relying on its otherwise
+// unresolved return register see the original bits unchanged.
+using HealthSetterFn = std::uint64_t(__fastcall*)(void*, int);
+HealthSetterFn g_health_setter = nullptr;
+struct HealthWriteCapture {
+  struct Write { std::uintptr_t actor, caller; int requested; } writes[4]{};
+  unsigned stored = 0, calls = 0;
+};
+thread_local HealthWriteCapture* g_health_write_scope = nullptr;
+struct ScopedHealthWriteCapture {
+  HealthWriteCapture* previous;
+  explicit ScopedHealthWriteCapture(HealthWriteCapture& capture)
+      : previous(g_health_write_scope) { g_health_write_scope=&capture; }
+  ~ScopedHealthWriteCapture() { g_health_write_scope=previous; }
+};
 using InteractionFn = std::uint64_t(__fastcall*)(void*, int, unsigned);
 InteractionFn g_interaction = nullptr;
 std::atomic<std::uint64_t> g_interaction_samples{0};
@@ -253,6 +278,18 @@ std::uint64_t __fastcall InteractionDetour(void* group, int index, unsigned acto
   }
   VrTraceRecord(e); // generation/loss checks are the existing queue's responsibility
   return result;
+}
+
+std::uint64_t __fastcall HealthSetterDetour(void* actor, int requested) {
+  auto* capture=g_health_write_scope;
+  if(capture) {
+    if(capture->stored<4) {
+      capture->writes[capture->stored++]={reinterpret_cast<std::uintptr_t>(actor),
+          reinterpret_cast<std::uintptr_t>(_ReturnAddress()),requested};
+    }
+    if(capture->calls!=UINT32_MAX) ++capture->calls;
+  }
+  return g_health_setter(actor,requested);
 }
 
 std::uint64_t __fastcall ContactDetour(void* record) {
@@ -435,7 +472,12 @@ std::uint64_t __fastcall ContactDetour(void* record) {
   }
   permissions.reset();  // native code may change page mappings or re-enter
   const auto start=VrTraceClock();
-  const auto result=g_contact(record); // natural dispatch exactly once
+  HealthWriteCapture health_writes{};
+  std::uint64_t result;
+  {
+    ScopedHealthWriteCapture scope(health_writes);
+    result=g_contact(record); // natural dispatch exactly once
+  }
   const auto native_end=VrTraceClock();
   permissions.emplace();  // revalidate mappings; no pre-call permission survives
   e.duration_qpc=native_end-start;
@@ -555,8 +597,24 @@ std::uint64_t __fastcall ContactDetour(void* record) {
     context.values[15]=static_cast<float>(event_handle>>16);
   }
   diagnostics.duration_qpc=(start-observe_start)+(VrTraceClock()-native_end);
-  const VrTraceEvent batch[]{e,identity,motion,diagnostics,context};
-  RecordBatch(batch,std::size(batch));
+  VrTraceEvent batch[9]{e,identity,motion,diagnostics,context};
+  std::size_t batch_count=5;
+  for(unsigned i=0;i<health_writes.stored;++i) {
+    auto& write=batch[batch_count++];
+    write=e;write.event="native_combat_health_write";write.flags=0;
+    for(float& value:write.values)value=0;
+    PointerLimbs(health_writes.writes[i].actor,write.values);
+    PointerLimbs(health_writes.writes[i].caller,write.values+4);
+    const auto requested=static_cast<std::uint32_t>(health_writes.writes[i].requested);
+    write.values[8]=static_cast<float>(requested&0xffffu);
+    write.values[9]=static_cast<float>(requested>>16);
+    write.values[10]=static_cast<float>(i);
+    write.values[11]=static_cast<float>(health_writes.calls&0xffffu);
+    write.values[12]=static_cast<float>(health_writes.calls>>16);
+    write.values[13]=health_writes.calls>4?1.0f:0.0f;
+    write.values[15]=1;
+  }
+  RecordBatch(batch,batch_count);
   return result;
 }
 #endif
@@ -721,31 +779,24 @@ bool Hook(std::uintptr_t rva, const unsigned char* bytes, std::size_t size,
 }
 
 void RecordBatch(const VrTraceEvent* events, std::size_t count) {
-  // Cheap admission first: atomics and pointer compares only, no syscalls.
-  // Every producer assigns one of this TU's own string literals, and MSVC
-  // pools identical literals, so identity covers the known events; anything
-  // unrecognized falls through to strncmp, preserving old admit behavior.
-  static const char* const kCommitted[] = {
-      "native_combat_contact", "native_combat_identity",
-      "native_combat_motion", "native_combat_diagnostics",
-      "native_combat_context", "native_combat_limit",
-      "native_combat_excluded", "native_combat_self_excluded",
-  };
+  // Keep the capture-domain filter textual: producers live in multiple
+  // translation units, so literal pointer identity is not an interface.
   const char* name = events[0].event;
   bool admitted = true;
-  if (g_hook_domain.load(std::memory_order_relaxed) == 1) {
-    admitted = (name == "native_interaction_activation" ||
-                name == "native_step_dispatch");
-    if (!admitted) {
-      for (const char* known : kCommitted)
-        if (name == known) { admitted = true; break; }
-    }
-    if (!admitted &&
-        std::strncmp(name, "native_combat_", 14) == 0) admitted = true;
-    if (!admitted &&
-        (std::strcmp(name, "native_interaction_activation") == 0 ||
-         std::strcmp(name, "native_step_dispatch") == 0)) admitted = true;
+  const int domain = g_hook_domain.load(std::memory_order_relaxed);
+  if (domain == 1) {
+    admitted = std::strcmp(name, "native_interaction_activation") == 0 ||
+        std::strcmp(name, "native_step_dispatch") == 0 ||
+        std::strncmp(name, "native_combat_", 14) == 0;
     if (!admitted) return;
+  } else if (domain == 2) {
+    const bool session_event = std::strcmp(name, "native_interaction_activation") == 0 ||
+        std::strcmp(name, "native_step_dispatch") == 0 ||
+        std::strcmp(name, "native_input_blockers") == 0 ||
+        std::strcmp(name, "virtual_pad_state") == 0 ||
+        std::strcmp(name, "hand_tracking") == 0 ||
+        std::strncmp(name, "native_combat_", 14) == 0;
+    if (!session_event) return;
   }
   const auto capture = events[0].capture_id ? events[0].capture_id : g_capture_id.load();
   const auto until = g_until_ms.load(std::memory_order_relaxed);
@@ -801,6 +852,10 @@ bool VrTraceActive() {
          until && GetTickCount64() < until;
 }
 
+bool VrTraceSessionActive() {
+  return g_hook_domain.load(std::memory_order_relaxed) == 2 && VrTraceActive();
+}
+
 void VrTraceRecordInputBlockers(std::uint64_t mask, std::uintptr_t owner) {
   if (!VrTraceActive()) return;
   VrTraceEvent event{};
@@ -836,6 +891,21 @@ void VrTraceRecordStep(const VrTraceStepSample& sample) {
 
 TraceCaptureState VrTraceState() { return g_state.load(); }
 std::uint64_t VrTraceCaptureId() { return g_capture_id.load(); }
+VrTraceHealth VrTraceGetHealth() {
+  VrTraceHealth health{};
+  health.state = g_state.load();
+  health.capture_id = g_capture_id.load();
+  health.events = g_written;
+  health.event_counts = g_event_counts;
+  health.dropped = g_dropped.load();
+  health.contended = g_contended.load();
+  health.io_error = g_io_error;
+  {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    health.queue_peak = g_queue_peak;
+  }
+  return health;
+}
 
 void VrTraceRequestStop() {
   auto expected = TraceCaptureState::Recording;
@@ -849,7 +919,21 @@ bool VrTraceConsumeStopRequest(const wchar_t* path) {
   return true;
 }
 
-bool VrTraceBegin(const wchar_t* explicit_path, unsigned duration_ms) {
+static bool ValidSessionId(const char* session_id) {
+  if (!session_id) return true;
+  if (!*session_id) return false;
+  for (const char* p = session_id; *p; ++p) {
+    const bool safe = (*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+        (*p >= '0' && *p <= '9') || *p == '-' || *p == '_';
+    if (!safe || p - session_id >= 63) return false;
+  }
+  return true;
+}
+
+static bool BeginTrace(const wchar_t* explicit_path, unsigned duration_ms,
+                       const char* session_id, std::uint64_t player_epoch,
+                       std::uint64_t segment_index, unsigned capabilities,
+                       unsigned config_flags) {
   if (g_file) {
     DSVR_LOG("VrTrace: capture already active; marker retained in ordinary log");
     return false;
@@ -858,12 +942,23 @@ bool VrTraceBegin(const wchar_t* explicit_path, unsigned duration_ms) {
     DSVR_WARN("VrTrace: duration must be 1..600000 ms");
     return false;
   }
+  if (!ValidSessionId(session_id)) {
+    DSVR_WARN("VrTrace: invalid autonomous session identifier");
+    return false;
+  }
   const std::wstring name = L"DSVR-trace-" + std::to_wstring(GetCurrentProcessId()) +
       L"-" + std::to_wstring(GetTickCount64()) + L"-" +
       std::to_wstring(++g_capture) + L".jsonl";
   const std::wstring path = explicit_path ? explicit_path :
       LogPathNextToModule(nullptr, name.c_str());
-  if (_wfopen_s(&g_file, path.c_str(), L"wx") != 0 || !g_file) {
+  if (!g_external_writer.empty()) {
+    g_file = g_sink.Open(g_external_writer, path);
+    g_sink_active = g_file != nullptr;
+  } else {
+    g_sink_active = false;
+    if (_wfopen_s(&g_file, path.c_str(), L"wx") != 0 || !g_file) g_file = nullptr;
+  }
+  if (!g_file) {
     g_file = nullptr;
     g_state.store(TraceCaptureState::IoError);
     DSVR_WARN("VrTrace: could not create capture; no capture started");
@@ -877,6 +972,7 @@ bool VrTraceBegin(const wchar_t* explicit_path, unsigned duration_ms) {
     g_queue_peak=0;
   }
   g_written = 0;
+  g_event_counts.clear();
   g_io_error = false;
   g_interrupted = false;
   g_combat_health={};
@@ -885,25 +981,56 @@ bool VrTraceBegin(const wchar_t* explicit_path, unsigned duration_ms) {
   LARGE_INTEGER frequency{};
   QueryPerformanceFrequency(&frequency);
   g_qpc_hz=frequency.QuadPart;
+  const long long start_qpc = VrTraceClock();
+  FILETIME utc{};
+  GetSystemTimeAsFileTime(&utc);
+  ULARGE_INTEGER utc_filetime{};
+  utc_filetime.LowPart = utc.dwLowDateTime;
+  utc_filetime.HighPart = utc.dwHighDateTime;
+  const char* safe_session_id = session_id ? session_id : "";
 #ifdef DSVR_ENABLE_LAB
   const unsigned combat_schema=1,combat_hook=g_contact!=nullptr;
+  const unsigned combat_health_schema=1,combat_health_hook=g_health_setter!=nullptr;
+  const auto combat_module_base=static_cast<unsigned long long>(ModuleBase(nullptr));
 #else
   const unsigned combat_schema=0,combat_hook=0;
+  const unsigned combat_health_schema=0,combat_health_hook=0;
+  const unsigned long long combat_module_base=0;
 #endif
   const int header = std::fprintf(g_file,
       "{\"event\":\"header\",\"qpc\":%lld,\"schema\":2,"
       "\"pid\":%lu,\"qpc_hz\":%lld,\"duration_ms\":%u,\"mod_version\":\"%s\","
       "\"combat_detail_schema\":%u,\"combat_context_schema\":%u,"
-      "\"combat_hook\":%u,\"capture_domain\":\"%s\"}\n",
-      VrTraceClock(), GetCurrentProcessId(), frequency.QuadPart, duration_ms,
+      "\"combat_hook\":%u,\"combat_health_schema\":%u,"
+      "\"combat_health_hook\":%u,\"combat_module_base\":\"%016llx\","
+      "\"capture_domain\":\"%s\","
+      "\"session_id\":\"%s\",\"player_epoch\":%llu,\"segment_index\":%llu,"
+      "\"utc_filetime_100ns\":%llu,\"session_schema\":%u,"
+      "\"session_capabilities\":%u,\"session_config_flags\":%u,"
+      "\"hand_sample_hz_max\":%u}\n",
+      start_qpc, GetCurrentProcessId(), frequency.QuadPart, duration_ms,
       kModVersion,combat_schema,combat_schema,combat_hook,
-      g_hook_domain.load()==1 ? "combat" : "full");
+      combat_health_schema,combat_health_hook,combat_module_base,
+      session_id ? "session" : g_hook_domain.load()==1 ? "combat" :
+          g_hook_domain.load()==2 ? "session" : "full", safe_session_id,
+      static_cast<unsigned long long>(player_epoch),
+      static_cast<unsigned long long>(segment_index),
+      static_cast<unsigned long long>(utc_filetime.QuadPart),
+      session_id ? 1u : 0u, capabilities, config_flags,
+      session_id ? 30u : 0u);
   if (header < 0 || std::fflush(g_file) != 0) {
-    std::fclose(g_file);
+    if (g_sink_active) {
+        g_sink.Close(g_file);
+        g_sink_active = false;
+    } else {
+        std::fclose(g_file);
+    }
     g_file = nullptr;
+    g_io_error = true;
     g_state.store(TraceCaptureState::IoError);
     return false;
   }
+  g_event_counts["header"] = 1;
   g_capture_id.fetch_add(1);
 #ifdef DSVR_ENABLE_LAB
   g_contact_samples.store(0);
@@ -919,6 +1046,19 @@ bool VrTraceBegin(const wchar_t* explicit_path, unsigned duration_ms) {
   g_state.store(TraceCaptureState::Recording);
   DSVR_LOG("VrTrace: bounded %u-ms observation started: %ls", duration_ms, path.c_str());
   return true;
+}
+
+bool VrTraceBegin(const wchar_t* explicit_path, unsigned duration_ms) {
+  return BeginTrace(explicit_path, duration_ms, nullptr, 0, 0, 0, 0);
+}
+
+bool VrTraceBeginSession(const wchar_t* path, unsigned duration_ms,
+                         const char* session_id, std::uint64_t player_epoch,
+                         std::uint64_t segment_index, unsigned capabilities,
+                         unsigned config_flags) {
+  if (!path || !session_id || !*session_id) return false;
+  return BeginTrace(path, duration_ms, session_id, player_epoch, segment_index,
+                    capabilities, config_flags);
 }
 
 void VrTracePump() {
@@ -970,8 +1110,11 @@ void VrTracePump() {
     }
     std::fputs("]}\n", g_file);
     ++g_written;
+    ++g_event_counts[e.event];
   }
-  if (std::ferror(g_file) || std::fflush(g_file) != 0) g_io_error = true;
+  if (g_sink_active) {
+    if (!g_sink.Flush(g_file)) g_io_error = true;
+  } else if (std::ferror(g_file) || std::fflush(g_file) != 0) g_io_error = true;
   // The combat counters only exist in an opt-in LAB build; a non-LAB capture
   // still reports the fields so the footer schema never changes shape.
 #ifdef DSVR_ENABLE_LAB
@@ -1020,9 +1163,17 @@ void VrTracePump() {
         g_interrupted ? "true" : "false", g_io_error ? "true" : "false",
         queue_peak,g_contended.load(),
         combat_total,combat_non_player,combat_self,combat_refused,combat_detail,combat_detail_limit);
-    if (footer < 0 || std::fflush(g_file) != 0) g_io_error = true;
-    if (std::fclose(g_file) != 0) g_io_error = true;
+    if (footer >= 0) ++g_event_counts["footer"];
+    if (g_sink_active) {
+      const bool flushed = footer >= 0 && g_sink.Flush(g_file);
+        const bool closed = g_sink.Close(g_file);
+      if (!flushed || !closed) g_io_error = true;
+    } else {
+      if (footer < 0 || std::fflush(g_file) != 0) g_io_error = true;
+      if (std::fclose(g_file) != 0) g_io_error = true;
+    }
     g_file = nullptr;
+    g_sink_active = false;
     g_state.store(g_io_error ? TraceCaptureState::IoError :
                   g_interrupted ? TraceCaptureState::Interrupted :
                   g_dropped.load() ? TraceCaptureState::Dropped :
@@ -1033,6 +1184,17 @@ void VrTracePump() {
   }
 }
 
+void VrTraceSetExternalWriter(const wchar_t* executable) {
+  if (executable && *executable) g_external_writer = executable;
+  else g_external_writer.clear();
+}
+
+bool VrTraceCheckpoint() {
+  if (!g_file || !g_sink_active) return false;
+  if (!g_sink.Flush(g_file)) { g_io_error = true; return false; }
+  return true;
+}
+
 void VrTraceFinish(bool interrupted) {
   if (!g_file) return;
   g_interrupted = g_interrupted || interrupted;
@@ -1040,16 +1202,17 @@ void VrTraceFinish(bool interrupted) {
   VrTracePump();
 }
 
-static bool InstallTrace(bool enabled,bool combat_only) {
+static bool InstallTrace(bool enabled,bool combat_only,bool session_only=false) {
   if (!enabled) return false;
   int expected=-1;
-  const int domain=combat_only ? 1 : 0;
+  const int domain=combat_only ? 1 : session_only ? 2 : 0;
   if(!g_hook_domain.compare_exchange_strong(expected,domain) && expected!=domain) {
     DSVR_WARN("VrTrace: capture domain change refused; restart required");
     return false;
   }
   const MH_STATUS status = MH_Initialize();
   if (status != MH_OK && status != MH_ERROR_ALREADY_INITIALIZED) return false;
+  const bool full_trace = !combat_only && !session_only;
   // Verified against pinned disk image on 2026-10-14; corpus provenance in
   // MODDING_PLAN.md. These are observations, NOT patch shortcuts.
   const unsigned char wait[]{0x48,0x89,0x74,0x24,0x18,0x57,0x48,0x83,0xec,0x20,
@@ -1064,25 +1227,26 @@ static bool InstallTrace(bool enabled,bool combat_only) {
        0xb3,0x01,0x83,0xf8,0x07,0x0f,0x87,0x9d,0x00,0x00,0x00};
   const unsigned char upload[]{0x45,0x85,0xc9,0x0f,0x84,0x8e,0x00,0x00,0x00,
       0x48,0x89,0x5c,0x24,0x10,0x48,0x89,0x6c,0x24,0x18};
-  const bool w = !combat_only && Hook(0xce3450, wait, sizeof(wait), reinterpret_cast<void*>(&WaitDetour),
-                      reinterpret_cast<void**>(&g_wait));
-  const bool r = !combat_only && Hook(0x11be710, render, sizeof(render), reinterpret_cast<void*>(&RenderDetour),
-                      reinterpret_cast<void**>(&g_render));
-  const bool c = !combat_only && Hook(0x245690, camera, sizeof(camera), reinterpret_cast<void*>(&CameraDetour),
-                        reinterpret_cast<void**>(&g_camera));
-  const bool p = !combat_only && Hook(0x2472d0, projection, sizeof(projection),
-      reinterpret_cast<void*>(&ProjectionDetour), reinterpret_cast<void**>(&g_projection));
+  const bool w = full_trace && Hook(0xce3450, wait, sizeof(wait), reinterpret_cast<void*>(&WaitDetour),
+                       reinterpret_cast<void**>(&g_wait));
+  const bool r = full_trace && Hook(0x11be710, render, sizeof(render), reinterpret_cast<void*>(&RenderDetour),
+                       reinterpret_cast<void**>(&g_render));
+  const bool c = full_trace && Hook(0x245690, camera, sizeof(camera), reinterpret_cast<void*>(&CameraDetour),
+                         reinterpret_cast<void**>(&g_camera));
+  const bool p = full_trace && Hook(0x2472d0, projection, sizeof(projection),
+       reinterpret_cast<void*>(&ProjectionDetour), reinterpret_cast<void**>(&g_projection));
   std::uintptr_t consume_slot = 0;
-  const bool consumer = !combat_only && GuardedRead(ModuleBase(nullptr) + 0x1609070 + 0x28, consume_slot) &&
+  const bool consumer = full_trace && GuardedRead(ModuleBase(nullptr) + 0x1609070 + 0x28, consume_slot) &&
       consume_slot == ModuleBase(nullptr) + 0x7b870 &&
       Hook(0x7b870, consume, sizeof(consume), reinterpret_cast<void*>(&CameraConsumeDetour),
             reinterpret_cast<void**>(&g_camera_consume));
-  const bool u = !combat_only && Hook(0xcd0a10, upload, sizeof(upload),
+  const bool u = full_trace && Hook(0xcd0a10, upload, sizeof(upload),
       reinterpret_cast<void*>(&ConstantUploadDetour),
       reinterpret_cast<void**>(&g_constant_upload));
   bool input_blockers = false;
   unsigned native_steps = 0;
   bool native_contacts = false, native_interactions = false;
+  bool native_health_writes = false;
 #ifdef DSVR_ENABLE_LAB
   // Raw pinned 3c4020 entry and its one-record-pointer calling convention
   // are corroborated by 3c7520. Observe natural calls; never fabricate a
@@ -1091,6 +1255,15 @@ static bool InstallTrace(bool enabled,bool combat_only) {
       0xec,0x20,0x48,0x8b,0xb1,0x30,0x01,0,0,0x48,0x8b,0xd9,0x48,0x8b,0xce};
   native_contacts = g_contact || Hook(0x3c4020,contact,sizeof(contact),
       reinterpret_cast<void*>(&ContactDetour),reinterpret_cast<void**>(&g_contact));
+  // The HP-state setter takes (actor, requested HP) in RCX/EDX. Its 19-byte
+  // entry and all three adjacent PE unwind ranges were compared with the
+  // pinned executable. This optional observer only records calls nested in a
+  // detailed natural contact callback; it forwards once and preserves raw RAX.
+  const unsigned char health_setter[]{0x89,0x54,0x24,0x10,0x53,0x48,0x83,0xec,
+      0x20,0xf6,0x81,0x24,0x05,0,0,0x40,0x48,0x8b,0xd9};
+  if(native_contacts) native_health_writes = g_health_setter || Hook(0x322910,
+      health_setter,sizeof(health_setter),reinterpret_cast<void*>(&HealthSetterDetour),
+      reinterpret_cast<void**>(&g_health_setter));
   // The full 287-byte function and caller are pinned in the interaction
   // evidence note. The first instructions preserve all three input arguments.
   const unsigned char interaction[]{0x40,0x55,0x56,0x57,0x48,0x83,0xec,0x50,
@@ -1131,12 +1304,14 @@ static bool InstallTrace(bool enabled,bool combat_only) {
   if (hook_step(0x281020, 0x12ff8b8, reinterpret_cast<void*>(&LoadStepDetour),
                 g_load_step)) native_steps |= 4;
 #endif
-  DSVR_LOG("VrTrace: observation hooks wait=%d render=%d camera-command=%d; "
-               "native behavior unchanged; F9 captures 20 seconds", w, r, c);
-  DSVR_LOG("VrTrace: perspective producer=%d HGCameraEntity consumer=%d "
-            "(CPU command acceptance only, NOT final GPU/main-view proof)", p, consumer);
-  DSVR_LOG("VrTrace: constant upload observer=%d (first 192 bytes maximum; "
-            "CPU source/return only, NOT Map success or final draw proof)", u);
+  if (full_trace) {
+    DSVR_LOG("VrTrace: observation hooks wait=%d render=%d camera-command=%d; "
+                 "native behavior unchanged; F9 captures 20 seconds", w, r, c);
+    DSVR_LOG("VrTrace: perspective producer=%d HGCameraEntity consumer=%d "
+              "(CPU command acceptance only, NOT final GPU/main-view proof)", p, consumer);
+    DSVR_LOG("VrTrace: constant upload observer=%d (first 192 bytes maximum; "
+              "CPU source/return only, NOT Map success or final draw proof)", u);
+  }
   DSVR_LOG("VrTrace: lab input-blocker observer=%d (opt-in build only; "
             "raw masks never grant gameplay/safe-scene readiness)", input_blockers);
   DSVR_LOG("VrTrace: lab native Step observers=%u (stay=1 game=2 load=4; "
@@ -1144,9 +1319,35 @@ static bool InstallTrace(bool enabled,bool combat_only) {
   DSVR_LOG("VrTrace: lab native combat observer=%d (natural calls; 256 detail batches for short "
            "captures, streamed detail for continuous captures; local self contacts counted separately; "
            "raw before/after HP/stamina, no injected damage or feedback)", native_contacts);
+  DSVR_LOG("VrTrace: lab combat HP-writer observer=%d (bounded calls nested in detailed natural "
+           "contact dispatch only; raw actor/caller/request, no outcome attribution)",
+           native_health_writes);
   DSVR_LOG("VrTrace: lab native object-activation observer=%d (natural requests only; "
            "raw handles/state/PARAM distance; no eligibility or activation acceptance)",native_interactions);
-  return combat_only ? native_contacts && native_interactions && native_steps==7 : w && r && c && p && consumer && u;
+  if (session_only) {
+    // Session capture is the full-domain observer: combat, interaction,
+    // dialogue/menu-adjacent input blockers, Step movement, and the
+    // pad/hand input producers (recorded in input.cpp, admitted by the
+    // session domain filter) all ride the same segment. Combat +
+    // interaction are the mandatory core; blockers and Steps are optional
+    // capabilities, never a readiness gate.
+    const bool ready = native_contacts && native_interactions;
+    unsigned capabilities = 0;
+    if (native_contacts) capabilities |= kSessionCapNativeCombat;
+    if (native_interactions) capabilities |= kSessionCapInteraction;
+    if (input_blockers) capabilities |= kSessionCapInputBlockers;
+    if (native_steps & 1) capabilities |= kSessionCapStayStep;
+    if (native_steps & 2) capabilities |= kSessionCapGameStep;
+    if (native_steps & 4) capabilities |= kSessionCapLoadStep;
+    g_session_capabilities.store(capabilities, std::memory_order_release);
+    g_session_hooks_ready.store(ready,std::memory_order_release);
+    DSVR_LOG("VrTrace: autonomous session observer ready=%d blockers=%d steps=%u; "
+             "render probes omitted; missing optional observations remain visible",
+             ready,input_blockers,native_steps);
+    return ready;
+  }
+  return combat_only ? native_contacts && native_interactions && native_steps==7 :
+                       w && r && c && p && consumer && u;
 }
 
 bool VrTraceInstall(bool enabled) { return InstallTrace(enabled,false); }
@@ -1157,6 +1358,20 @@ bool VrTraceInstallCombat() {
   DSVR_WARN("VrTrace: combat-only observation requires an opt-in LAB build");
   return false;
 #endif
+}
+bool VrTraceInstallSession() {
+#ifdef DSVR_ENABLE_LAB
+  return InstallTrace(true,false,true);
+#else
+  DSVR_WARN("VrTrace: autonomous session observation requires an opt-in LAB build");
+  return false;
+#endif
+}
+bool VrTraceSessionHooksReady() {
+  return g_session_hooks_ready.load(std::memory_order_acquire);
+}
+unsigned VrTraceSessionCapabilities() {
+  return g_session_capabilities.load(std::memory_order_acquire);
 }
 
 }  // namespace dsvr

@@ -64,6 +64,12 @@ void InputPublishHeadDirectedLocomotion(Vec3 head, Vec3 native, std::uint64_t ep
   locomotion_native = native;
   locomotion_epoch = epoch;
 }
+
+void InputPublishCameraMotionBasis(const RoomscaleBasis& basis, Vec3 head,
+                                  Vec3 movement, std::uint64_t epoch) {
+  InputPublishRoomscaleBasis(basis);
+  InputPublishHeadDirectedLocomotion(head, movement, epoch);
+}
 void InputInvalidateHeadDirectedLocomotion() { ++locomotion_invalidations; }
 UserCalibration CalibrationCurrent() { return calibration; }
 std::uint64_t CalibrationRecenterGeneration() { return recenter_generation; }
@@ -125,6 +131,7 @@ int main() {
   CHECK(container_accesses==0);
   CHECK(!CameraIsTitle());
   CHECK(CameraGameplayReady());
+  CHECK(!CameraNativeCutscene());
   std::printf("camera trace reads outside permission scope: %u (expected 0)\n",unscoped_reads);
   CHECK(unscoped_reads==0);
   CHECK(!GuardedReadScope::Contains(Ptr(follow)+0x10,Ptr(follow)+0x50));
@@ -137,6 +144,18 @@ int main() {
   CHECK(std::memcmp(follow.data()+0x2d0,before_follow.data()+0x2d0,64)==0);
   CHECK(Float(0x50)==.75f && Float(0x54)==16.f/9);
   CHECK(CameraApplyFirstPerson(follow.data(),0,0,0,1,0,1.6f,0,1.6f,1,0,0,1.4f,1.1f));
+  // A scripted follow-camera jump while the player remains readable is a cutscene.
+  Matrix(0x10,1,4,3); Matrix(0x2d0,1,4,3);
+  CameraTraceFollowCam(follow.data());
+  Matrix(0x10,8,4,3); Matrix(0x2d0,8,4,3);
+  CameraTraceFollowCam(follow.data());
+  CHECK(CameraNativeCutscene());
+  const float moved_xyz[4]={10,2,3,1};
+  std::memcpy(physics_b.data()+0x120,moved_xyz,sizeof(moved_xyz));
+  CameraTraceFollowCam(follow.data());
+  CHECK(!CameraNativeCutscene());
+  std::memcpy(physics_b.data()+0x120,xyz,sizeof(xyz));
+  Matrix(0x10,1,4,3); Matrix(0x2d0,1,4,3);
   Vec3 head,r,u,f,anchor; float reference[4];
   CHECK(CameraTrackingFrame(head,r,u,f,reference,&anchor));
   CHECK(anchor.x==1 && anchor.y==2 && anchor.z==3);

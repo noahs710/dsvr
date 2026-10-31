@@ -51,8 +51,10 @@ bool g_policy_logged = false;
 void __fastcall PlayerVisibilityDetour(void* player) {
   g_original(player);
   const Config cfg = DiagnosticsCurrentConfig();
+  // No menu-canvas gate: the row applies the moment it is ticked, so the
+  // alternate model hides (and returns) without closing the menu first.
   if (!g_enabled.load() || !cfg.vr_enabled || cfg.observer_only || !cfg.headlook_enabled ||
-      !XrSessionRunning() || XrMenuPresentationActive() || !IsLocalPlayer(player)) return;
+      !XrSessionRunning() || !IsLocalPlayer(player)) return;
   std::uintptr_t regular = 0, alternate = 0;
   const bool read_ok = GuardedRead((std::uintptr_t)player + 0x60, regular) &&
                        GuardedRead((std::uintptr_t)player + 0x850, alternate);

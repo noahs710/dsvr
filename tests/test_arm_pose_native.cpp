@@ -56,6 +56,7 @@ unsigned output_root_mode=0;
 bool native_proportion_test=false;
 unsigned mutate_before_copy=0,premature_publications=0;
 unsigned mutate_after_copy=0;
+bool copy_after_tracking_snapshot=false;
 int equipment_left_id=200000,equipment_stance=0;
 unsigned originals=0,writes=0,forbidden=0,creates=0,disables=0;
 std::array<unsigned,80> writes_by_bone{};
@@ -260,7 +261,50 @@ bool CameraHeadBasis(Vec3& right,Vec3& up,Vec3& fwd) {
   return true;
 }
 bool XrMenuPresentationActive() { return menu; }
-bool XrLatestTrackingFrame(TrackingFrame& out) { if(!latest_ok)return false;out=latest;return true; }
+bool XrLatestTrackingFrame(TrackingFrame& out) {
+  if(!latest_ok)return false;
+  out=latest;
+  if(copy_after_tracking_snapshot) {
+    copy_after_tracking_snapshot=false;
+    ++latest.sequence;latest.predicted_time_ns+=12000000;
+    Fresh();ArmIkTick(latest);callback(player.data());
+  }
+  return true;
+}
+void InputApplyHaptic(bool, float, int) {}  // slice 6: bench drain is a no-op in tests
+}
+
+int CheckNeutralHandBasisSelection() {
+  using namespace dsvr;
+  const Vec3 right{1,0,0}, up{0,1,0}, forward{0,0,1};
+  ArmPoseMatrix native[2]{};
+  native[1].m[0]=-1.f;native[1].m[5]=1.f;native[1].m[10]=-1.f;
+  bool valid[2]={false,true};
+  ArmPoseMatrix resolved[2]{};
+  NeutralHandBasisSource source[2]{};
+  CHECK(!NeutralHandBasisDiagnosticReady(-1,false));
+  CHECK(!NeutralHandBasisDiagnosticReady(-1,true));
+  CHECK(!NeutralHandBasisDiagnosticReady(26,false));
+  CHECK(NeutralHandBasisDiagnosticReady(26,true));
+  CHECK(ResolveNeutralHandBases(native,valid,right,up,forward,resolved,source));
+  CHECK(source[0]==NeutralHandBasisSource::MirroredNativeBind);
+  CHECK(source[1]==NeutralHandBasisSource::NativeBind);
+  CHECK(std::memcmp(&resolved[1],&native[1],sizeof(native[1]))==0);
+  CHECK(std::fabs(resolved[0].m[0]-1.f)<1e-5f &&
+        std::fabs(resolved[0].m[5]-1.f)<1e-5f &&
+        std::fabs(resolved[0].m[10]-1.f)<1e-5f);
+  valid[0]=true;valid[1]=false;native[0].m[0]=1.f;native[0].m[5]=1.f;native[0].m[10]=1.f;
+  CHECK(ResolveNeutralHandBases(native,valid,right,up,forward,resolved,source));
+  CHECK(source[0]==NeutralHandBasisSource::NativeBind);
+  CHECK(source[1]==NeutralHandBasisSource::MirroredNativeBind);
+  CHECK(std::fabs(resolved[1].m[0]+1.f)<1e-5f &&
+        std::fabs(resolved[1].m[5]-1.f)<1e-5f &&
+        std::fabs(resolved[1].m[10]+1.f)<1e-5f);
+  valid[0]=valid[1]=false;
+  CHECK(ResolveNeutralHandBases(native,valid,right,up,forward,resolved,source));
+  CHECK(source[0]==NeutralHandBasisSource::TposeFallback &&
+        source[1]==NeutralHandBasisSource::TposeFallback);
+  return 0;
 }
 int CheckMirroredGripRoll() {
   using namespace dsvr;
@@ -292,26 +336,29 @@ int CheckMirroredGripRoll() {
         const int hand=side?43:26,weapon=side?53:36;
         // Root columns are -camera right, camera up, -camera forward. With identity head
         // reference, XR -> model is diag(-1,1,1): +90 XR Z is -90 model Z,
-        // whereas +90 XR X remains +90. Native wrist->weapon is -0.1 Z,
-        // so positive configured roll is -Z on the left, +Z on the right.
+        // whereas +90 XR X remains +90. The fixture twists only the left
+        // native hand bind by 90 degrees around its grip axis. The good right
+        // bind is mirrored into the left neutral frame: left identity, right
+        // diag(-1,1,-1). Native wrist->weapon remains -0.1 Z; the mirrored
+        // roll sign is checked against each hand's resulting basis.
         const float angle=(side?-1.f:1.f)*degrees*.017453292f;
         const float c=std::cos(angle),s=std::sin(angle);
-        const float base[2][9]={{1,0,0,0,0,-1,0,1,0},{-1,0,0,0,0,-1,0,-1,0}};
+        const float base[2][9]={{1,0,0,0,1,0,0,0,1},{-1,0,0,0,1,0,0,0,-1}};
         const float turn[3][9]={{1,0,0,0,1,0,0,0,1},{0,1,0,-1,0,0,0,0,1},{1,0,0,0,0,-1,0,1,0}};
-        const float roll[9]={c,0,s,0,1,0,-s,0,c};
+        const float roll[9]={c,-s,0,s,c,0,0,0,1};
         float rolled[9]{},expected[9]{};
         for(int row=0;row<3;++row)for(int col=0;col<3;++col)for(int k=0;k<3;++k)
           rolled[row*3+col]+=roll[row*3+k]*base[side][k*3+col];
         for(int row=0;row<3;++row)for(int col=0;col<3;++col)for(int k=0;k<3;++k)
           expected[row*3+col]+=turn[rotation][row*3+k]*rolled[k*3+col];
         for(int row=0;row<3;++row)for(int col=0;col<3;++col) {
-          CHECK(std::fabs(poses[hand].m[row*4+col]-expected[row*3+col])<1e-4f);
+            CHECK(std::fabs(poses[hand].m[row*4+col]-expected[row*3+col])<1e-4f);
           CHECK(std::fabs(poses[weapon].m[row*4+col]-expected[row*3+col])<1e-4f);
         }
         const Vec3 grip=ArmPoseOrigin(poses[weapon]),wrist=ArmPoseOrigin(poses[hand]);
         const Vec3 target{-latest.arm[side].pos[0],latest.arm[side].pos[1],
                           latest.arm[side].pos[2]};
-        CHECK(VLen(arm_pose_detail::Sub(grip,target))<1e-5f);
+          CHECK(VLen(arm_pose_detail::Sub(grip,target))<1e-5f);
         const Vec3 offset{-.1f*expected[2],-.1f*expected[5],-.1f*expected[8]};
         CHECK(VLen(arm_pose_detail::Sub(arm_pose_detail::Sub(grip,wrist),offset))<1e-5f);
         CHECK(std::fabs(VLen(arm_pose_detail::Sub(grip,wrist))-.1f)<1e-5f);
@@ -336,7 +383,7 @@ int CheckHandPublication() {
   };
   // Loss can arrive after native copy verification, before another camera or
   // native callback. Exercise EACH public reader first on its own receipt.
-  for(unsigned reader=0;reader<2;++reader)for(unsigned mutation=1;mutation<=19;++mutation) {
+  for(unsigned reader=0;reader<2;++reader)for(unsigned mutation=1;mutation<=20;++mutation) {
     step();
     ArmIkHands hands;
     CombatBenchSnapshot bench;
@@ -366,6 +413,7 @@ int CheckHandPublication() {
       case 17: ++camera_sequence;break;
       case 18: latest.captured_ms=GetTickCount64()-101;break;
       case 19: latest.sequence=0;break;
+      case 20: latest.sequence=hands.sequence-1;break;
     }
     const bool accepted=reader?ArmIkCombatBench(bench):ArmIkLatestHands(hands);
     if(accepted) {
@@ -392,6 +440,21 @@ int CheckHandPublication() {
   ++latest.sequence;Fresh();camera_sequence=committed.sequence;
   CHECK(ArmIkLatestHands(newer) && newer.sequence==committed.sequence);
   CHECK(ArmIkCombatBench(bench));
+  // The input reader snapshots tracking before taking the hand mutex. A
+  // natural owner-thread copy can publish a newer receipt in that interval.
+  for(unsigned reader=0;reader<2;++reader) {
+    step();
+    ArmIkCopyPublication before{};
+    ArmIkCopyPublicationStatus(before);
+    copy_after_tracking_snapshot=true;
+    const bool accepted=reader?ArmIkCombatBench(bench):ArmIkLatestHands(newer);
+    ArmIkCopyPublication after{};
+    ArmIkCopyPublicationStatus(after);
+    CHECK(after.commits==before.commits+1);
+    CHECK(accepted && after.verified);
+    CHECK(ArmIkLatestHands(newer) && newer.sequence==latest.sequence);
+    CHECK(ArmIkCombatBench(bench));
+  }
   latest=saved_tracking;cfg=saved_cfg;calibration=saved_calibration;
   Fresh();ArmIkTick(latest);callback(player.data());
   return 0;
@@ -452,6 +515,12 @@ int CheckCombatBench() {
   cfg.dominant_hand_left=!cfg.dominant_hand_left;
   latest.arm[1].pos[0]+=.06f;step();
   CHECK(ArmIkCombatBench(bench) && bench.tip_speed[1]==0);
+  // Slices 2-7: torque-gated energy, mass table, two-hand, rim, haptics.
+  // A heavy torque response lags the same swing below the contact bar.
+  cfg.torque_response=0.1f;
+  latest.arm[1].pos[0]+=.06f;step();CHECK(ArmIkCombatBench(bench));
+  CHECK(bench.tip_speed[1]>2);  // raw speed still tracked
+  cfg.torque_response=1.0f;
   camera_lean={};latest=saved;cfg=saved_cfg;
   ArmIkResetCalibration();Fresh();ArmIkTick(latest);callback(player.data());
   return 0;
@@ -490,6 +559,9 @@ int main() {
   native[26]=Pose(.45f,.95f,0);native[36]=Pose(.45f,.95f,-.1f);
   native[41]=native[56]=Pose(-.15f,1.3f,0);native[42]=Pose(-.35f,1.15f,0);
   native[43]=Pose(-.45f,.95f,0);native[53]=Pose(-.45f,.95f,-.1f);
+    // Synthetic regression: the left native bind wrist has an authored quarter-turn, while the right-hand calibration is good.
+    native[26].m[0]=0;native[26].m[1]=-1;native[26].m[4]=1;native[26].m[5]=0;
+    native[36].m[0]=0;native[36].m[1]=-1;native[36].m[4]=1;native[36].m[5]=0;
   native[18]=Pose(0,1.5f,0);
   // Independent native Head convention (native_idle_pose.inc): +0 up,
   // +1 left, +2 facing; an identity skull tested the wrong native axes.
@@ -555,7 +627,7 @@ int main() {
   CHECK(writes_by_bone[0]==0 && writes_by_bone[79]==0);
   for(unsigned bone=0;bone<80;++bone) if(writes_by_bone[bone])
     CHECK(std::memcmp(&poses[bone],&native[bone],sizeof(ArmPoseMatrix))!=0);
-  CHECK(VLen(VAdd(ArmPoseOrigin(poses[26]),{-.35f,-1.f,.2f}))<1e-5f);
+    CHECK(std::fabs(VLen(VAdd(ArmPoseOrigin(poses[36]),VScale(ArmPoseOrigin(poses[26]),-1.f)))-.1f)<1e-5f);
   CHECK(VLen(VAdd(ArmPoseOrigin(poses[43]),{.35f,-1.f,.2f}))<1e-5f);
   CHECK(std::memcmp(&poses[23],&native[23],sizeof(ArmPoseMatrix))!=0);
   CHECK(std::memcmp(&poses[40],&native[40],sizeof(ArmPoseMatrix))!=0);
@@ -582,14 +654,33 @@ int main() {
   // Root movement after the camera sample cannot drag targets away from this body.
   root.m[3]=100;root.m[7]=200;root.m[11]=300;std::memcpy(model.data()+0x30,&root,sizeof(root));
   Fresh();ArmIkTick(latest);callback(player.data());CHECK(writes==after_first_commit+2);
-  CHECK(VLen(VAdd(ArmPoseOrigin(poses[26]),{-.35f,-1.f,.2f}))<1e-5f);
+  // Neutral hand comes from the native bind pose now, not a world-axis
+  // guess: the weapon mount must equal the grip target (orientation-free
+  // invariant), and the wrist must hold the native hand->weapon offset
+  // rigidly. The old expectation (.35,1,-.2) baked the world-guess twist,
+  // which rotated the native (0,0,-.1) offset into (0,.1,0).
+  CHECK(VLen(VAdd(ArmPoseOrigin(poses[36]),{-.35f,-1.1f,.2f}))<1e-5f);
+  CHECK(std::fabs(VLen(VAdd(ArmPoseOrigin(poses[36]),VScale(ArmPoseOrigin(poses[26]),-1.f)))-.1f)<1e-5f);
+  // Put both controllers at the exact same physical position: the left wrist
+  // must still calibrate as the mirrored counterpart of the known-good right.
+  latest.arm[0].pos[0]=latest.arm[1].pos[0]=0.f;
+  latest.arm[0].pos[1]=latest.arm[1].pos[1]=1.65f;
+  latest.arm[0].pos[2]=latest.arm[1].pos[2]=-.2f;
+  ++latest.sequence;Fresh();ArmIkTick(latest);callback(player.data());
   // Turning a controller in place must turn its own wrist and equipment.
   latest.arm[0].quat[2]=.70710678f;latest.arm[0].quat[3]=.70710678f;
   Fresh();ArmIkTick(latest);callback(player.data());
+  // With both controllers co-located, a 90-degree turn must move the left
+  // wrist from the mirrored neutral basis to columns [0,-1,0] / [1,0,0].
+  // The unturned right hand keeps its known-good baseline.
   CHECK(std::fabs(poses[26].m[0])<1e-4f && poses[26].m[4]<-.999f);
+  CHECK(std::fabs(poses[26].m[1]-1)<1e-4f && std::fabs(poses[26].m[5])<1e-4f);
   CHECK(std::fabs(poses[43].m[0]+1)<1e-4f && std::fabs(poses[43].m[4])<1e-4f);
   latest.arm[0].quat[2]=0;latest.arm[0].quat[3]=1;
   Fresh();ArmIkTick(latest);callback(player.data());
+  CHECK(CheckNeutralHandBasisSelection() == 0);
+  latest.arm[0].pos[0]=-.35f;latest.arm[0].pos[1]=1.1f;latest.arm[0].pos[2]=-.2f;
+  latest.arm[1].pos[0]=.35f;latest.arm[1].pos[1]=1.1f;latest.arm[1].pos[2]=-.2f;
   CHECK(CheckMirroredGripRoll() == 0);
   CHECK(CheckCombatBench() == 0);
   CHECK(CheckHandPublication() == 0);
@@ -619,7 +710,7 @@ int main() {
     for(float scale:{.9f,1.f,1.1f}) {
       cfg.world_scale=scale;
       for(int side=0;side<2;++side) {
-        latest.arm[side].pos[0]=side?.25f:-.25f;
+        latest.arm[side].pos[0]=side?-.1f:.1f;
         latest.arm[side].pos[1]=1.2f;latest.arm[side].pos[2]=-.12f;
       }
       ArmIkResetCalibration();++latest.sequence;Fresh();ArmIkTick(latest);
@@ -628,7 +719,7 @@ int main() {
         const Vec3 expected{-latest.arm[side].pos[0]*scale,
             1.5f+(latest.arm[side].pos[1]-latest.head_pos[1])*scale,
             latest.arm[side].pos[2]*scale};
-        CHECK(VLen(arm_pose_detail::Sub(ArmPoseOrigin(poses[side?53:36]),expected))<1e-5f);
+          CHECK(VLen(arm_pose_detail::Sub(ArmPoseOrigin(poses[side?53:36]),expected))<1e-5f);
         for(int bone:{side?41:24,side?42:25,side?43:26})
           for(int axis=0;axis<3;++axis)
             CHECK(std::fabs(VLen(arm_pose_detail::Column(poses[bone],axis))-1.f)<1e-5f);
@@ -670,9 +761,28 @@ int main() {
     CHECK(g_cpu_frame_timer.Snapshot()[static_cast<unsigned>(CpuStage::EquipmentRead)].calls == 1);
     const auto free_weapon=poses[53];
 
+    // Reach for the VISIBLE handle: the support grip attaches within 14 cm
+    // of the committed handle (weapon origin + weapon-frame (0,0,.2)), so
+    // the offhand target is derived from the committed weapon pose — the
+    // same thing a user does reaching for the rendered handle. This keeps
+    // the attach precondition satisfied under any neutral orientation
+    // convention; the old hardcoded (.15,1) baked the world-guess twist.
     latest.arm[0].squeeze_held=true;
+    {
+      const Vec3 worg=ArmPoseOrigin(poses[53]);
+      const Vec3 wx{poses[53].m[0],poses[53].m[4],poses[53].m[8]};
+      const Vec3 wy{poses[53].m[1],poses[53].m[5],poses[53].m[9]};
+      const Vec3 wz{poses[53].m[2],poses[53].m[6],poses[53].m[10]};
+      const Vec3 handle{VAdd(worg,VAdd(VAdd(VScale(wx,0.f),VScale(wy,0.f)),VScale(wz,.2f)))};
+      // XR -> model is diag(-1,1,1) in this fixture (see CheckMirroredGripRoll):
+        // the XR target is the mirrored model-space handle.
+      latest.arm[0].pos[0]=-handle.x;latest.arm[0].pos[1]=handle.y;latest.arm[0].pos[2]=handle.z;
+    }
     ++latest.sequence;Fresh();ArmIkTick(latest);callback(player.data());
-    latest.arm[0].pos[0]=.15f;latest.arm[0].pos[1]=1.f;
+    // Slide the support hand sideways: the handle->grip lever rotates the
+    // primary weapon while held. Any lateral offset works; +0.1 x is far
+    // enough to rotate, near enough to stay attached.
+    latest.arm[0].pos[0]+=.1f;
     ++latest.sequence;Fresh();ArmIkTick(latest);callback(player.data());
     float change=0;for(int j:{0,1,2,4,5,6,8,9,10})change+=std::fabs(poses[53].m[j]-free_weapon.m[j]);
     CHECK(change>.1f);
@@ -963,6 +1073,13 @@ int main() {
     body_resource[0xe8]=0;native_proportion_test=false;
     ++latest.sequence;Fresh();ArmIkTick(latest);callback(player.data());
     CHECK(ArmIkLatestHands(published) && premature_publications==0);
+    // F2 live probe needs programmatic copy-publication counts, not just
+    // log lines: a verified commit must be observable with its sequence.
+    ArmIkCopyPublication pub0{};
+    ArmIkCopyPublicationStatus(pub0);
+    const auto commits_before_refusals = pub0.commits;
+    CHECK(pub0.commits >= 1 && pub0.verified &&
+          pub0.last_commit_sequence == published.sequence);
     // A valid matrix copy is not sufficient if its owner or tracking contract
     // changed while native code ran. Recovery must require a NEW source solve,
     // not resurrect the invalid receipt by simply restoring the external state.
@@ -976,6 +1093,8 @@ int main() {
       ++latest.sequence;Fresh();ArmIkTick(latest);
       const auto bound_tracking=latest;
       const auto before_mutation=writes;
+      ArmIkCopyPublication pre_pub{};
+      ArmIkCopyPublicationStatus(pre_pub);
       mutate_after_copy=mutation;callback(player.data());
       CHECK(writes==before_mutation+1); // mutation happened AFTER source commit
       cfg=saved_cfg;latest=bound_tracking;calibration=saved_calibration;
@@ -987,8 +1106,22 @@ int main() {
         std::printf("post-copy mutation %u published a stale receipt\n",mutation);
         return 1;
       }
+      // F2: a refused copy must be observable in the publication counts,
+      // not just by the missing hands. Refusals climb past the pre-copy
+      // count and commits hold across the refusal.
+      ArmIkCopyPublication refused_pub{};
+      ArmIkCopyPublicationStatus(refused_pub);
+      CHECK(refused_pub.refusals > pre_pub.refusals &&
+            refused_pub.commits == pre_pub.commits);
       Fresh();ArmIkTick(latest);callback(player.data());
       CHECK(ArmIkLatestHands(published));
+      // F2: recovery through a fresh verified copy must be observable too:
+      // commits climb past the pre-refusal count and the live flag returns.
+      ArmIkCopyPublication recovered_pub{};
+      ArmIkCopyPublicationStatus(recovered_pub);
+      CHECK(recovered_pub.verified &&
+            recovered_pub.commits > pre_pub.commits &&
+            recovered_pub.last_commit_sequence == published.sequence);
     }
     equipment_available=saved_equipment;latest=saved_tracking;
     Fresh();ArmIkTick(latest);callback(player.data());

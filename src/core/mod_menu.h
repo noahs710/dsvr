@@ -8,6 +8,9 @@ namespace dsvr {
 // Commands/input publication are safe from diagnostic and XR input threads.
 void ModMenuToggle();
 void ModMenuClose();
+// Test-only: acknowledge the restart reminder and close, matching the popup's
+// "Close menu anyway" button for headless coverage (no modal click possible).
+void ModMenuCloseForTest();
 bool ModMenuVisible();
 bool ModMenuCapturesInput();
 // select is the A/confirm button only; triggers belong to the spatial ray.

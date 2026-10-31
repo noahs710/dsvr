@@ -71,10 +71,13 @@ std::uint64_t XrAppliedCameraSequence();
 // Camera/IK use the whole packet to avoid a second-generation getter read.
 bool XrViewFovTotals(float& vfov_rad, float& aspect);
 
-// Effective display rate (display_rate.h): runtime period wins while a
-// session is live, config frame_limit_fps is the fallback. Snapshot read,
-// safe from any thread; true even before a session (fallback values).
+// Observed display/application cadence only; it never configures a game cap.
+// A zero rate means no live OpenXR timing sample is available. Snapshot reads
+// are safe from any thread.
 bool XrEffectiveRate(EffectiveRate& out);
+// Last shipped FB display refresh (Hz, 0 = never reported). Powers the
+// launch-time auto-sync and the launcher's last-known-rate sidecar.
+double XrLastDisplayRefreshHz();
 
 // Last actual mono submission attempt. CPU total includes the separately
 // reported runtime waits; GPU values cover only copy/draw command ranges and

@@ -49,6 +49,17 @@ int main() {
   check(!MenuStateWantsSanctuary(MenuState::Gameplay));
   check(!MenuStateWantsSanctuary(MenuState::Unknown));
 
+  // Panel policy: the calibration screen needs the pointer/stick route but must
+  // never replace the game image with a head-anchored canvas. Conflating the
+  // two put the calibration panel in the user's face during loading.
+  check(MenuStateWantsPanel(MenuState::CalibrationPanel));
+  check(!MenuStateWantsSanctuary(MenuState::CalibrationPanel));
+  check(MenuStateWantsPanel(MenuState::ReadingMenu));
+  check(MenuStateWantsPanel(MenuState::FrontEnd));
+  check(MenuStateWantsPanel(MenuState::OtherMenu));
+  check(!MenuStateWantsPanel(MenuState::Gameplay));
+  check(!MenuStateWantsPanel(MenuState::Unknown));
+
   // Confidence ramp: 0 at first differing feed, mid-window in (0,1).
   {
     MenuDebouncer d(150);

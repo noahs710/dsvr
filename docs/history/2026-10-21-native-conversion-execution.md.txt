@@ -1,6 +1,11 @@
 # DSVR native conversion: execution guide
 
-Date: 2026-10-21. Updated: 2026-10-24 (user-directed physical attack/block/parry focus; prior stereo work package retained). Status: the only active execution plan, not implementation or acceptance evidence.
+Date: 2026-10-21. Updated: 2026-10-29 (consolidation pass: dated steering notes,
+superseded drafts and completed design specs retired to `docs/history`; the live
+per-lane board is the Empryo cockpit at `.empryo/cockpit/lanes/A-K.md`, whose
+frontmatter carries stage, next action, evidence and the latest observed
+build/test/verify/doctor results). Status: the only active execution plan, not
+implementation or acceptance evidence.
 
 Documentation authority: README.md owns scope and authority; this guide owns task order and completion tracking; ENGINEERING.md owns architecture; TESTING.md owns operating policy; VERIFICATION_RUNBOOK.md owns acceptance procedures and numerical thresholds. Direct user instructions take precedence. History, research notes and handoffs do not override those owners. No superseded plan/specification adds a parallel sequence or approval gate.
 
@@ -75,19 +80,33 @@ After three materially identical failures, record the failure signature and chan
 
 ## 5. Milestone order
 
-26 October release steering: native physical attack/defense and usable native
-interactions are release blockers and current priorities. The interrupted seated
-lift, live-save menu and mono camera-provenance fixes are source checkpoints,
-not a physical-combat or release qualification. Do not publish a playable release
-while B/C/H native gates remain open.
-
-
-24 October current user steering: finish IK and physical combat. Resume the
-existing F2/C2 source-to-body publication boundary alongside B/C native combat
-recovery; unrelated camera/stereo feature work stays paused. This supersedes
-the earlier combat-only/IK-paused steering, not acceptance prerequisites or
-permission to guess a native ABI. The numbered general order below is retained
-for the remaining conversion; the current focused work is F2/C2 and B/C.
+Current steering (consolidated 29 October; newest wins on conflict):
+- B/C/H first: physical attack, block and parry plus usable native interactions
+  are release blockers. The input-preview checkpoint gates attack and defense
+  independently (a working grab may ship while attack and block/parry remain
+  open); explicit combat and interact buttons stay available while native
+  bindings are incomplete. D3-D7 remain mandatory before an integrated
+  native-VR claim. Stereo (D) and locomotion (E) resume after the current
+  F2/C2 and B/C focus; unrelated camera/stereo feature work stays paused.
+- Do not publish a playable release while B/C/H native gates remain open.
+  Source checkpoints (seated lift, live-save menu, camera provenance, input
+  preview) are not physical-combat or release qualification.
+- The autonomous session-capture work package below is a measurement
+  prerequisite for B, C, D, E, H and J, not a new feature lane.
+- Texture replacement is out of scope; a separate mod handles it. Do not
+  re-add texture guidance to `docs/ATTRIBUTION.md` or its package test.
+- The shipped UI stays the Win32 Setup GUI plus the in-game ImGui menu; the
+  FLTK UI-swap probe was deleted 29 October and must not be revived.
+- The implementation language stays C++; a rewrite was considered and
+  rejected 29 October. Do not reopen it without new evidence of a concrete
+  blocker that C++ causes.
+- Run 7's idle-pose fixture is valid but `asm.root` is offset and its
+  source/body palettes alias. Read `docs/ARM_IK_EVIDENCE.md` before
+  retargeting or removing the refusal guard. The next F gate is a real native
+  palette consumer, not a larger solver.
+- Stereo: the operator approved the recovered feasibility work package
+  (D1a-D2b). A successful static producer/consumer edge is not a stereo
+  PASS; it is permission to guess a native ABI.
 
 Execute sequentially unless the user explicitly requests delegation. Read-only investigation can advance a later milestone without enabling its mutation path.
 
@@ -99,6 +118,247 @@ Execute sequentially unless the user explicitly requests delegation. Read-only i
 6. K: final performance, lifecycle, packaging and release qualification.
 
 A first physical hit may be developed in the existing mono diagnostic route. It cannot qualify a playable VR release. The first integrated encounter requires C, D, E, reachable-pose/body alignment from F, and G. Full campaign completion additionally requires every remaining gate, including full F requirements. Do not confuse an intermediate milestone with completion of the mod.
+
+### 26 October focused work package: capture, native comparisons, hitch, bindings
+
+User direction: complete these four steps in order. This work package expands
+the existing A/B/C/G/H/K gates; it is not a second roadmap or an acceptance
+claim. Planning baseline: `d2fd048`, clean checkout. No deployment, launch,
+build or native experiment was performed to prepare this plan.
+
+Chosen approach: make the evidence path reliable, obtain controlled native
+comparisons, isolate the observer hitch, then implement only contracts supported
+by those results. A static-first approach leaves runtime ownership/outcomes
+unanswered; a broad feature-first approach adds behavior before its native
+contract is known. Keep unrelated UI, locomotion, stereo feature work and build
+optimization outside this work package. Their existing release gates stay open.
+
+Work sequentially, one bounded defect or contract question per slice, without
+delegation. I own source/static investigation, fixtures, build qualification,
+receipts, analysis and integration. The operator supplies ordinary gameplay for
+comparison runs and physical/headset actions and feel for final qualification.
+Arrange availability with a concrete case sheet; TESTING already authorizes
+useful protected testing, so do not ask again for general launch permission.
+
+#### Step 1: autonomous VR session capture (updated user direction, 26 October)
+
+Entry: approved design `../specs/2026-10-26-autonomous-vr-session-capture.md`.
+This replaces the case-start gate: use the normal VR LAB path because
+`observer_only` disables XR/input. The recorder must not require cases, prompts,
+or narration during play. No game launch/deployment during implementation.
+
+- [ ] Add the startup-only opt-in config and LAB/normal-VR compatibility guard.
+  Install a session-only trace domain on the accepted VR render frame; do not
+  install unrelated view/render probes for this capture mode.
+- [ ] Add timestamped effective virtual-pad change events and <=30 Hz tracked
+  grip samples with immediate validity/space-epoch transitions. Keep XR and QPC
+  time bases separate and preserve the bounded nonblocking writer queue.
+- [ ] Implement automatic process-session/player-epoch tracking: start on
+  verified player appearance, close after two seconds absent, resume on re-load.
+  Rotate at the 600-second writer maximum, emit genuine footers and retain all
+  prior files. Mark any handoff gap, dropped events, I/O fault or interrupted
+  final segment; never synthesize evidence or spin on failure.
+- [ ] Write a unique append-only session index with epoch/segment bounds, close
+  reasons, raw event counts and trace health. Extend `tools/vr_trace.py` with a
+  public multi-segment session report while preserving legacy single-trace use.
+- [ ] Implement the approved public test seams: startup/config gate, input-to-
+  trace behavior, player/rotation/artifact lifecycle and analyzer CLI. Use fake
+  player state and temporary files; no Steam/DSR launch, deployment, save or
+  install mutation.
+- [ ] Update the diagnostic runbook and this handoff to describe the autonomous
+  mode and its uncertainty limits. Exact scene identity and native hit/block/
+  parry outcomes remain unknown unless independently established.
+
+Verification: run focused tests first; then build/test ordinary Debug and
+Release plus LAB Release. Seal a fresh offline candidate with current source,
+binary and log hashes and run read-only `Check`. Do not use the prior
+observer-only candidate. No live gameplay evidence or native acceptance is
+claimed by this step.
+
+Exit: after one-time opt-in, verified player load starts recording without case
+input; pad/hand data obeys limits; player unload/rotation close valid segments;
+re-load starts a new epoch; failures are visible in the index/report; complete
+offline suites and the fresh candidate preflight pass. Stop before deployment.
+
+#### Superseded Step 1 draft (historical): bounded case-start gate
+
+The case-start-gate draft (300-second header gate, 540-second plan cap, runner
+case prompts) and its design detail are retired to
+`docs/history/2026-10-26-capture-case-start-gate-design.md.txt` as planning
+evidence. They are not executable guidance and the autonomous capture design
+above replaces them. Do not re-derive that design; extend the runner and
+`session_case.h` where the autonomous recorder needs shared lifecycle.
+
+#### Step 2: requalify and collect clean ordinary-control comparisons
+
+The autonomous recorder itself has no case windows or in-play labels. Any
+case-specific comparison annotations in this step are separate research
+artifacts and must never become prerequisites or prompts for starting capture.
+
+- [ ] Seal a new candidate after Step 1, with source, regular/LAB binary and
+  test-log hashes. Keep previous receipts immutable. Always supply the explicit
+  candidate path; the runner's default Oct-24 candidate is stale. Check the
+  actual current state immediately before each transaction under TESTING.
+- [ ] Prepare disposable seeds with a fixed active enemy, known sword/shield,
+  repeatable starting state and accessible interaction objects. Confirm the
+  seeds can exercise each intended case before spending the capture window.
+  Record scene, equipment/PARAM identity, initial state and candidate identity.
+- [ ] Prepare the operator case sheet and independent outcome record before
+  launch. Separate intended windows from observed outcomes. Use synchronized
+  video where available, otherwise timestamped operator observations with their
+  uncertainty recorded; do not infer success from a window label or HP alone.
+  No mandatory mid-action narration. Keep raw case timestamps unchanged and
+  write later interpretation to a separate results file.
+- [ ] Use detached Launch with an explicit candidate, fresh receipt and bounded
+  30-minute transaction. State its absolute cutoff in New York time. All case
+  prompts wait for Step 1 admission; normal controls remain the operator's.
+
+Proposed case budgets, finalized against the actual seed before launch:
+
+| Capture | Separately labelled windows | Total |
+|---|---|---:|
+| Combat comparison | neutral 30 s; hit 60; clear-air miss 60; wall interception 45; block 75; parry-only 90; failed-parry control 45; dodge/invulnerability 75 | 480 s |
+| Interaction comparison | neutral 30 s; eligible activation 60; ineligible/locked refusal 60; out-of-range refusal 60; occluded refusal 60; release/repeat 60; target change 60; load/target-lifetime case 60 | 450 s |
+
+These are opportunity budgets, not success quotas or permission to exceed the
+trace. Reset/travel must fit the declared windows. Split interaction classes
+and complex defense cases across fresh transactions when necessary. Do not
+combine a parry-only case with riposte or a miss with a wall hit. An unsuccessful
+parry attempt stays an unsuccessful attempt; an unperformed case stays open.
+
+- [ ] Close the trace and exit normally, then collect and hash raw artifacts,
+  restore through the owned receipt and independently compare original file/
+  save inventories. Resolve incomplete restoration before another transaction.
+- [ ] Analyze using the strict trace validator: complete header/footer span,
+  capture/combat integrity, losses/limits, QPC coverage, complete batches,
+  actor generation/read validity, context/equipment continuity and independent
+  visible outcome. Treat top-level exit 2 for unverified full VR separately from
+  the combat-domain integrity checks. Report excluded intervals explicitly.
+- [ ] Produce one row per attempt containing case window, event identities,
+  selected context/PARAM/equipment, raw response fields with actual sampling
+  phase, HP/stamina/reaction observations, alternative explanations and verdict.
+  Separate evidence for selector execution from record kind: kind 2 does not
+  establish the `+0x160 == 0x1d` branch. Pin a runtime target only if actually
+  observed. Do not claim unobserved owners from static continuation bytes.
+
+Exit: usable, independently labelled comparisons for each required ordinary
+combat case and each interaction case needed for the next class-specific seam.
+Missing cases trigger a targeted rerun, not relabelling of mixed evidence.
+B1 may close only when its whole comparison requirement is met; this step
+does not establish a production physical-contact or interaction binding.
+
+#### Step 3: isolate and fix the hitch with a controlled comparison
+
+Hypothesis: detailed guarded observation materially contributes to the reported
+hitch. Existing elapsed read costs and the failed query-count reduction are
+leads, not causal proof. Start with the repeatable movement/contact/jump route
+from Step 2; if the hitch prevents usable comparisons, investigate this step
+early and then return to the missing Step 2 cases.
+
+- [ ] First collect bounded Windows CPU stack/scheduling samples and actual
+  frame/present intervals on the exact detailed-observer candidate. Record disk
+  activity/writer behavior and observer counts alongside contact times. Include
+  long stalls explicitly; intervals rejected by the pacing histogram cannot
+  disappear from this diagnosis. Check profiling overhead with a matched run.
+- [ ] If stacks do not discriminate the cause, prepare a startup-only LAB
+  diagnostic mode that bypasses detailed contact actor/context reads while
+  preserving the original callback exactly once, return bits, recorder lifecycle
+  and process ownership. Verify whether an adequate mode already exists before
+  adding one. Mark reduced observation in metadata and parser results; absent
+  detail is unavailable evidence, never a clean negative or combat acceptance.
+- [ ] Compare detailed/reduced observation using the same code revision where
+  possible, separate sealed configs, same seed/settings and the same scripted
+  operator route. Use A-B-A ordering when reproducible, at least five steady
+  measurement windows per condition, and label contact bursts, jumps and menu/
+  load intervals separately. Each session gets its own protected transaction.
+- [ ] Compare frame p50/p95/p99/max, long-frame counts, stack CPU time, scheduling
+  waits, callback wall time and trace losses. A repeatable reduction that returns
+  on re-enabling detail supports observer causality. No change redirects the
+  probe to the measured blocking stack, scheduling or render/I/O owner.
+- [ ] Change one measured cause, add an integration regression where feasible,
+  requalify binaries and repeat the same comparison. Preserve fresh pointer/page
+  validation across callbacks; do not fix the hitch with a stale cross-callback
+  permission or actor cache. Revalidate full-detail capture integrity afterward.
+
+Exit: a reproducible cause and verified correction, with the original hitch
+route completing without the reported symptom and measured frame evidence
+supporting the result. If unreproduced, record UNVERIFIED rather than fixed.
+Use the runbook's existing pacing criteria for any pacing PASS. Desktop observer
+improvement cannot close the separate 90 Hz complete-stereo performance gate.
+
+#### Step 4: recover the remaining contracts, then implement native bindings
+
+Entry: reliable comparison evidence and a qualified observation path. Work from
+confirmed outcomes backward and existing producer leads forward. Use the source
+graph first when available; targeted direct reads are the fallback. Current
+planning tools expose neither the source graph nor GhidraMCP, so implementation
+must rediscover access. Native static work requires the supported live DSRFull
+bridge; absence is a named blocker, not grounds for guessed offsets or a new
+headless shim. Stop repeating a materially identical failed probe after three
+attempts and change the hypothesis or evidence source.
+
+- [ ] Complete a contract table for each proposed seam: pinned EXE/bytes, full
+  calling convention/arguments/return, receiver, constructor/cleanup, field
+  meanings/units, resource bounds, actor/context generation, pointer lifetime,
+  native simulation owner/update phase, eligibility, defenses, side effects,
+  refusal and independently correlated outcome. Record unresolved fields as
+  blockers. No gameplay mutation is admitted by a plausible setter alone.
+- [ ] Resolve native weapon dimensions/axes, final committed source-to-body
+  publication, equipment revision and target/collision geometry. Confirm that
+  observed armor/weapon placement and the contact pose agree. Reuse the existing
+  lifetime guards and sweep work; do not treat offline pose fixtures or the
+  diagnostic 0.9 m blade as live geometry qualification.
+- [ ] Select B5's smallest evidenced seam: adapt tracked contact into an existing
+  legitimate native context; if impossible, use verified native constructors;
+  otherwise replace the local animation-dependent contact geometry at a proven
+  update boundary. Document evidence for the selection before writing the adapter.
+  Gesture-to-button combat and direct HP subtraction cannot satisfy this step.
+- [ ] Implement one sword end to end in the existing combat owner: immutable
+  committed pose, fresh physical swing energy, swept contact/world obstruction,
+  generation checks, one event per target/episode, native simulation submission
+  and independent outcome confirmation. Avoid duplicate native collision/costs
+  and keep gameplay outside render callbacks. Qualify ten deliberate hits and
+  ten misses, resting overlap for 10 s, still-weapon walking/turning, wall hits,
+  duplicate callbacks and lifecycle/reuse cases against the ordinary baseline.
+- [ ] Add shield block and parry through their verified native contracts, with
+  actual shield coverage/orientation, timing, stamina/guard break, parryable and
+  unparryable attacks, reactions and stale/held-overlap refusal. Test legitimate
+  two-hand rules where required. Haptics follow confirmed outcomes only.
+- [ ] Implement one evidenced interaction class first, then extend separately
+  to every supported class required by H1-H3. Bind selected object/generation,
+  eligibility, prompt, native distance origin/units, LOS and activation lifetime.
+  Qualify valid use, locked/ineligible, too far, occluded, release/cancel, repeated
+  input, target replacement, load and death. Preserve native scripted behavior
+  and action locks; a successful door cannot qualify pickup/lever/NPC/ladder APIs.
+- [ ] After each adapter slice, run focused refusal/duplicate/lifecycle tests,
+  full Debug/Release and relevant LAB qualification, then a protected native
+  test on those exact bytes. Update the melee/interaction evidence owners and
+  A/B/C/G/H ledger only for demonstrated results. Refresh the development package
+  through the verifier after integration; qualify the packaged candidate again
+  for affected native behavior and operator physical-use/feel requirements.
+
+Exit: accepted contracts, real attributable physical sword damage and native
+shield block/parry, qualified interaction adapters across the required supported
+classes, passing refusal/lifecycle cases and exact-build native/operator evidence.
+If a contract or operator case remains unavailable, this step is unfinished.
+Completion does not close unrelated stereo, locomotion, campaign or final release
+gates. No formal release or upload is included in this work package.
+
+#### Evidence, checkpoints and next action
+
+Every implementation/research slice leaves its exact command/result, candidate
+hashes, raw evidence paths, restoration state, gate verdict, unresolved fact and
+next discriminating probe in MODLOG and the existing owning document. Fresh run
+folders hold case sheets, immutable raw captures, analysis and results; old
+receipts and labels remain untouched. A changed candidate requires fresh
+qualification, not reuse of an earlier green receipt.
+
+Live board: the Empryo cockpit (`.empryo/cockpit/lanes/A-K.md`) mirrors this
+plan. Each lane's frontmatter carries stage, open/done counts, the next
+action, evidence and the latest observed build/test/verify/doctor results.
+When a gate closes, validates or blocks, update the lane file and the
+completion ledger in the same turn. Never write a lane count you did not
+observe in the current session.
 
 ## A. Establish a fresh baseline
 
@@ -497,9 +757,9 @@ Maintain this table here as gates change. Link evidence, candidate identity and 
 
 | Gate | Status at plan creation | Required evidence |
 |---|---|---|
-| A baseline | Offline source qualification PASS: Debug 101/101, Release 101/101, LAB observer Release 99/99; verifier/doctor PASS and current candidate Check PASS (26 Oct response observer). Native Run BLOCKED: existing runner writes the backup vault and replaces its active verification receipt, contrary to current hard limits; no native transaction executed. | Resolve protected-run hard-limit conflict without changing existing backups/receipts; then operator-driven native observation and ownership qualification. |
-| B melee contract | OPEN: prior hit/miss observations retained; complete contact ABI/ownership/defense/outcome contract remains unqualified. Read-only GhidraMCP access to DSRFull restored; endpoint resource key/range lookup narrowed, unchecked 47-byte transform reader independently pinned (25 Oct autonomous continuation). 14032F548 verdict 26 Oct (see contract): byte-pinned CALL [RAX+0x640] in .text1 split gap, zero xrefs, RAX/ECX producer unrecovered after three cross-region assembly windows (return-address selectors, not producers); instruction candidate only, not a damage classification; +0x73 read and 23/24/25 selection independently byte-verified in the 25 Oct continuation (message meaning/outcome open); type-64 probe 26 Oct: type-2 dispatch mapped (kind0 notify+effect, kind1 forged-return selector, kind2 <0x40 gate excludes 64 from 1402FC360), zero ==0x40 consumers — negative-only discriminator; swing-producer probe 26 Oct: 1403C9B50 2 refs / 1403C7460 3 DATA refs, no swing caller, builder zero code xrefs; record-stride decode 26 Oct: 1417991F0/224 are PE unwind metadata (12B RUNTIME_FUNCTION triads), not dispatch records — no code owner 26 Oct resume corrects the atomic-failure/no-handler misclassification: type-1 accepted path reaches target +0x480 then source +0x460; PlayerIns/EnemyIns +0x480 implementations differ, 336 bytes independently pinned; outcome/lifetime/thread still open (NATIVE_MELEE_CONTRACT). 26 Oct qualification continuation: kind-2 planar dot/Cosf branch and target state writes pinned, not an HP/damage/defense classification. Raw +54/+168/+169 before/after observer payload now covered at the actual detour and strict consumer; native ownership/outcome acceptance remains BLOCKED. | finish resource bounds/sentinel/lifetime and type-1/type-64 contact consumers plus independent native hit/block/parry correlation; no guessed calls |
-| C physical sword | BLOCKED: physical_damage_bound and shield_contact_bound remain false; no production physical hit/defense submission binding, native lifetime/thread/geometry/outcome evidence still absent. The newly tested response observer is not a physical-hit implementation. | native submission owner, actor/context lifetime and thread, actual geometry/obstruction and native costs/results; ten deliberate hits/misses after binding qualification |
+| A baseline | Offline source qualification PASS (27 Oct): Debug 107/107, Release 107/107, LAB Release 105/105; fresh iteration-5 candidate sealed (3324ba1a…, 274 sources, 4 binaries); read-only Check PASS, no deployment. Native Run BLOCKED 27 Oct: `auto_verify` Release 109/109, doctor PASS, dev `dist/DSVR-latest-x64.zip` refreshed (1,548,969 bytes). Read-only preflight 10 OK / 5 WARN / 2 BLOCKED: game PID 51840 running, desktop active, SteamVR selected, installed `dinput8.dll` and `DSVR.dll` stale. No install/launch/native transaction; B1/H1 cases remain unplayed. Requires game to close, user inactive, exact candidate install and route-matched protected capture. | Operator-driven Launch → Finish on the fresh candidate (B1/H1 case sheets), then native observation and ownership qualification. |
+| B melee contract | OPEN: prior hit/miss observations retained; complete contact ABI/ownership/defense/outcome contract remains unqualified. Read-only GhidraMCP access to DSRFull restored; endpoint resource key/range lookup narrowed, unchecked 47-byte transform reader independently pinned (25 Oct autonomous continuation). 14032F548 verdict 26 Oct (see contract): byte-pinned CALL [RAX+0x640] in .text1 split gap, zero xrefs, RAX/ECX producer unrecovered after three cross-region assembly windows (return-address selectors, not producers); instruction candidate only, not a damage classification; +0x73 read and 23/24/25 selection independently byte-verified in the 25 Oct continuation (message meaning/outcome open); type-64 probe 26 Oct: type-2 dispatch mapped (kind0 notify+effect, kind1 forged-return selector, kind2 <0x40 gate excludes 64 from 1402FC360), zero ==0x40 consumers — negative-only discriminator; swing-producer probe 26 Oct: 1403C9B50 2 refs / 1403C7460 3 DATA refs, no swing caller, builder zero code xrefs; record-stride decode 26 Oct: 1417991F0/224 are PE unwind metadata (12B RUNTIME_FUNCTION triads), not dispatch records — no code owner 26 Oct resume corrects the atomic-failure/no-handler misclassification: type-1 accepted path reaches target +0x480 then source +0x460; PlayerIns/EnemyIns +0x480 implementations differ, 336 bytes independently pinned; outcome/lifetime/thread still open (NATIVE_MELEE_CONTRACT). 27 Oct read-only GhidraMCP follow-up: `CreateDamage_NoCollision` vtable +8 tail-jumps via `1404B0EC0` to `140490F40` -> `1403C9B50` -> `1403C93B0` payload creation; `OnCharacterHP_CheckAttacker` registration resolves only to condition methods. No HP write or native attribution recovered; B/C/G remain open. 26 Oct qualification continuation: kind-2 planar dot/Cosf branch and target state writes pinned, not an HP/damage/defense classification. Raw +54/+168/+169 before/after observer payload now covered at the actual detour and strict consumer; native ownership/outcome acceptance remains BLOCKED. 27 Oct run2 PARTIAL: footer-valid trace (105,414 events, 6,891 paired) binds HP deltas to hit/wall/block/elig/inelig windows; miss window shows HP movement; parry-only one incoming without the run-1 ret-1 shape; failed-parry/dodge empty; occl/repeat/retarget/loadlife unobserved. | finish resource bounds/sentinel/lifetime and type-1/type-64 contact consumers plus independent native hit/block/parry correlation; no guessed calls |
+| C physical sword | BLOCKED: physical_damage_bound and shield_contact_bound remain false; no production physical hit/defense submission binding, native lifetime/thread/geometry/outcome evidence still absent. Iteration 5 (27 Oct): runner Finish lease fix, fresh iteration-5 candidate sealed (3324ba1a…, 274 sources), Check PASS; Debug 107/107, Release 107/107, LAB 105/105, auto_verify verifier Release PASS + doctor PASS, DLL deployed. Bench geometry green only; B/C native gates stay open until footer-valid B1/H1 captures land. | native submission owner, actor/context lifetime and thread, actual geometry/obstruction and native costs/results; ten deliberate hits/misses after binding qualification |
 | D stereo | D1b entity/renderer/dispatcher/two-worker edges and known counter retirement recovered statically; the Begin handler's pump edge and worker error paths pinned 25 Oct (`1411BF150` slot `+0x00` -> slot `+0x10`); 26 Oct D-probes: RDI/R14 producers at 1411B46C0 head re-confirmed, renderer+10 store pinned, 140CC5E60/5EB0 bytes+xrefs pinned, outer caller 1411B3FA5 seed found (fresh 0x300 alloc, R14-source = frame RCX, type open); Begin-payload +48/+50 borrow-appearing with no proven retain, derived override set {+0x28,+0x30,+0x40,+0x48}; fourth window: queue/teardown shape (enqueue tail-thunk, retire loop, teardown pump-owned, waiter/type-read open) + bracket scout (1411C2F50 recommended, render-frame rejected); complete counter/resource ownership unresolved; D2 UNVERIFIED; production absent Mono source checkpoint: submit the camera-bound pose/FOV, not the newer runtime prediction. Both-eye center-pose and 13 source-refusal/recovery cases pass in xr_mono_recovery; SteamVR/VDXR headset comparison still unverified; this is not stereo. | stereo evidence note and pinned static receipts; outer RCX typing, queue free-path/waker identity, derived table address/targets, type-index mapping, natural main-scene trace and conditional two-view decision still required; D3-D7 and headset fusion remain open |
 | E locomotion | orientation selection finished 23 Oct: always one live reference (Head default, or selected left/right/non-dominant hand with head fallback on hand loss), settable in DSVR-Setup and the mod menu, offline 88/88 both configs; follow unqualified. E-motor map 26 Oct: roomscale chain file-mapped (basis publish camhook/camera 584-649, sampler input 608-670, axes pad_math 141-159, follow camera 354-377) but attribution open — XInput consumer, motor/collision resolver, authoritative root, forced-motion source all UNKNOWN; follow clamp is heuristic, not proof; docs-only owner table proposed. E2 probe 26 Oct: 6 XInputGetState call sites classified, 2 per-frame candidates (140e27aa0/140e28430, no-deadzone normalized floats); follow-up: consumers unpinned (pattern search timed out bridge-side), slots decoded (self-RVA pairs + full-VA poller slots, not vftables), sibling walk negative (trigger/event only), byte-pattern retry: axis getters pinned idx5/7, scaling consumer behind zero-xref computed dispatch, candidate #3 cadence unproven; mapper/motor still open; next is table-VA immediate search / outer-RCX typing | native motor attribution, path/collision/latency matrix, plus the rewritten reference-stability headset row |
 | F body/crouch | solver/root guards offline PASS; 25 Oct committed-pose read gap fixed: calibration revision stamped, both public readers invalidate on tracking/mode/capture transitions and require a fresh natural copy (38 adapter cases); native distinct-palette transfer/armor/headset qualification still OPEN; fit/crouch open Seated mode retained with adjustable 0–1 m lift (0.5 m default), independent of anatomical reach/world fit; config/mapping regressions pass. Native body/armor/crouch acceptance remains open. | qualified source->body transfer, rendered alignment, independent mesh-scale ownership, clearance and hurt geometry |

@@ -395,6 +395,23 @@ inline bool BladeOverlapsHitSlot(const NativeHitSlot& slot, Vec3 grip, Vec3 tip,
   return d >= 0.0f && d <= slot.radius + blade_radius;
 }
 
+// Use the same whole-blade continuous query as target classification, with
+// the selected sphere/capsule distance. A slot is attack geometry, not proof
+// of a target hurt volume. Non-finite history permits only current overlap.
+inline bool BladeSweptOverlapsHitSlot(const NativeHitSlot& slot, Vec3 prev_grip,
+                                      Vec3 prev_tip, Vec3 grip, Vec3 tip,
+                                      float blade_radius) {
+  if (BladeOverlapsHitSlot(slot, grip, tip, blade_radius)) return true;
+  if (!FiniteVec(prev_grip) || !FiniteVec(prev_tip)) return false;
+  if (!slot.valid() || !std::isfinite(blade_radius) || blade_radius < 0.0f)
+    return false;
+  return SweepBladeContact(prev_grip, prev_tip, grip, tip,
+      slot.radius + blade_radius, [&](Vec3 a, Vec3 b) {
+        return slot.capsule ? SegmentSegmentDistance(a, b, slot.tip, slot.tail)
+                            : SegmentPointDistance(a, b, slot.tip);
+      }) == BladeSweepResult::Hit;
+}
+
 // --- Damage scale in the native correction domain --------------------------
 // AtkParam stores damage as a base u16 value times a u16 percent correction
 // (100 = 1.00x). Our swing-energy scale is a multiplier of exactly that
@@ -477,7 +494,9 @@ inline bool QualifyContact(const BladeHit& hit, const AttackIdentity& attack,
                            std::span<const NativeHitSlot> slots, Vec3 grip,
                            Vec3 tip, QualifiedContact& out,
                            bool allow_sphere_fallback = false,
-                           const CombatParams& p = {}) {
+                           const CombatParams& p = {},
+                           Vec3 prev_grip = {NAN, NAN, NAN},
+                           Vec3 prev_tip = {NAN, NAN, NAN}) {
   out = {};
   // Refuse malformed motion even if a caller supplied a plausible multiplier.
   // Encode also refuses invalid/overflowing animation identities.
@@ -501,9 +520,14 @@ inline bool QualifyContact(const BladeHit& hit, const AttackIdentity& attack,
   candidate.attribute = AttributeFromGesture(hit.kind);
   candidate.tip_speed_mps = hit.tip_speed_mps;
   candidate.blade_action_allowed = true;
+  const bool have_sweep = FiniteVec(prev_grip) && FiniteVec(prev_tip);
   int best = -1;
   for (std::size_t i = 0; i < slots.size(); ++i) {
-    if (!BladeOverlapsHitSlot(slots[i], grip, tip, p.blade_radius_m)) continue;
+    const bool overlaps = have_sweep
+        ? BladeSweptOverlapsHitSlot(slots[i], prev_grip, prev_tip, grip, tip,
+                                    p.blade_radius_m)
+        : BladeOverlapsHitSlot(slots[i], grip, tip, p.blade_radius_m);
+    if (!overlaps) continue;
     // The row's own priority beats list order; equal priority keeps the
     // earlier slot so the choice stays deterministic across runs.
     if (best < 0 || slots[i].priority > slots[best].priority)

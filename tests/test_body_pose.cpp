@@ -290,8 +290,10 @@ int main() {
     CHECK(std::memcmp(rig.poses.data(), before.data(), sizeof(rig.poses)) == 0);
   }
 
-  // Head turned +0.5 rad toward +right: shoulders follow the head, pelvis
-  // and link lengths stay put, and the world-space shoulder swing matches.
+  // Head turned +0.5 rad toward +right: shoulders follow the head by the
+  // gaze-follow gain, pelvis and link lengths stay put, and the world-space
+  // shoulder swing matches. The gain is a deliberate over-follow (operator
+  // request, 31 Oct 2026); the anatomical bound test below still caps it.
   {
     Rig rig;
     const Vec3 head_f = VAdd(VScale(kFwd, std::cos(0.5f)),
@@ -299,13 +301,14 @@ int main() {
     float applied = 0.0f;
     CHECK(SolveTorsoYaw(rig.poses, rig.parents, 1, RootYawPi(), kRight, kFwd,
                         head_f, applied));
-    CHECK(Near(applied, 0.5f, 1e-3f));
+    CHECK(Near(applied, 0.5f * kTorsoLookGain, 1e-3f));
     const ArmPoseMatrix root = RootYawPi();
     const Vec3 shoulder_w =
         WorldPoint(root, ArmPoseOrigin(rig.poses[5]));
     const Vec3 spine_w = WorldPoint(root, ArmPoseOrigin(rig.poses[1]));
     CHECK(Near(RelativeYaw(VNorm(Sub(shoulder_w, spine_w)), kRight, kFwd),
-               RelativeYaw(VNorm(Vec3{0.2f, 0, 0}), kRight, kFwd) + 0.5f,
+               RelativeYaw(VNorm(Vec3{0.2f, 0, 0}), kRight, kFwd) +
+               0.5f * kTorsoLookGain,
                1e-3f));
     CHECK(VNear(ArmPoseOrigin(rig.poses[11]), {0, 0.9f, 0}));
     CHECK(Near(VLen(Sub(ArmPoseOrigin(rig.poses[7]),
@@ -348,7 +351,7 @@ int main() {
     float applied = 0.0f;
     CHECK(SolveTorsoYaw(rig.poses, rig.parents, 1, RootReflected(), kRight,
                         kFwd, head_f, applied));
-    CHECK(Near(applied, 0.4f, 1e-3f));
+    CHECK(Near(applied, 0.4f * kTorsoLookGain, 1e-3f));
     const ArmPoseMatrix root = RootReflected();
     const Vec3 shoulder_w =
         WorldPoint(root, ArmPoseOrigin(rig.poses[8]));
@@ -359,7 +362,7 @@ int main() {
                   WorldPoint(root, ArmPoseOrigin(fresh.poses[1])))),
         kRight, kFwd);
     CHECK(Near(RelativeYaw(VNorm(Sub(shoulder_w, spine_w)), kRight, kFwd),
-               before_yaw + 0.4f, 1e-3f));
+               before_yaw + 0.4f * kTorsoLookGain, 1e-3f));
   }
 
   // Native facing far from the heading (locomotion facing, not a head
@@ -452,17 +455,30 @@ int main() {
     };
     CHECK(Near(TorsoTargetYaw(turned(0.03f), kRight, kFwd), 0.0f, 1e-3f));
     CHECK(Near(TorsoTargetYaw(turned(-0.03f), kRight, kFwd), 0.0f, 1e-3f));
-    // The band recenters the response, so just past it the lock is 1:1:
-    // (0.05-db)/(limit-db)*limit = 0.0157 rad out for a 2.9 deg glance.
-    const float edge = (0.05f - kTorsoLookDeadbandRad) /
-        (kTorsoTwistLimitRad - kTorsoLookDeadbandRad) * kTorsoTwistLimitRad;
-    CHECK(Near(TorsoTargetYaw(turned(0.05f), kRight, kFwd), edge, 1e-3f));
-    CHECK(Near(TorsoTargetYaw(turned(-0.05f), kRight, kFwd), -edge, 1e-3f));
-    CHECK(Near(TorsoTargetYaw(turned(0.6f), kRight, kFwd), 0.5909f, 1e-3f));
-    CHECK(TorsoTargetYaw(turned(0.6f), kRight, kFwd) >=
+    // The band recenters the response, so just past it the lock is 1:1
+    // scaled by the gaze-follow gain.
+    const float scale = kTorsoTwistLimitRad * kTorsoLookGain /
+        (kTorsoTwistLimitRad - kTorsoLookDeadbandRad);
+    CHECK(kTorsoLookGain > 1.0f);
+    CHECK(Near(TorsoTargetYaw(turned(0.05f), kRight, kFwd),
+                (0.05f - kTorsoLookDeadbandRad) * scale, 1e-3f));
+    CHECK(Near(TorsoTargetYaw(turned(-0.05f), kRight, kFwd),
+                -(0.05f - kTorsoLookDeadbandRad) * scale, 1e-3f));
+    CHECK(Near(TorsoTargetYaw(turned(0.6f), kRight, kFwd),
+               (0.6f - kTorsoLookDeadbandRad) * scale, 1e-3f));
+     CHECK(TorsoTargetYaw(turned(0.6f), kRight, kFwd) >=
           0.6f - kTorsoLookDeadbandRad);
     CHECK(Near(TorsoTargetYaw(turned(3.0f), kRight, kFwd), kTorsoTwistLimitRad,
                1e-3f));
+    // The gain must not buy extra spine wind-up: the anatomical bound still
+    // binds, only sooner, so a wide glance saturates instead of over-winding.
+    const float saturate =
+        kTorsoLookDeadbandRad + kTorsoTwistLimitRad / scale;
+    CHECK(saturate < kTorsoTwistLimitRad);
+    CHECK(Near(TorsoTargetYaw(turned(saturate), kRight, kFwd),
+               kTorsoTwistLimitRad, 1e-3f));
+    CHECK(Near(TorsoTargetYaw(turned(saturate + 0.2f), kRight, kFwd),
+               kTorsoTwistLimitRad, 1e-3f));
   }
 
     // The head alone steers the torso.
@@ -471,7 +487,10 @@ int main() {
           return VAdd(VScale(kFwd, std::cos(yaw)), VScale(kRight, std::sin(yaw)));
       };
     const Vec3 head = turned(0.3f);
-        CHECK(Near(TorsoTargetYaw(head, kRight, kFwd), 0.2771f, 1e-3f));
+        CHECK(Near(TorsoTargetYaw(head, kRight, kFwd),
+                   (0.3f - kTorsoLookDeadbandRad) * kTorsoTwistLimitRad *
+                   kTorsoLookGain / (kTorsoTwistLimitRad - kTorsoLookDeadbandRad),
+                   1e-3f));
     }
 
   // Lean pitch share: deadband, proportion, cap.

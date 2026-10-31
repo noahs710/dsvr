@@ -44,6 +44,8 @@ bool MotionBlurHookInstall(bool enabled) {
 }
 void CalibrationStart(const std::wstring&) {}
 bool WeaponGripsInitialize(const std::wstring&) { return true; }
+bool WeaponMassLoad(const std::wstring&) { return false; }
+std::wstring WideFromUtf8(const std::string&) { return L"unused"; }
 std::wstring GameExeDirectory() { return L"unused"; }
 bool LogInit(const wchar_t*) { return true; }
 void LogWrite(LogLevel, const char*, int, const char*, ...) {}
@@ -68,26 +70,39 @@ bool CameraHookInstall(bool enabled, bool observer) {
 bool PresenceHookInstall(bool enabled) { Record("presence", enabled); return enabled; }
 bool BodyVisibilityHookInstall(bool enabled) {Record("body-geometry",enabled);return enabled;}
 bool XInputBridgeInstall(bool enabled) { Record("input", enabled); return enabled; }
-bool FrameRateHookInstall(bool enabled) { Record("framerate", enabled); return enabled; }
+
 bool VrTraceInstall(bool enabled) { Record("trace", enabled); return enabled; }
+bool VrTraceInstallSession() { Record("session-trace", true); return true; }
 bool RenderHookInstall(bool enabled, bool, bool) {
   Record("render", enabled);
   CoreOnRenderFrame();  // a callback during host installation must do nothing
   if (early_desktop) CoreOnDesktopFrame();
   return host_ok;  // false VR requests install only a desktop observer
 }
+bool ObserverMenuHookInstall() {
+  calls.emplace_back("observer-menu");
+  return true;
+}
 }
 
 int main(int argc, char** argv) {
   CHECK(argc == 2);
   const std::string mode = argv[1];
+#if defined(DSVR_ENABLE_LAB)
+  constexpr bool lab_build = true;
+#else
+  constexpr bool lab_build = false;
+#endif
+  const bool session_supported = lab_build &&
+      (mode == "session" || mode == "session-no-input");
   const bool disabled = mode.starts_with("disabled");
   early_desktop = mode == "disabled-earlyframe";
   requested.vr_enabled = !disabled;
   requested.observer_only = mode == "observer";
   requested.verbose_logging = false;  // observer must work independently
   requested.headlook_enabled = true;
-  requested.xr_input_enabled = true;
+  requested.xr_input_enabled = mode != "session-no-input";
+  requested.autonomous_session_capture = mode == "session" || mode == "session-no-input";
   requested.arm_ik_enabled = true;
   requested.arm_ik_log_only = false;
   requested.hide_player_model = true;
@@ -102,9 +117,9 @@ int main(int argc, char** argv) {
   if (!pinned) {
     CHECK(calls.empty());
   } else if (requested.observer_only) {
-    // No call, even with false, to the render/presence/pad/lab installers.
-    // Camera observation gets its own immutable permission (added below).
-    CHECK((calls == std::vector<std::string>{"diagnostics"}));
+    // Only diagnostics and the dedicated menu hook run: no normal render/XR,
+    // gameplay, presence, input, or lab installers are called.
+    CHECK((calls == std::vector<std::string>{"diagnostics", "observer-menu"}));
     CHECK(published.observer_only);
     CHECK(!published.vr_enabled && !published.headlook_enabled);
     CHECK(!published.xr_input_enabled && !published.motion_attacks && !published.haptics);
@@ -115,12 +130,19 @@ int main(int argc, char** argv) {
       requested.vr_enabled ? "render:on" : "render:off"};
     if (early_desktop && host_ok) expected.emplace_back("blur:on");
     CHECK(calls == expected);
+    CHECK(published.autonomous_session_capture == session_supported);
+    if (mode == "session-no-input")
+      CHECK(!published.xr_input_enabled && published.autonomous_session_capture);
   }
   const auto startup_only = calls;
   dsvr::CoreOnRenderFrame();
   if (pinned && !requested.observer_only && requested.vr_enabled && host_ok) {
     CHECK((calls == std::vector<std::string>{"lab:on", "diagnostics", "render:on",
-      "camera:on", "presence:on", "body-geometry:on", "input:on", "framerate:on", "native-ui:on", "blur:on", "trace:off"}));
+      "camera:on", "presence:on", "body-geometry:on",
+      requested.xr_input_enabled ? "input:on" : "input:off",
+      "native-ui:on", "blur:on",
+      session_supported ? "session-trace:on" : "trace:off"}));
+    CHECK(published.autonomous_session_capture == session_supported);
   } else {
     CHECK(calls == startup_only);
   }

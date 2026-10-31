@@ -14,9 +14,11 @@
 #include <mutex>
 #include <string>
 #include <vector>
+#include "../common/config.h"
 #include "../common/logging.h"
 #include "calibration.h"
 #include "body_visibility.h"
+#include "core.h"
 #include "cpu_frame_timer.h"
 #include "diagnostics.h"
 #include "xr.h"
@@ -73,17 +75,22 @@ HWND g_window = nullptr;
 WNDPROC g_original = nullptr;
 DWORD g_thread = 0;
 ULONGLONG g_last_frame = 0;
-Config g_draft, g_draft_base;
-bool g_draft_ready = false, g_dirty = false;
+// No draft buffer: every row edits the live config in place (g_edit is
+// re-seeded from the applied config each frame) and the footer pushes any
+// difference immediately with save. Rows the running session cannot honor
+// are labeled "(restart required)"; closing with those pending shows a
+// reminder popup, and restarting is left to the operator.
+Config g_edit;
+// Restart-reminder state: modal open, last acknowledged pending set, and a
+// close requested off the render thread (toggle/B-button path).
+bool g_restart_modal = false;
+std::string g_restart_ack;
+bool g_close_requested = false;
 int g_panel = 0;
 ImFont *g_title_font = nullptr;
 bool g_pointer_mode = true;
 ImVec2 g_navigation_pointer{};
 MenuPointerSmoother g_pointer_smooth;
-// The beam lives in the panel ' s own pixels: the spatial menu is a compositor
-// quad, so the panel texture is the only surface the pointer can be drawn on.
-bool g_beam_valid = false;
-ImVec2 g_beam_from{}, g_beam_to{};
 LRESULT CALLBACK MenuWindowProc(HWND window, UINT message, WPARAM key, LPARAM data) {
   const bool capture = ModMenuCapturesInput();
   if (message == WM_KILLFOCUS) {
@@ -216,6 +223,27 @@ bool Initialize(ID3D11Device *device) {
   }
   g_window = window;
   g_thread = GetCurrentThreadId();
+  // The game must own the keyboard the moment it opens: a window that starts
+  // behind SteamVR's overlay or the Setup window receives no XInput focus and
+  // the player sees a live scene with dead controls. Windows only lets a
+  // process take foreground if it already owns it or was granted it, so the
+  // grant is requested by the launcher (AllowSetForegroundWindow) and this
+  // call is the attempt, not a guarantee. Polling continues either way: the
+  // XInput bridge merges motion input regardless of foreground state.
+  if (GetForegroundWindow() != window) {
+    const DWORD fg_thread =
+        GetWindowThreadProcessId(GetForegroundWindow(), nullptr);
+    const DWORD own_thread = GetCurrentThreadId();
+    const bool attached = fg_thread && fg_thread != own_thread &&
+                          AttachThreadInput(own_thread, fg_thread, TRUE);
+    const bool raised = SetForegroundWindow(window) != FALSE;
+    BringWindowToTop(window);
+    if (attached)
+      AttachThreadInput(own_thread, fg_thread, FALSE);
+    DSVR_LOG("Focus: startup foreground request raised=%d window=%p "
+             "(background input stays live either way)",
+             (int)raised, (void *)window);
+  }
   g_original = reinterpret_cast<WNDPROC>(GetWindowLongPtrW(window, GWLP_WNDPROC));
   SetLastError(0);
   const auto previous =
@@ -225,9 +253,8 @@ bool Initialize(ID3D11Device *device) {
   DSVR_LOG("Menu: Home opens DSVR controls; controller shortcut is left Menu + right grip");
   return true;
 }
-void FeedInput(unsigned width, unsigned height) {
+void FeedInput(unsigned width, unsigned height, const MenuPointerState& pointer) {
   auto &io = ImGui::GetIO();
-  const MenuPointerState pointer = XrMenuPointerInput(width, height);
   ControllerInput controller;
   MenuWindowEventQueue events;
   {
@@ -242,12 +269,12 @@ void FeedInput(unsigned width, unsigned height) {
   {
     const int panel_count = PanelCount();
     const auto step = [&](bool held, bool &was_held, int delta) {
-      const bool edge = held && !was_held;
-      was_held = held;
+        const bool edge = held && !was_held;
+        was_held = held;
       if (!edge || panel_count <= 1) return;
       g_panel = (g_panel + delta) % panel_count;
       if (g_panel < 0) g_panel += panel_count;
-    };
+      };
     step(controller.prev_panel, g_panel_step_held[0], -1);
     step(controller.next_panel, g_panel_step_held[1], +1);
   }
@@ -280,11 +307,6 @@ void FeedInput(unsigned width, unsigned height) {
     g_pointer_mode = true;
   }
   const bool pointing = pointer.spatial_menu && pointer.valid && g_pointer_mode;
-  g_beam_valid = pointing && pointer.beam_valid;
-  if (g_beam_valid) {
-    g_beam_from = {pointer.beam_x, pointer.beam_y};
-    g_beam_to = {px, py};
-  }
   const auto now = GetTickCount64();
   io.DeltaTime = g_last_frame
                      ? std::clamp(static_cast<float>(now - g_last_frame) / 1000.f, .001f, .1f)
@@ -380,42 +402,14 @@ void FeedInput(unsigned width, unsigned height) {
   io.AddKeyEvent(ImGuiKey_GamepadDpadRight, controller.x > .6f);
   io.AddKeyEvent(ImGuiKey_GamepadDpadUp, controller.y > .6f);
   io.AddKeyEvent(ImGuiKey_GamepadDpadDown, controller.y < -.6f);
-  io.MouseDrawCursor = pointing;
+  // The tracked ray is a hit-test only. Anything ImGui paints into the panel
+  // texture is baked into the game backbuffer, and the theater rect or the
+  // sanctuary quad then magnifies it across the view (live report 31 Oct 2026:
+  // the pointer ray "painting itself all over the screen").
+  io.MouseDrawCursor = false;
 }
-// The pointer ' s tail is the aiming hand s own apparent position on the panel, // seen from the
-// head , so the drawn segment is the trace of the ray the user reads : it keeps pointing back at
-// the controller as the anchored panel drifts . // Drawn as a tapered , translucent laser rather
-// than a solid rule so it orients the cursor without hiding the control it is about . Drawn on the
-// background list so it sits under every widget , never over a control .
-void DrawPointerBeam() {
-  if (!g_beam_valid)
-    return;
-  auto *list = ImGui::GetBackgroundDrawList();
-  if (!list)
-    return;
-  const float dx = g_beam_to.x - g_beam_from.x, dy = g_beam_to.y - g_beam_from.y;
-  const float len = std::hypot(dx, dy);
-  if (!(len > 8.0f))
-    return;
-  // a tail on top of the cursor draws nothing honest
-  const float ux = dx / len, uy = dy / len, px = -uy, py = ux;
-  const float tail = 2.6f, tip = 0.9f;
-  const ImU32 halo = IM_COL32(214, 172, 96, 34), core = IM_COL32(240, 206, 140, 120);
-  list->PathClear();
-  list->PathLineTo({g_beam_from.x + px * tail * 2.2f, g_beam_from.y + py * tail * 2.2f});
-  list->PathLineTo({g_beam_to.x + px * tip * 2.2f, g_beam_to.y + py * tip * 2.2f});
-  list->PathLineTo({g_beam_to.x - px * tip * 2.2f, g_beam_to.y - py * tip * 2.2f});
-  list->PathLineTo({g_beam_from.x - px * tail * 2.2f, g_beam_from.y - py * tail * 2.2f});
-  list->PathFillConvex(halo);
-  list->PathClear();
-  list->PathLineTo({g_beam_from.x + px * tail, g_beam_from.y + py * tail});
-  list->PathLineTo({g_beam_to.x + px * tip, g_beam_to.y + py * tip});
-  list->PathLineTo({g_beam_to.x - px * tip, g_beam_to.y - py * tip});
-  list->PathLineTo({g_beam_from.x - px * tail, g_beam_from.y - py * tail});
-  list->PathFillConvex(core);
-  list->AddCircle(g_beam_to, 5.0f, IM_COL32(240, 206, 140, 110), 20, 1.2f);
-  list->AddCircleFilled(g_beam_to, 1.6f, IM_COL32(240, 206, 140, 150));
-}
+
+
 void Title(const char *text) {
   if (g_title_font)
     ImGui::PushFont(g_title_font);
@@ -518,42 +512,42 @@ void CalibrationPanel() {
   }
   ImGui::TextWrapped(
       "Recenter aligns the view and tracking origin. It keeps your reach and wrist calibration.");
-  int position = g_draft.play_style == "seated" ? 1 : g_draft.play_style == "roomscale" ? 2 : 0;
+  int position = g_edit.play_style == "seated" ? 1 : g_edit.play_style == "roomscale" ? 2 : 0;
   if (ImGui::Combo("Play position", &position, "Standing\0Seated\0Roomscale\0")) {
-    g_draft.play_style = position == 1 ? "seated" : position == 2 ? "roomscale" : "standing";
-    g_dirty = true;
+    g_edit.play_style = position == 1 ? "seated" : position == 2 ? "roomscale" : "standing";
   }
   ImGui::TextWrapped(
       "Calibration supplies eye height. Seated lift raises the view without changing measured reach or anatomical scale.");
-  int fit = g_draft.embodiment_fit == "arm" ? 1 : 0;
-  if (ImGui::Combo("Body fit anchored on", &fit,
-                   "Native head bone (default)\0Native arm reach\0")) {
-    g_draft.embodiment_fit = fit == 1 ? "arm" : "head";
-    g_dirty = true;
-  }
+  int fit = g_edit.embodiment_fit == "arm" ? 1 : 0;
+  (void)fit;
+  ImGui::BeginDisabled(true);
+  const char* fit_items[] = {"Head height + arm reach"};
+  int fit_shown = 0;
+  ImGui::Combo("Body fit", &fit_shown, fit_items, 1);
+  ImGui::EndDisabled();
   ImGui::TextWrapped(
-      "Head fit sets one automatic scale for the whole world and player so the native Head bone lands on your eye height: the camera sits in the avatar's own head and the body takes the space your body does. Arm fit instead matches your measured hand reach exactly, and the head may sit off the head bone. Either way bones and collision are not scaled, and independent avatar mesh resizing is not yet verified.");
+      "One combined fit: your calibrated height puts the camera on the native Head bone, and your measured arm reach constrains the same world scale (within a quarter either way) so the hands stay reachable without moving the eye off the head.");
   ImGui::Separator();
-  if (g_draft.play_style == "seated") {
-    g_dirty |= ImGui::SliderFloat("Seated height offset (m)", &g_draft.seated_height_offset_m,
+  if (g_edit.play_style == "seated") {
+    ImGui::SliderFloat("Seated height offset (m)", &g_edit.seated_height_offset_m,
                                   0.f, 1.f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
     ImGui::TextWrapped("Raise the seated viewpoint to a comfortable standing height. Your saved measurements stay unchanged.");
   }
-  g_dirty |= ImGui::Checkbox("Override calibrated eye height", &g_draft.eye_height_override);
-  if (g_draft.eye_height_override) {
-    g_dirty |= ImGui::SliderFloat("Manual eye height (m)", &g_draft.eye_height, .5f, 2.5f, "%.2f",
+  ImGui::Checkbox("Override calibrated eye height", &g_edit.eye_height_override);
+  if (g_edit.eye_height_override) {
+    ImGui::SliderFloat("Manual eye height (m)", &g_edit.eye_height, .5f, 2.5f, "%.2f",
                                   ImGuiSliderFlags_AlwaysClamp);
     ImGui::TextWrapped(
         "Manual placement only. Your saved body measurements and world scale stay unchanged. Turn off the override to return to calibration.");
   } else if (!profile.valid)
     ImGui::TextDisabled("Using fallback height until calibration is available.");
-  g_dirty |= ImGui::SliderFloat("World / player scale trim", &g_draft.world_scale, .5f, 2.f, "%.2f",
+  ImGui::SliderFloat("World / player scale trim", &g_edit.world_scale, .5f, 2.f, "%.2f",
                                 ImGuiSliderFlags_AlwaysClamp);
-  g_dirty |= ImGui::SliderFloat("Avatar size (x)", &g_draft.avatar_scale, .6f, 1.6f, "%.2f",
+  ImGui::SliderFloat("Avatar size (x)", &g_edit.avatar_scale, .6f, 1.6f, "%.2f",
                                 ImGuiSliderFlags_AlwaysClamp);
   ImGui::TextWrapped(
       "Avatar size multiplies the same single applied ratio as the trim above, so the head, hands, roomscale and the IK body never separate. It is not an independent mesh resize: bones, colliders and other characters are untouched.");
-  g_dirty |= ImGui::SliderFloat("Wrist roll trim (degrees)", &g_draft.grip_roll_correction_deg, -45,
+  ImGui::SliderFloat("Wrist roll trim (degrees)", &g_edit.grip_roll_correction_deg, -45,
                                 45, "%.1f", ImGuiSliderFlags_AlwaysClamp);
   if (status.saving)
     ImGui::TextDisabled("Saving calibration...");
@@ -564,7 +558,7 @@ void RenderingPanel() {
       "Active path: centered mono. Native stereo and alternating-eye AFR stay unavailable until a real per-eye scene-render hook is verified. Duplicating one finished image is not stereo.");
   ImGui::TextDisabled("True stereo: safely refused     AFR: safely refused");
   ImGui::TextWrapped(
-      "Theater opens automatically for the title screen, DSVR menu and calibration. Native game menus are not reliably detected yet; use F8 to toggle theater for those.");
+      "Gameplay is immersive first person by default. Theater opens automatically for the title screen, loading, non-3D cutscenes, DSVR menu and calibration, and stays closed during play. Native game menus are not reliably detected yet; use F8 to toggle theater for those. Hold the right trigger and push the right stick up/down to resize the theater window live.");
   ImGui::TextWrapped(
       "DSR HUD and native menus are still baked into the mono game image; no separate native UI pass is verified. Theater screen bounds are fitted inside both eye views to avoid cropping; separate HUD/menu layers remain blocked on locating that pass.");
   RenderMetrics metrics{};
@@ -586,62 +580,65 @@ void RenderingPanel() {
     ImGui::TextDisabled("Timing becomes available after a VR frame is submitted.");
   EffectiveRate rate{};
   if (XrEffectiveRate(rate)) {
-    ImGui::Text("Effective target  %d FPS    Runtime cadence  %.1f Hz", rate.effective_fps,
-                rate.runtime_hz);
+    ImGui::Text("Observed app cadence %.1f Hz; physical headset refresh %.1f Hz",
+                rate.runtime_hz, rate.display_hz);
     if (rate.runtime_throttled)
       ImGui::TextWrapped(
-          "The runtime is throttling app frames. The native target stays at its stable cadence.");
+                "The OpenXR runtime is throttling app frames below the physical headset refresh.");
   }
-  static const int fps_values[] = {60, 72, 80, 90, 120, 144, 240};
-  static const char *fps_labels[] = {"60", "72", "80", "90", "120", "144", "240"};
-  int fps_index = 0;
-  for (int i = 0; i < 7; ++i)
-    if (g_draft.frame_limit_fps == fps_values[i])
-      fps_index = i;
-  if (ImGui::Combo("FPS fallback", &fps_index, fps_labels, 7)) {
-    g_draft.frame_limit_fps = fps_values[fps_index];
-    g_dirty = true;
-  }
+  
+  
+  
+  
+  
+  
   ImGui::TextWrapped(
-      "Fallback only: live runtime refresh overrides this value. Native pacing is not physics or simulation-speed qualification.");
+        "DSR-FPS-Unlock owns frame limiting: it uses the last headset-reported refresh in VR and the current monitor refresh on desktop. DSVR never sets a native cap. If no valid refresh is available, the unlocker stays disabled instead of using a preset.");
   ImGui::Separator();
-  g_dirty |= ImGui::Checkbox("Use ReShade D3D11 host (restart required)", &g_draft.reshade_host);
+  ImGui::Checkbox("Use ReShade D3D11 host (restart required)", &g_edit.reshade_host);
   ImGui::TextWrapped(
       "Present/DXGI is the default compatibility path. ReShade avoids the Present hook but needs DSVR-ReShade.addon64 and has no automatic fallback; restart after changing hosts.");
   ImGui::TextWrapped(
-      "Eye-buffer resolution applies after restarting the game. The native game resolution also affects rendering cost. The presets only change eye-buffer scale; choose the highest scale that holds your frame target.");
-  g_dirty |= ImGui::SliderInt("Eye resolution (%)", &g_draft.render_scale_percent, 50, 200, "%d",
+      "Eye-buffer resolution (restart required): the eye swapchains are sized once when the session creates them, so this applies after restarting the game. The native game resolution also affects rendering cost. Choose the scale that remains smooth at the automatic headset or monitor refresh.");
+  ImGui::SliderInt("Eye resolution (%) (restart required)", &g_edit.render_scale_percent, 50, 200, "%d",
                               ImGuiSliderFlags_AlwaysClamp);
   if (ImGui::Button("Performance (70%)")) {
-    g_draft.render_scale_percent = 70;
-    g_dirty = true;
+    g_edit.render_scale_percent = 70;
   }
   ImGui::SameLine();
   if (ImGui::Button("Balanced (85%)")) {
-    g_draft.render_scale_percent = 85;
-    g_dirty = true;
+    g_edit.render_scale_percent = 85;
   }
   ImGui::SameLine();
   if (ImGui::Button("Quality (100%)")) {
-    g_draft.render_scale_percent = 100;
-    g_dirty = true;
+    g_edit.render_scale_percent = 100;
   }
-  g_dirty |= ImGui::Checkbox("Comfort vignette", &g_draft.comfort_vignette);
-  ImGui::BeginDisabled(!g_draft.comfort_vignette);
-  g_dirty |= ImGui::SliderFloat("Vignette strength", &g_draft.vignette_strength, 0, 1, "%.2f",
-                                ImGuiSliderFlags_AlwaysClamp);
+  static const char* aa_labels[] = {"Off", "FXAA", "MSAA 2x", "MSAA 4x"};
+  int aa_index = std::clamp(g_edit.aa_mode, 0, 3);
+  if (ImGui::Combo("Anti-aliasing (restart required)", &aa_index, aa_labels, 4)) {
+    g_edit.aa_mode = aa_index;
+  }
+  ImGui::TextWrapped(
+      "MSAA 4x is the default: real multisampling on the eye buffers. FXAA is a cheap post pass. Mono ships 100%% scale, stereo 85%%.");
+  
+    ImGui::Checkbox("Comfort vignette", &g_edit.comfort_vignette);
+  ImGui::BeginDisabled(!g_edit.comfort_vignette);
+  ImGui::SliderFloat("Vignette strength", &g_edit.vignette_strength, 0, 1, "%.2f",
+                                  ImGuiSliderFlags_AlwaysClamp);
   ImGui::EndDisabled();
-  g_dirty |= ImGui::SliderFloat("Field of view (comfort)", &g_draft.fov_scale, 0.7f, 1.3f, "%.2f",
+  ImGui::SliderFloat("Field of view (comfort)", &g_edit.fov_scale, 0.7f, 1.3f, "%.2f",
                                 ImGuiSliderFlags_AlwaysClamp);
   ImGui::TextWrapped(
       "1.00 matches your headset. Lower narrows the view if turning feels queasy; higher widens it. Changes apply immediately and save automatically.");
-  g_dirty |=
-      ImGui::SliderFloat("Theater screen width (horizontal FOV)", &g_draft.mono_screen_fov_deg, 30,
+        ImGui::SliderFloat("Theater screen width (horizontal FOV)", &g_edit.mono_screen_fov_deg, 30,
                          110, "%.0f deg", ImGuiSliderFlags_AlwaysClamp);
   ImGui::TextWrapped(
       "Wider shows more of the game; narrower makes it feel like a smaller cinema screen. Aspect ratio is preserved.");
-  g_dirty |= ImGui::SliderFloat("Theater distance (m)", &g_draft.menu_distance_m, 1, 4, "%.2f",
+  ImGui::SliderFloat("Theater distance (m)", &g_edit.menu_distance_m, 1, 4, "%.2f",
                                 ImGuiSliderFlags_AlwaysClamp);
+  ImGui::Checkbox("Keep theater during gameplay", &g_edit.gameplay_theater);
+  ImGui::TextWrapped(
+      "Off is the default: play is immersive and the flat screen appears only for menus, the title screen and cutscenes. Turn this on to keep the flat screen while playing.");
   if (ImGui::Button("Toggle theater"))
     XrToggleSanctuary();
 }
@@ -649,15 +646,17 @@ void SettingsPanel() {
   Title("Comfort & body");
   const auto body = BodyVisibilityGetStatus();
   ImGui::BeginDisabled(!body.installed);
-  g_dirty |= ImGui::Checkbox("Hide face, headgear and hair", &g_draft.hide_head);
-  g_dirty |= ImGui::Checkbox("Hide torso and legs (arms and weapon stay)", &g_draft.hide_torso_and_legs);
+  ImGui::Checkbox("Hide face, headgear and hair", &g_edit.hide_head);
+  ImGui::Checkbox("Hide torso and legs (arms and weapon stay)", &g_edit.hide_torso_and_legs);
   ImGui::EndDisabled();
   if (!body.installed)
     ImGui::TextWrapped("Native head geometry filter unavailable.");
   else {
     ImGui::TextWrapped(
-        "Tick either row to change it immediately;untick to bring the part back. "
-        "The menu view always shows the whole body, so the change appears the moment the menu closes. "
+        "Tick either row to change it immediately; untick to bring the part back. "
+        "The menu canvas itself always draws the whole body, and the filter returns "
+        "to gameplay masking on the next native update — so the change can read "
+        "as landing the moment the menu closes. "
         "Arms and held weapons are never filtered.");
     ImGui::TextDisabled("Filtered %llu policy refreshes %llu refused %llu",
                         static_cast<unsigned long long>(body.filtered),
@@ -665,55 +664,50 @@ void SettingsPanel() {
                         static_cast<unsigned long long>(body.refused));
   }
   ImGui::BeginDisabled();
-  ImGui::Checkbox("Forearms, hands and held equipment only", &g_draft.forearm_only);
+  ImGui::Checkbox("Forearms, hands and held equipment only", &g_edit.forearm_only);
   ImGui::EndDisabled();
   ImGui::TextWrapped(
       "Forearm visibility is unavailable while the native mesh filter is being replaced. "
       "The previous bone-collapse method stretched the upper arms and has been removed.");
-  g_dirty |= ImGui::Checkbox("Hide alternate player model", &g_draft.hide_second_model);
+  ImGui::Checkbox("Hide alternate player model", &g_edit.hide_second_model);
   const auto ui = NativeUiGetStatus();
   ImGui::BeginDisabled(!ui.installed);
-  g_dirty |= ImGui::Checkbox("Hide native UI in immersive VR", &g_draft.hide_ui_in_vr);
+  ImGui::Checkbox("Hide native UI in immersive VR", &g_edit.hide_ui_in_vr);
   ImGui::EndDisabled();
   if (!ui.installed)
     ImGui::TextDisabled("Native UI hook unavailable for this session.");
   ImGui::Separator();
   static const char *movement_modes[] = {"Head (default)", "Controller hand"};
-  int movement_mode = static_cast<int>(g_draft.movement_orientation);
+  int movement_mode = static_cast<int>(g_edit.movement_orientation);
   if (ImGui::Combo("Left stick oriented by", &movement_mode, movement_modes, 2)) {
-    g_draft.movement_orientation = static_cast<MovementOrientation>(movement_mode);
-    g_dirty = true;
+    g_edit.movement_orientation = static_cast<MovementOrientation>(movement_mode);
   }
+
   static const char *movement_controllers[] = {"Non-dominant hand", "Left hand", "Right hand"};
-  int movement_controller = static_cast<int>(g_draft.movement_controller);
-  ImGui::BeginDisabled(g_draft.movement_orientation != MovementOrientation::Controller);
+  int movement_controller = static_cast<int>(g_edit.movement_controller);
+  ImGui::BeginDisabled(g_edit.movement_orientation != MovementOrientation::Controller);
   if (ImGui::Combo("Controller hand", &movement_controller, movement_controllers, 3)) {
-    g_draft.movement_controller = static_cast<MovementController>(movement_controller);
-    g_dirty = true;
+    g_edit.movement_controller = static_cast<MovementController>(movement_controller);
   }
   ImGui::EndDisabled();
   ImGui::TextWrapped(
       "Smooth locomotion always has one live steering reference: your head, or the selected hand's aim. If that hand leaves view or points straight up/down with no stable heading, movement continues head-oriented instead of going dead. A changed reference takes effect when the stick is next centred.");
-  g_dirty |= ImGui::Checkbox("Left hand dominant", &g_draft.dominant_hand_left);
-  g_dirty |= ImGui::Checkbox("Snap turning", &g_draft.snap_turn);
-  ImGui::BeginDisabled(!g_draft.snap_turn);
-  g_dirty |= ImGui::SliderInt("Snap angle", &g_draft.snap_turn_degrees, 15, 90, "%d",
-                              ImGuiSliderFlags_AlwaysClamp);
+
+    ImGui::Checkbox("Left hand dominant", &g_edit.dominant_hand_left);
+  ImGui::Checkbox("Snap turning", &g_edit.snap_turn);
+    ImGui::BeginDisabled(!g_edit.snap_turn);
+  ImGui::SliderInt("Snap angle", &g_edit.snap_turn_degrees, 15, 90, "%d", ImGuiSliderFlags_AlwaysClamp);
   ImGui::EndDisabled();
-  g_dirty |= ImGui::Checkbox("Smooth turning", &g_draft.smooth_turn);
-  ImGui::BeginDisabled(!g_draft.smooth_turn);
+  ImGui::Checkbox("Smooth turning", &g_edit.smooth_turn);
+  ImGui::BeginDisabled(!g_edit.smooth_turn);
   if (probe_disabled_item) {
-    // Probe button inside the same BeginDisabled span: LastItemData still
-    // describes it here (ItemAdd ran inside Button), so its ItemFlags carry
-    // this span's disabled state. A disabled Button returns false and never
-    // changes state; production never arms this.
     ImGui::Button("##probe");
     item_was_disabled =
         (GImGui->LastItemData.ItemFlags & ImGuiItemFlags_Disabled) != 0;
     probe_disabled_item = false;
   }
-  g_dirty |= ImGui::SliderFloat("Turn speed (degrees/s)", &g_draft.smooth_turn_speed_dps, 30, 360,
-                                "%.0f", ImGuiSliderFlags_AlwaysClamp);
+  ImGui::SliderFloat("Turn speed (degrees/s)", &g_edit.smooth_turn_speed_dps, 30, 360,
+                          "%.0f", ImGuiSliderFlags_AlwaysClamp);
   ImGui::EndDisabled();
   // Everyday controls above. The advanced rows below read under one labeled
   // always-visible group: same panel, same IDs/labels/behavior — grouping
@@ -724,21 +718,21 @@ void SettingsPanel() {
   // shows every advanced control.)
   ImGui::Separator();
   ImGui::TextUnformatted("Advanced tuning");
-  g_dirty |= ImGui::Checkbox("Track native arms", &g_draft.arm_ik_enabled);
-  g_dirty |= ImGui::Checkbox("Observe arm targets without applying them", &g_draft.arm_ik_log_only);
-  g_dirty |=
-      ImGui::Checkbox("Native animation cannot move IK bodyparts", &g_draft.arm_ik_block_animation);
+    
+  ImGui::Checkbox("Track native arms", &g_edit.arm_ik_enabled);
+  ImGui::Checkbox("Observe arm targets without applying them", &g_edit.arm_ik_log_only);
+        ImGui::Checkbox("Native animation cannot move IK bodyparts", &g_edit.arm_ik_block_animation);
   ImGui::Separator();
-  ImGui::TextUnformatted("Controller bindings");
-  g_dirty |= ImGui::Checkbox("Quest 3 / Touch", &g_draft.bind_profile_quest3);
-  g_dirty |= ImGui::Checkbox("Valve Index", &g_draft.bind_profile_index);
-  g_dirty |= ImGui::Checkbox("WMR motion controller", &g_draft.bind_profile_wmr);
-  g_dirty |= ImGui::Checkbox("OpenXR simple controller fallback", &g_draft.bind_profile_simple);
-  g_dirty |= ImGui::Checkbox("Update profile filter live", &g_draft.binding_live_reattach);
+  ImGui::TextUnformatted("Controller bindings (restart required)");
+  ImGui::Checkbox("Quest 3 / Touch (restart required)", &g_edit.bind_profile_quest3);
+  ImGui::Checkbox("Valve Index (restart required)", &g_edit.bind_profile_index);
+  ImGui::Checkbox("WMR motion controller (restart required)", &g_edit.bind_profile_wmr);
+  ImGui::Checkbox("OpenXR simple controller fallback (restart required)", &g_edit.bind_profile_simple);
+  ImGui::Checkbox("Update profile filter live", &g_edit.binding_live_reattach);
   if (ImGui::Button("Refresh profile filter now"))
     InputRequestBindingReload();
   ImGui::TextWrapped(
-      "Supported OpenXR profiles are suggested at session creation; the action set is attached once, never rebuilt or reattached live. These switches filter input for each hand's current runtime profile. Apply or Save keeps the attached session live; restart the game before expecting new profile suggestions. The refresh button applies pending profile edits without re-suggesting bindings. The legacy live-update preference is retained for saved-config compatibility only.");
+      "Supported OpenXR profiles are suggested at session creation; the action set is attached once, never rebuilt or reattached live. These switches filter input for each hand's current runtime profile. Edits save immediately but the attached session keeps running them; restart the game before expecting new profile suggestions. The refresh button applies pending profile edits without re-suggesting bindings. The legacy live-update preference is retained for saved-config compatibility only.");
   ImGui::TextWrapped(
       "Simple-controller fallback is an OpenXR profile, not Xbox. Native Xbox/XInput mapping and its binding editor are separate and are not implemented here.");
   // Everyday rows above (movement, turning). The arm rows above bracketed by
@@ -746,35 +740,36 @@ void SettingsPanel() {
   // follow here (arm swing, reach) read under the same grouping: same panel,
   // same IDs/labels/behavior — grouping only.
   ImGui::Separator();
-  g_dirty |= ImGui::Checkbox("Swinging the arms asks the game to run", &g_draft.arm_swing_sprint);
-  if (g_draft.arm_swing_sprint) {
-    g_dirty |= ImGui::SliderFloat("Stride hand speed (m/s)", &g_draft.arm_swing_stride_min, .4f, 4,
+  ImGui::Checkbox("Swinging the arms asks the game to run", &g_edit.arm_swing_sprint);
+    if (g_edit.arm_swing_sprint) {
+
+    ImGui::SliderFloat("Stride hand speed (m/s)", &g_edit.arm_swing_stride_min, .4f, 4,
                                   "%.2f", ImGuiSliderFlags_AlwaysClamp);
-    g_dirty |= ImGui::SliderFloat("Too fast to be a stride (m/s)", &g_draft.arm_swing_stride_max,
+    ImGui::SliderFloat("Too fast to be a stride (m/s)", &g_edit.arm_swing_stride_max,
                                   1.f, 12, "%.2f", ImGuiSliderFlags_AlwaysClamp);
-    g_dirty |= ImGui::SliderFloat("Other hand still below (m/s)", &g_draft.arm_swing_quiet_max, .1f,
+    ImGui::SliderFloat("Other hand still below (m/s)", &g_edit.arm_swing_quiet_max, .1f,
                                   3, "%.2f", ImGuiSliderFlags_AlwaysClamp);
-    g_dirty |= ImGui::SliderInt("Strides before it engages", &g_draft.arm_swing_alternations, 2, 12,
+    ImGui::SliderInt("Strides before it engages", &g_edit.arm_swing_alternations, 2, 12,
                                 "%d", ImGuiSliderFlags_AlwaysClamp);
-    g_dirty |= ImGui::SliderInt("Run lingers for (ms)", &g_draft.arm_swing_hold_ms, 200, 3000, "%d",
+    ImGui::SliderInt("Run lingers for (ms)", &g_edit.arm_swing_hold_ms, 200, 3000, "%d",
                                 ImGuiSliderFlags_AlwaysClamp);
   }
   ImGui::TextWrapped(
       "Alternation is the test: a stride counts only when the other hand was still as it started, and the pattern counts only when consecutive strides swap hands. One hand flapping, a stretch, a clap or a two-handed swing never engages it, because all of those move both hands together. Speeds are head-relative, so walking the room or riding a lift cannot manufacture a gait. The output is one forward amount in the same movement basis as the stick, so native acceleration, stamina, turning and the dash stay the game's.");
   ImGui::Separator();
-  g_dirty |= ImGui::Checkbox("Thrust the free hand forward to interact", &g_draft.reach_interact);
-  if (g_draft.reach_interact) {
-    g_dirty |= ImGui::SliderFloat("Reach distance (m)", &g_draft.reach_forward_min_m, .2f, 1.5f,
+  ImGui::Checkbox("Thrust the free hand forward to interact", &g_edit.reach_interact);
+  if (g_edit.reach_interact) {
+    ImGui::SliderFloat("Reach distance (m)", &g_edit.reach_forward_min_m, .2f, 1.5f,
                                   "%.2f", ImGuiSliderFlags_AlwaysClamp);
-    g_dirty |= ImGui::SliderFloat("Beyond this nothing counts (m)", &g_draft.reach_forward_max_m,
+    ImGui::SliderFloat("Beyond this nothing counts (m)", &g_edit.reach_forward_max_m,
                                   .6f, 4, "%.2f", ImGuiSliderFlags_AlwaysClamp);
-    g_dirty |= ImGui::SliderFloat("Thrust speed (m/s)", &g_draft.reach_speed_min, .3f, 5, "%.2f",
+    ImGui::SliderFloat("Thrust speed (m/s)", &g_edit.reach_speed_min, .3f, 5, "%.2f",
                                   ImGuiSliderFlags_AlwaysClamp);
-    g_dirty |= ImGui::SliderFloat("Must be going forward (fraction)", &g_draft.reach_dominance_min,
+    ImGui::SliderFloat("Must be going forward (fraction)", &g_edit.reach_dominance_min,
                                   .2f, .95f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
-    g_dirty |= ImGui::SliderInt("Hands must rest for (ms)", &g_draft.reach_settle_ms, 0, 1000, "%d",
+    ImGui::SliderInt("Hands must rest for (ms)", &g_edit.reach_settle_ms, 0, 1000, "%d",
                                 ImGuiSliderFlags_AlwaysClamp);
-    g_dirty |= ImGui::SliderInt("Repeat interval (ms)", &g_draft.reach_cooldown_ms, 250, 3000, "%d",
+    ImGui::SliderInt("Repeat interval (ms)", &g_edit.reach_cooldown_ms, 250, 3000, "%d",
                                 ImGuiSliderFlags_AlwaysClamp);
   }
   ImGui::TextWrapped(
@@ -784,24 +779,22 @@ void CombatPanel() {
   Title("Combat & feedback");
   ImGui::TextWrapped(
       "Proving ground: swing at the sparring target, hold your off-hand up as a shield, then move your weapon blade into it. Contact just after raising the guard is classified as a parry.The sparring benchis tracked geometry onlyand appliesno nativedamage;the input previews below are separate.");
-  g_dirty |= ImGui::Checkbox("Combat proving ground (sparring target)", &g_draft.combat_test_bench);
-  ImGui::BeginDisabled(!g_draft.combat_test_bench);
-  g_dirty |= ImGui::SliderFloat("Sparring target distance (m)", &g_draft.combat_test_target_m, .5f,
+  ImGui::Checkbox("Combat proving ground (sparring target)", &g_edit.combat_test_bench);
+  ImGui::BeginDisabled(!g_edit.combat_test_bench);
+  ImGui::SliderFloat("Sparring target distance (m)", &g_edit.combat_test_target_m, .5f,
                                 2.f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
   ImGui::EndDisabled();
-  g_dirty |=
-      ImGui::SliderFloat("Min hand separation (m, 0 = off)", &g_draft.weapon_separation_min_m, 0.f,
+        ImGui::SliderFloat("Min hand separation (m, 0 = off)", &g_edit.weapon_separation_min_m, 0.f,
                          .5f, "%.2f", ImGuiSliderFlags_AlwaysClamp);
-  g_dirty |= ImGui::Checkbox("Motion combat preference", &g_draft.motion_attacks);
-  g_dirty |= ImGui::Checkbox("Swing-to-native attack input (preview)", &g_draft.physical_attacks);
+  ImGui::Checkbox("Motion combat preference", &g_edit.motion_attacks);
+  ImGui::Checkbox("Swing-to-native attack input (preview)", &g_edit.physical_attacks);
   ImGui::TextDisabled("Input preview only;native physical contact damage is not bound.");
-  ImGui::BeginDisabled(!g_draft.physical_attacks || !g_draft.motion_attacks);
-  g_dirty |= ImGui::SliderFloat("Light attack speed (m/s)", &g_draft.swing_attack_speed_min, .5f, 8,
+  ImGui::BeginDisabled(!g_edit.physical_attacks || !g_edit.motion_attacks);
+  ImGui::SliderFloat("Light attack speed (m/s)", &g_edit.swing_attack_speed_min, .5f, 8,
                                 "%.2f", ImGuiSliderFlags_AlwaysClamp);
-  g_dirty |= ImGui::SliderFloat("Strong attack speed (m/s)", &g_draft.swing_attack_heavy_min, 1.f,
+  ImGui::SliderFloat("Strong attack speed (m/s)", &g_edit.swing_attack_heavy_min, 1.f,
                                 12, "%.2f", ImGuiSliderFlags_AlwaysClamp);
-  g_dirty |= ImGui::SliderInt("Attack repeat interval (ms)", &g_draft.swing_attack_cooldown_ms, 150,
-                              2000, "%d", ImGuiSliderFlags_AlwaysClamp);
+  
   ImGui::EndDisabled();
   // Everyday rows above. The per-hand thresholds below (+ the grip editor
   // further down) read under one labeled always-visible group: same panel,
@@ -810,40 +803,39 @@ void CombatPanel() {
   // advanced control.)
   ImGui::Separator();
   ImGui::TextUnformatted("Advanced tuning");
-  g_dirty |= ImGui::Checkbox("Raised shield hand guards, flick parries (preview)",
-                             &g_draft.physical_defence);
-  if (g_draft.physical_defence) {
-    g_dirty |= ImGui::SliderInt("Guard settle (ms)", &g_draft.guard_settle_ms, 0, 500, "%d",
-                                ImGuiSliderFlags_AlwaysClamp);
-    g_dirty |= ImGui::SliderFloat("Flick speed (m/s)", &g_draft.guard_flick_speed_min, .8f, 6,
+  ImGui::Checkbox("Raised shield hand guards, flick parries (preview)",
+                             &g_edit.physical_defence);
+  if (g_edit.physical_defence) {
+    
+    ImGui::SliderFloat("Flick speed (m/s)", &g_edit.guard_flick_speed_min, .8f, 6,
                                   "%.2f", ImGuiSliderFlags_AlwaysClamp);
-    g_dirty |= ImGui::SliderInt("Parry tap length (ms)", &g_draft.guard_parry_press_ms, 40, 250,
+    ImGui::SliderInt("Parry tap length (ms)", &g_edit.guard_parry_press_ms, 40, 250,
                                 "%d", ImGuiSliderFlags_AlwaysClamp);
-    g_dirty |= ImGui::SliderInt("Parry repeat interval (ms)", &g_draft.guard_parry_cooldown_ms, 250,
+    ImGui::SliderInt("Parry repeat interval (ms)", &g_edit.guard_parry_cooldown_ms, 250,
                                 2000, "%d", ImGuiSliderFlags_AlwaysClamp);
     ImGui::TextWrapped(
-        "Hold the shield hand up and still to request native guard (held LB). A short flick back to rest requests parry (a separate LT pulse, not a tap of LB). Native guard windows, chip damage and parry judgement stay the game's and remain unqualified.");
+        "Raise the shield hand for immediate native guard (LB), including while moving. A fast flick requests a bounded parry pulse (LT); until incoming-attack contact is bound, this remains a preview and does not establish native parry outcomes.");
   }
-  if (!g_draft.arm_ik_enabled || g_draft.arm_ik_log_only || !g_draft.arm_ik_block_animation)
+  if (!g_edit.arm_ik_enabled || g_edit.arm_ik_log_only || !g_edit.arm_ik_block_animation)
     ImGui::TextDisabled("Needs fresh committed IK arms with animation ownership.");
-  g_dirty |= ImGui::Checkbox("Haptic feedback", &g_draft.haptics);
-  ImGui::BeginDisabled(!g_draft.haptics);
-  g_dirty |= ImGui::SliderFloat("Minimum contact speed (m/s)", &g_draft.contact_speed_min, .1f, 5,
+  ImGui::Checkbox("Haptic feedback", &g_edit.haptics);
+  ImGui::BeginDisabled(!g_edit.haptics);
+  ImGui::SliderFloat("Minimum contact speed (m/s)", &g_edit.contact_speed_min, .1f, 5,
                                 "%.2f", ImGuiSliderFlags_AlwaysClamp);
-  g_dirty |= ImGui::SliderInt("Repeat hit interval (ms)", &g_draft.rehit_window_ms, 50, 2000, "%d",
+  ImGui::SliderInt("Repeat hit interval (ms)", &g_edit.rehit_window_ms, 50, 2000, "%d",
                               ImGuiSliderFlags_AlwaysClamp);
   ImGui::EndDisabled();
   ImGui::Separator();
   {
     CombatBenchSnapshot bench;
     const bool live = ArmIkCombatBench(bench);
-    if (!g_draft.combat_test_bench) {
+    if (!g_edit.combat_test_bench) {
       ImGui::TextDisabled(
-          "Turn on the proving ground, Apply, then swing — live blade state appears here.");
+          "Turn on the proving ground, then swing — live blade state appears here.");
     } else if (!live) {
       ImGui::TextDisabled("Waiting for a fresh tracked commit (headset on, arms tracked).");
     } else {
-      const int weapon = g_draft.dominant_hand_left ? 0 : 1;
+      const int weapon = g_edit.dominant_hand_left ? 0 : 1;
       const int shield = 1 - weapon;
       ImGui::Text("Weapon tip speed  %.2f m/s", (double)bench.tip_speed[weapon]);
       ImGui::Text("Shield tip speed  %.2f m/s", (double)bench.tip_speed[shield]);
@@ -886,10 +878,10 @@ void CombatPanel() {
     if (ImGui::Button("Edit equipped weapon grip")) {
       WeaponGripClearPreview();
       preview = false;
-      selected = native.equipment.weapon_id[g_draft.dominant_hand_left ? 0 : 1];
+      selected = native.equipment.weapon_id[g_edit.dominant_hand_left ? 0 : 1];
       edit = {};
       edit.weapon_id = selected;
-      edit.dominant_left = g_draft.dominant_hand_left;
+      edit.dominant_left = g_edit.dominant_hand_left;
       WeaponGripGet(selected, edit.dominant_left, edit);
     }
   } else
@@ -983,7 +975,7 @@ void DiagnosticsPanel() {
   ImGui::SameLine();
   if (ImGui::Button("Export recent logs"))
     DiagnosticsRequestLogExport();
-  g_dirty |= ImGui::Checkbox("Verbose diagnostic logging", &g_draft.verbose_logging);
+  ImGui::Checkbox("Verbose diagnostic logging", &g_edit.verbose_logging);
   ImGui::Separator();
   ImGui::TextUnformatted("CPU timings since launch (nested stages overlap)");
   if (ImGui::Button("Reset CPU timings"))
@@ -1016,27 +1008,61 @@ void DiagnosticsPanel() {
       "VR shortcut: hold left Menu + right grip. Use the left stick and A to navigate/select, or aim and pull the right trigger. B goes back.");
   ImGui::TextWrapped("The game world continues while this menu is open.");
 }
-// Restart-pending baseline for the render fields: reshade_host and
-// render_scale_percent have no frozen attach-time snapshot (unlike the
-// binding signature), so the first values this menu process draws are the
-// session's startup values. Comparing the applied config against them
-// shows the restart line only after one of those fields actually lands.
-bool g_render_baseline_valid = false;
-bool g_render_baseline_reshade = false;
-int g_render_baseline_scale = 100;
+// Startup-selected frame-host values, frozen at install time (core.cpp) or
+// at this menu's first live-config observation before the game frame host
+// exists (headless test). The comparison only shows (and the reminder only
+// fires) after a gated row actually differs, never from the seeding.
+bool g_startup_valid = false;
+bool g_startup_reshade = false;
+int g_startup_scale = 100;
+void SeedStartupBaseline(const Config& applied) {
+  if (g_startup_valid) return;
+  // Before the game frame host exists the startup values are whatever the
+  // live config already runs (headless test); after it exists they are the
+  // frozen install values. Either way the comparison below only fires after
+  // a gated row actually changes, never from this seeding.
+  bool host = false;
+  int scale = 0;
+  if (CoreStartupRenderHost(host)) g_startup_reshade = host;
+  else g_startup_reshade = applied.reshade_host;
+  if (CoreStartupEyeScale(scale)) g_startup_scale = scale;
+  else g_startup_scale = applied.render_scale_percent;
+  g_startup_valid = true;
+}
+// Human-readable form of the restart comparison, shared by every close path
+// (Close button, toggle, B button, header X). Gated-vs-live: bindings freeze
+// at session attach (InputLiveBindingSignature); the render host and eye
+// resolution freeze at first swapchain setup or, before that, at this menu's
+// first live-config observation. The comparison only shows (and the reminder
+// only fires) after a gated row actually differs, never from the seeding.
+std::string RestartPendingText() {
+  if (!g_startup_valid) return {};
+  std::string pending;
+  const auto live = InputLiveBindingSignature();
+  const auto fresh = DiagnosticsCurrentConfig();
+  if (fresh.bind_profile_quest3 != live.quest3 || fresh.bind_profile_index != live.index ||
+      fresh.bind_profile_wmr != live.wmr || fresh.bind_profile_simple != live.simple)
+    pending += "bindings";
+  if (fresh.reshade_host != g_startup_reshade) {
+    if (!pending.empty()) pending += ", ";
+    pending += "ReShade host";
+  }
+  if (fresh.render_scale_percent != g_startup_scale) {
+    if (!pending.empty()) pending += ", ";
+    pending += "eye resolution";
+  }
+  return pending;
+}
 bool ModMenuCaptureTextArmed() { return ImGui::GetCurrentContext() && GImGui->LogEnabled; }
 void DrawMenu() {
   const auto settings = DiagnosticsSettingsSnapshot();
-  if (!g_render_baseline_valid) {
-    g_render_baseline_reshade = settings.applied.reshade_host;
-    g_render_baseline_scale = settings.applied.render_scale_percent;
-    g_render_baseline_valid = true;
-  }
-  if (!g_draft_ready || g_draft == g_draft_base || g_draft == settings.applied) {
-    g_draft = g_draft_base = settings.applied;
-    g_draft_ready = true;
-    g_dirty = false;
-  }
+  SeedStartupBaseline(settings.applied);
+  // No draft: every frame starts from the live applied config; the panels
+  // mutate it, and the footer pushes any difference through immediately.
+  g_edit = settings.applied;
+  // DrawMenu must not run before its helpers exist: RestartPendingText and
+  // DrawRestartReminder are defined above (anonymous namespace), so the
+  // footer comparison and the close-path reminder resolve here.
   const auto size = ImGui::GetIO().DisplaySize;
   ImGui::SetNextWindowPos({size.x * .5f, size.y * .5f}, ImGuiCond_Always, {.5f, .5f});
   ImGui::SetNextWindowSize({std::min(1180.f, size.x - 32), std::min(860.f, size.y - 32)},
@@ -1048,7 +1074,7 @@ void DrawMenu() {
   if (!open)
     ModMenuClose();
   const char *state = settings.busy ? "Saving settings..."
-                                    : g_draft != settings.saved ? "Saving settings..." : "Applied and saved";
+                                    : g_edit != settings.saved ? "Saving settings..." : "Applied and saved";
   // Brand band : the mod name in the display face , the live apply state on the
   // same line , and an ochre rule . The footer keeps the full sentence .
   {
@@ -1109,41 +1135,36 @@ void DrawMenu() {
     break;
   default:
     if (g_panel >= 6 && static_cast<size_t>(g_panel - 6) < panels.size())
-      panels[g_panel - 6].draw();
-    break;
+        panels[g_panel - 6].draw();
+      break;
   }
   ImGui::PopItemWidth();
   ImGui::EndChild();
   ImGui::Separator();
-  // Coalesce rapid edits on the diagnostic writer. Apply immediately, persist
-  // automatically, and keep edits usable while a previous save is in flight.
-  if (g_draft != settings.applied && DiagnosticsRequestConfig(g_draft, true)) {
-    g_draft_base = g_draft;
-    g_dirty = false;
-  }
-  if (ImGui::Button("Close"))
-    ModMenuClose();
-  ImGui::TextDisabled("Changes apply immediately and save automatically.");
+  // No draft buffer: any panel mutation differs from the applied config, so
+  // push it straight through (live + saved). Widgets mutate g_edit every
+  // frame, so the footer sees the edit on the tick it happens. The live
+  // snapshot is re-read for the restart-line comparison below, so the footer
+  // line appears on the same frame the gated row actually changes.
+  if (g_edit != settings.applied) DiagnosticsRequestConfig(g_edit, true);
   std::string restart_pending;
   {
-    // Applied-vs-attached restart comparison: bindings freeze at session
-    // attach (InputLiveBindingSignature); the render fields freeze at this
-    // menu's first draw (see g_render_baseline_* above DrawMenu).
+    // Compare the just-pushed live config against the frozen session values
+    // so the line appears on the same tick the gated edit lands.
     const auto live = InputLiveBindingSignature();
-    if (settings.applied.bind_profile_quest3 != live.quest3 ||
-        settings.applied.bind_profile_index != live.index ||
-        settings.applied.bind_profile_wmr != live.wmr ||
-        settings.applied.bind_profile_simple != live.simple) {
+    const auto fresh = DiagnosticsCurrentConfig();
+    if (fresh.bind_profile_quest3 != live.quest3 ||
+        fresh.bind_profile_index != live.index ||
+        fresh.bind_profile_wmr != live.wmr ||
+        fresh.bind_profile_simple != live.simple) {
       if (!restart_pending.empty()) restart_pending += ", ";
       restart_pending += "bindings";
     }
-    if (g_render_baseline_valid &&
-        settings.applied.reshade_host != g_render_baseline_reshade) {
+    if (g_startup_valid && fresh.reshade_host != g_startup_reshade) {
       if (!restart_pending.empty()) restart_pending += ", ";
       restart_pending += "ReShade host";
     }
-    if (g_render_baseline_valid &&
-        settings.applied.render_scale_percent != g_render_baseline_scale) {
+    if (g_startup_valid && fresh.render_scale_percent != g_startup_scale) {
       if (!restart_pending.empty()) restart_pending += ", ";
       restart_pending += "eye resolution";
     }
@@ -1151,16 +1172,79 @@ void DrawMenu() {
       ImGui::TextWrapped("Restart needed: %s (restart the game to apply).",
                          restart_pending.c_str());
   }
+  if (ImGui::Button("Close")) {
+    if (!restart_pending.empty() && restart_pending != g_restart_ack) {
+      // Restart-gated edits landed but cannot apply until the game restarts.
+      // Hold the menu open with an explicit reminder instead of silently
+      // dropping the change; restarting itself stays the operator's call.
+      g_restart_modal = true;
+    } else {
+      ModMenuClose();
+    }
+  }
+  ImGui::TextDisabled("Changes apply the moment you tick them and save automatically.");
+  if (g_restart_modal) ImGui::OpenPopup("Restart needed");
+  if (ImGui::BeginPopupModal("Restart needed", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+    ImGui::TextWrapped("Restart the game to apply: %s.",
+                       restart_pending.empty() ? g_restart_ack.c_str() : restart_pending.c_str());
+    ImGui::TextWrapped("Everything else already applied. Restarting is up to you.");
+    if (ImGui::Button("Keep playing")) {
+      g_restart_ack = restart_pending;
+      g_restart_modal = false;
+      ImGui::CloseCurrentPopup();
+      if (g_close_requested) {
+        g_close_requested = false;
+        ModMenuClose();
+      }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Close menu anyway")) {
+      g_restart_ack = restart_pending;
+      g_restart_modal = false;
+      ImGui::CloseCurrentPopup();
+      ModMenuClose();
+    }
+    ImGui::EndPopup();
+  }
   ImGui::TextWrapped("%s", DiagnosticsSettingsStatus().c_str());
   ImGui::End();
 }
-} // namespace
-// namespace
+}  // namespace
 void ModMenuToggle() {
-  if (g_open.exchange(true))
+  if (g_open.exchange(true)) {
+    // Genuine close (not an open): same restart reminder as the Close button.
+    const auto pending = RestartPendingText();
+    if (!pending.empty() && pending != g_restart_ack) {
+      g_open.store(true);
+      g_restart_modal = true;
+      g_close_requested = true;
+      return;
+    }
     ModMenuClose();
+  } else {
+    g_restart_ack.clear();
+  }
 }
 void ModMenuClose() {
+  const auto pending = RestartPendingText();
+  if (g_open.load() && !pending.empty() && pending != g_restart_ack && !g_restart_modal) {
+    // Restart-gated edits landed but cannot apply until the game restarts.
+    // Hold the menu open with an explicit reminder instead of silently
+    // dropping the change; restarting itself stays the operator's call.
+    g_restart_modal = true;
+    return;
+  }
+  g_open.store(false);
+  g_restart_modal = false;
+  WeaponGripClearPreview();
+  CancelMenuInput();
+}
+// Test-only: acknowledge the restart reminder and close, matching the
+// popup's "Close menu anyway" button for headless coverage.
+void ModMenuCloseForTest() {
+  g_restart_ack = RestartPendingText();
+  g_restart_modal = false;
+  g_close_requested = false;
   g_open.store(false);
   WeaponGripClearPreview();
   CancelMenuInput();
@@ -1187,22 +1271,29 @@ bool ModMenuRegisterPanel(const char *id, const char *name, ModMenuPanel draw) {
   return true;
 }
 void ModMenuRenderTexture(ID3D11Device *device, ID3D11Texture2D *image) {
-  if (!device || !image || !ModMenuVisible()) {
-    g_draft_ready = false;
-    return;
-  }
+  if (!device || !image) return;
   ComPtr<ID3D11Device> owner;
   image->GetDevice(&owner);
   if (owner.Get() != device)
     return;
+  D3D11_TEXTURE2D_DESC desc{};
+  image->GetDesc(&desc);
+  const bool menu_visible = ModMenuVisible();
+  const MenuPointerState pointer = XrMenuPointerInput(desc.Width, desc.Height);
+  // Nothing is composited into the game image unless the menu or the calibration
+  // screen is actually up. The old spatial-ray branch kept feeding the pointer
+  // overlay while the menu was closed, so the ray appeared inside gameplay and
+  // the calibration panel stayed baked into the immersive image.
+  if (!menu_visible) {
+    g_pointer_smooth.Reset();
+    return;
+  }
   ImGuiContext *previous = ImGui::GetCurrentContext();
   if (!Initialize(device)) {
     ImGui::SetCurrentContext(previous);
     return;
   }
   ImGui::SetCurrentContext(g_gui);
-  D3D11_TEXTURE2D_DESC desc{};
-  image->GetDesc(&desc);
   D3D11_RENDER_TARGET_VIEW_DESC view{};
   view.Format = desc.Format;
   if (view.Format == DXGI_FORMAT_R8G8B8A8_TYPELESS)
@@ -1216,22 +1307,36 @@ void ModMenuRenderTexture(ID3D11Device *device, ID3D11Texture2D *image) {
     ImGui::SetCurrentContext(previous);
     return;
   }
-  FeedInput(desc.Width, desc.Height);
+  FeedInput(desc.Width, desc.Height, pointer);
   ImGui_ImplDX11_NewFrame();
   ImGui::NewFrame();
   const auto status = CalibrationGetStatus();
-  if (status.screen_visible)
-    CalibrationScreen(status);
-  else
-    DrawMenu();
-  DrawPointerBeam();
-  if (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight) && !ImGui::GetIO().WantTextInput) {
+  if (menu_visible) {
+    if (status.screen_visible) CalibrationScreen(status);
+    else DrawMenu();
+  }
+  // Popups live inside the menu window: close intent must wait for the
+  // operator's choice, otherwise one frame can both request the popup and
+  // observe the menu as closed.
+  if (menu_visible && ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight) && !ImGui::GetIO().WantTextInput) {
 
-    if (!status.screen_visible)
-      ModMenuClose();
+    if (!status.screen_visible) {
+      const auto pending = RestartPendingText();
+      if (!pending.empty() && pending != g_restart_ack && !g_restart_modal) {
+        g_restart_modal = true;
+      } else if (!g_restart_modal) {
+        ModMenuClose();
+      }
+    }
     // On the calibration screen B does nothing: it used to cancel setup, // so a stray back press
     // silently killed the capture and triggers then did nothing until recalibration was reopened
     // (live report) . The explicit on-screen Cancel button remains the only cancellation.
+  }
+  // Deferred close: the toggle/B-button paths set this when the operator has
+  // acknowledged the reminder but the modal frame was still open.
+  if (menu_visible && g_close_requested && !g_restart_modal) {
+    g_close_requested = false;
+    if (g_open.load()) ModMenuClose();
   }
   ImGui::Render();
   ID3D11RenderTargetView *saved[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]{};

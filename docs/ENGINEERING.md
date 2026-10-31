@@ -1,6 +1,6 @@
 # DSVR engineering contract
 
-Current: 21 October 2026. [Documentation authority](../README.md#authority-and-maintenance). Task order and status belong only to the [execution guide](superpowers/plans/2026-10-21-native-conversion-execution.md). This file contains architectural constraints, not a second backlog.
+Current: 21 October 2026. [Documentation authority](../README.md#authority-and-maintenance). Task order and status belong only to the [cockpit plan](../MODDING_PLAN.md) and its lane files (../.empryo/cockpit/lanes/). This file contains architectural constraints, not a second backlog.
 
 ## Native ownership
 
@@ -72,19 +72,49 @@ Physical contact geometry follows the committed native weapon; swing energy foll
 
 Native damage, defense, stamina, poise, status and reactions remain authoritative. Direct health setters and unrelated AI event requests are not melee APIs. Correlate confirmed outcomes independently before issuing bounded per-hand haptics. Preserve native projectile/ammo/cast rules for ranged weapons.
 
-Once the IK body owns the arms and native animation is blocked, every canned
-combat output is suppressed, so the physical arms have to produce the input
-themselves or the player cannot fight at all. Two opt-in bridges do that at the
-pad seam (`src/core/swing_attack_math.h`, `src/core/shield_guard_math.h`): a
-qualified weapon-hand swing becomes one press of the native light/strong attack,
-and the shield hand holds the native shield button while it is raised and still
-and taps the same button when it is flicked back to rest. Both emit ordinary
-button lines and nothing else — no native damage, guard window, stamina or parry
-judgement is invented or bypassed — and both fail closed on non-finite speed, a
-non-monotonic clock, lost tracking, recentering, sanctuary, menu capture or
-calibration capture. The guard is a head-relative height band plus a stillness
-window, never a canonical guard pose, and hand speeds are head-relative so
-walking manufactures neither action.
+Operator-requested local-player wall response: tangential blade drag on stone
+or walls retains contact sparks with no scrape sound. Direct wall impact adds
+a stamina cost without interrupting attack control or playing the wall-stun
+animation. Recover separate native contact/effect/audio/cost/reaction owners;
+do not implement this with global audio muting or by removing solid obstruction.
+
+Production shield coverage follows the equipped shield's committed surface at
+any natural holding pose, including during motion. Native block eligibility,
+mitigation, stamina and guard break still apply. A physical parry requires
+contact with an eligible incoming attack and sufficient shield velocity toward
+that attack at contact; raising a stationary shield or returning a flick to
+rest does not establish a parry. Existing input-preview gestures below remain
+preview evidence only. Dodge direction must preserve the full analog angle in
+the native roll motor, including lock-on; passing analog axes at the pad seam
+does not prove resolved dodge movement.
+
+The source sweep query shares conservative whole-segment advancement between
+sphere classification and selected sphere/capsule slot qualification. It
+interpolates grip/length and shortest-arc orientation, with a 1e-4 tolerance
+in caller geometry units and a 256-iteration budget. Near-opposite directions
+and exhausted budgets return Unresolved. Boolean diagnostic adapters accept
+only Hit; production acceptance must account for unresolved intervals, actual
+hurt volumes, solid interception and conversion from native units to metres.
+
+Explicit combat buttons remain usable until both native physical damage and
+shield-contact bindings are qualified; enabling IK alone never suppresses them.
+Two opt-in previews at the pad seam (`src/core/swing_attack_math.h`,
+`src/core/shield_guard_math.h`) request ordinary native input: a qualified swing
+presses light/strong attack; a raised, still shield hand holds LB; a short flick
+that returns to rest within its deadline requests LT. These previews do not
+implement tracked-contact damage or directional native defense. Native animation
+windows, stamina and hit/parry judgement remain the game's.
+
+Attack and defense have independent opt-in toggles under the shared motion/IK
+readiness gate. Both reset on tracking loss, recentering, clock rollback,
+polling gaps, sanctuary, menu capture or calibration capture. An identical
+pose/time callback preserves bounded holds without advancing motion twice.
+The guard is the shield hand being up inside a head-relative height band; the
+raise itself engages it, and an optional stillness window (`guard_settle_ms`,
+shipped 0) may gate engagement further. Block and parry are separate channels, so
+a tap does not wait for the block to be released. A parry's slower tail must
+still return to rest within the original flick deadline.
+Head-relative hand speeds prevent shared walking translation becoming a gesture.
 
 Interaction targeting uses tracked reach/aim, distance, line of sight and verified eligibility; per-action adapters invoke native actions. Explicit confirm controls are valid for scripted interactions and UI; gesture-triggered canned melee is not. Native UI may be hidden only when required replacement prompts/menus remain accessible. Do not claim simulation pause unless verified.
 
@@ -113,8 +143,11 @@ Use existing trace/profiling tools for bounded evidence. tools/native_stereo.py 
 
 Combat diagnostics use the existing bounded trace queue, not synchronous text
 logging from pose/contact hooks. Admit each contact/identity/read-diagnostics
-batch atomically or count all three records as dropped. The diagnostic writer
-owns formatting, files and rate-limited `TraceHealth`/`CombatHealth` INFO lines.
+batch atomically or count all three records as dropped. The external
+`DSVR-TraceWriter.exe` owns the capture file (pipe + checkpoint ack +
+transport receipt); the diagnostic writer owns formatting and rate-limited
+`TraceHealth`/`CombatHealth` INFO lines. All trace runs use this overhauled
+path; the standalone classify/profile/split/prune scripts were culled 27 Oct.
 Raw actor-side roles, HP/stamina deltas and return bits are observations, not
 damage attribution. Provisional bench classifications remain explicitly weaker
 than copy-verified weapon poses or native contact/defense outcomes.

@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <cstring>
 #include <mutex>
 #include <string_view>
@@ -23,6 +24,7 @@
 #include "cpu_frame_timer.h"
 #include "combat_contact.h"
 #include "hand_math.h"
+#include "shield_guard_math.h"
 #include "pose_transfer.h"
 #include "vr_trace.h"
 
@@ -73,6 +75,26 @@ struct BenchState {
   RehitGate gate;
   long long shield_raised_ms = 0;
   bool shield_was_raised = false;
+  // Iteration 3: persistent flick state. Parry requires the ShieldGuardTrigger
+  // flick shape (fast impulse returning to rest), not just a raised guard
+  // inside the parry window — otherwise any held block at raise time reads
+  // as a parry. State must live in the bench, never a fresh local.
+  ShieldGuardTrigger shield_trigger;
+  ShieldGuardParams shield_params;
+    // Slice 6: queued haptic pulses, fired from the poll thread (never a
+  // synchronous XR call under the pose hook + mutex). Set only from
+  // classified bench geometry; consumed once by the reader.
+  struct BenchPulse {
+    bool pending = false;
+    bool left = false;
+    float amplitude = 0.0f;
+    int duration_ms = 0;
+  };
+  BenchPulse pulse[2];
+  bool support_attached[2]{};
+    // Iteration 2: persistent per-side grip state. A fresh local every frame
+  // can never hold hysteresis; the envelope state must live in the bench.
+  SupportGrip support[2];
 } g_bench;
 WeaponTwoHandState g_two_hand;
 std::atomic<DWORD> g_owner_thread{0};
@@ -105,6 +127,7 @@ struct Targets {
   Vec3 relative[2]{};
   ArmPoseMatrix orientation[2]{};
   ArmPoseMatrix neutral_controller[2]{},neutral_hand[2]{};
+  bool neutral_hand_mirrored[2]{};
   Vec3 head{},lean{},pole[2]{};
   Vec3 physical_head{}, physical_grip[2]{}, physical_tip[2]{}, blade_direction[2]{};
   long long predicted_time_ns=0;
@@ -697,7 +720,9 @@ void RetargetSourcePose(void* self) {
         desired_axis=VAdd(desired_axis,VScale(to_col,VDot(VNorm(from_col),grip_axis)));
       }
       ArmPoseMatrix rolled{};
-      const float roll=(side? -1.f:1.f)*cfg.grip_roll_correction_deg*0.017453292f;
+      const float roll_sign=(side? -1.f:1.f)*
+                (g_targets.neutral_hand_mirrored[side] ? -1.f : 1.f);
+            const float roll=roll_sign*cfg.grip_roll_correction_deg*0.017453292f;
       if (!ArmPoseRollBasis(desired,desired_axis,roll,rolled)) return;
       desired=rolled;
     }
@@ -734,18 +759,22 @@ void RetargetSourcePose(void* self) {
                                 g_targets.world_scale,desired,grip_target)) return;
     if(side==primary) {
       Vec3 offhand_grip{};
-      if(have_profile && map_grip(offhand,offhand_grip))
-        support_attached=WeaponGripSolveTwoHand(placement,before[bones.hand],before[bones.weapon],
+      if(have_profile && map_grip(offhand,offhand_grip)) {
+          support_attached=WeaponGripSolveTwoHand(placement,before[bones.hand],before[bones.weapon],
             g_targets.world_scale,primary_anchor,offhand_grip,g_targets.squeeze[offhand],
             g_targets.epoch,g_two_hand,desired,grip_target,support_grip);
-      else g_two_hand.Reset();
-      if(support_attached) support_rotation=placement.support.rotation_deg;
+      }
+        else g_two_hand.Reset();
+        if(support_attached) support_rotation=placement.support.rotation_deg;
     } else if(support_attached) {
       grip_target=support_grip;
       if(!WeaponGripApplySupportRotation(support_rotation,
           corrected[g_rig.side[primary].weapon],desired)) return;
     }
-    if (!ArmPoseWristForGrip(grip_target,desired,before[bones.hand],before[bones.weapon],wrist_target)) return;
+    // Transport the native grip lever from the selected neutral basis; the
+    // raw hand bind may contain a side-specific wrist twist.
+    const ArmPoseMatrix& wrist_reference_hand = before[bones.hand];
+        if (!ArmPoseWristForGrip(grip_target,desired,wrist_reference_hand,before[bones.weapon],wrist_target)) return;
     const auto arm_result = SolveModelArmPoseWithClavicle(
         corrected,g_rig.parents,bones,wrist_target,shoulder_scratch,&pole,nullptr,
         kArmBendMaxStepDeg,&g_bend_state[side]);
@@ -909,8 +938,47 @@ void RetargetSourcePose(void* self) {
             motion.FeedRelative(g_targets.physical_grip[side],
                 g_targets.physical_tip[side],g_targets.physical_head,
                 sample_dt,g_targets.epoch);
+            // Slice 1 two-hand: the free hand grabs the committed blade
+            // segment while its squeeze is held. The grab point gets its own
+            // head-relative feed; the effective contact segment shortens to
+            // grip->grab and the scale is measured at the grab, not the tip.
+            // Iteration 2: state lives in g_bench.support[side], never a
+            // fresh local, or hysteresis can never hold across frames.
+            SupportGrip& support = g_bench.support[side];
+            ContactParams support_params;
+            support_params.support_attach_m = cfg.halfsword_envelope_m;
+            support_params.support_release_m = cfg.halfsword_envelope_m + 0.05f;
+            const unsigned free_side = 1u - side;
+            const bool free_squeeze =
+                free_side < 2 ? g_targets.squeeze[free_side] : false;
+            Vec3 free_grip_w{};
+            bool have_free = false;
+            if (published.side[free_side].valid) {
+              free_grip_w = ArmPoseTransformPoint(
+                  root_before, ArmPoseOrigin(published.side[free_side].hand));
+              have_free = FiniteVec(free_grip_w);
+            }
+            const bool grabbed = have_free &&
+                support.Update(free_squeeze, free_grip_w, grip_w, tip_w,
+                               support_params, g_targets.world_scale);
+            if (grabbed) {
+              const float f = support.grab_fraction;
+              const Vec3 tracked_grip{g_targets.physical_grip[side]};
+              const Vec3 tracked_tip{g_targets.physical_tip[side]};
+              const Vec3 grab_tracking = VAdd(
+                  tracked_grip, VScale(VAdd(tracked_tip,
+                      VScale(tracked_grip, -1.0f)), f));
+              motion.FeedGrabRelative(grab_tracking, g_targets.physical_head,
+                                      sample_dt, g_targets.epoch);
+            }
             BladeKinematics blade=motion;
             blade.grip=grip_w;blade.tip=tip_w;
+            if (grabbed && motion.grab_valid) {
+              // Halfsword: contact segment shortens to grip->grab point.
+              const float f = support.grab_fraction;
+              blade.tip = VAdd(grip_w, VScale(VAdd(tip_w, VScale(grip_w, -1)), f));
+              blade.tip_speed = motion.grab_speed;
+            }
             blade.prev_tip=g_bench.blade_valid[side] ? g_bench.tip[side] : tip_w;
             // The arc sweep needs the previous frame's native grip too, and
             // g_bench.grip still holds it until the store two lines below.
@@ -924,15 +992,53 @@ void RetargetSourcePose(void* self) {
             if (side == weapon_side && blade.valid) {
               ContactResult contact;
               const long long now_ms = (long long)commit_now;
-              if (ClassifyWeaponContact(blade, motion.FrameKind(VAdd(
+              // Slice 3: per-weapon response from the offline mass table;
+                // unknown weapon falls back to the torque_response config.
+                // Slice 4: a support hand riding the blade steadies the swing
+                // (two-hand torque), so the same motion commits more energy.
+                float response = cfg.torque_response;
+                if (have_equipment) {
+                  WeaponMassEntry mass;
+                  if (WeaponMassGet(equipment.weapon_id[side], mass))
+                    response = mass.response;
+                }
+                if (grabbed)
+                  response *= TwoHandTorque(true, support.grab_fraction);
+                if (ClassifyWeaponContact(blade, motion.FrameKind(VAdd(
                                         g_targets.physical_tip[side],VScale(g_targets.physical_grip[side],-1))), targets,
                                         cfg.contact_speed_min, cfg.swing_damage_gain,
                                         cfg.rehit_window_ms, now_ms, cfg.haptics,
-                                        g_bench.gate, contact)) {
+                                        g_bench.gate, contact, {},
+                                        response)) {
                 g_bench.last_event = 1;
                 g_bench.last_target = contact.hit.target_id;
                 g_bench.last_scale = contact.hit.damage_scale;
                 bench_flags|=1;
+                  // Slice 6: queue the hit pulse; the poll thread fires it.
+                if (cfg.haptics && contact.hit.haptic.duration_ms > 0) {
+                  auto& q = g_bench.pulse[side];
+                  q.pending = true;
+                  q.left = (side == 0);
+                  q.amplitude = contact.hit.haptic.amplitude;
+                  q.duration_ms = contact.hit.haptic.duration_ms;
+                }
+              }
+              // Slice 6: attach/detach tick on support-grip transitions.
+              // Iteration 3: config-shaped like the deflect pulse, not
+                // constants — same caller-supplied shape contract.
+                if (grabbed != g_bench.support_attached[side]) {
+                  g_bench.support_attached[side] = grabbed;
+                  if (cfg.haptics) {
+                    const HapticPulse tick = GripTick(cfg.deflect_amplitude,
+                      cfg.deflect_duration_ms, cfg.haptics);
+                  if (tick.duration_ms > 0) {
+                    auto& q = g_bench.pulse[1u - side];
+                    q.pending = true;
+                    q.left = ((1u - side) == 0);
+                    q.amplitude = tick.amplitude;
+                    q.duration_ms = tick.duration_ms;
+                  }
+                }
               }
             }
           }
@@ -948,19 +1054,59 @@ void RetargetSourcePose(void* self) {
             if (raised && !g_bench.shield_was_raised)
               g_bench.shield_raised_ms = (long long)commit_now;
             g_bench.shield_was_raised = raised;
-            // Incoming threat proxy: the weapon blade crossing the guard.
-            const bool overlaps = g_bench.blade_valid[weapon_side] &&
-                SegmentPointDistance(g_bench.grip[weapon_side],
-                                     g_bench.tip[weapon_side], off_w) < 0.35f;
-            const ContactEvent defence = ClassifyDefence(
-                raised, g_bench.shield_raised_ms, (long long)commit_now,
-                overlaps);
-            if (defence != ContactEvent::None) {
-              g_bench.last_event =
+            // Incoming threat vs the committed shield plane: the weapon
+            // blade segment must cross the shield disc. Plane and blade both
+              // come from the committed pose; no hand-sphere proxy.
+              ShieldPlane shield_plane;
+              const bool plane_ok = ShieldPlaneFromCommittedPose(
+                  root_before, published.side[side].hand,
+                  g_targets.blade_direction[side], 0.25f, shield_plane,
+                  g_targets.world_scale);
+              const bool overlaps = plane_ok &&
+                  g_bench.blade_valid[weapon_side] &&
+                  ThreatBlockedByShield(g_bench.grip[weapon_side],
+                                      g_bench.tip[weapon_side],
+                                      shield_plane, 0.05f,
+                                      g_targets.world_scale);
+            // Iteration 3: parry requires the flick shape, not just a raised
+              // guard inside the window. The trigger consumes the head-relative
+              // shield-hand speed; a held block never flicks, so it can only
+            // classify as a block. Params follow the defence config.
+              g_bench.shield_params.guard_settle_ms = cfg.guard_settle_ms;
+              g_bench.shield_params.flick_speed_min =
+                  cfg.guard_flick_speed_min;
+              g_bench.shield_params.parry_press_ms =
+                  cfg.guard_parry_press_ms;
+              g_bench.shield_params.parry_cooldown_ms =
+                  cfg.guard_parry_cooldown_ms;
+              const ShieldGuardOutput guard_out = g_bench.shield_trigger.Feed(
+                  g_bench.motion[side].grip_speed, raised,
+                  (long long)commit_now, g_bench.shield_params);
+              ContactEvent defence = ClassifyDefence(
+                  raised, g_bench.shield_raised_ms, (long long)commit_now,
+                  overlaps);
+              // A parry window hit without the flick shape is a block.
+              if (defence == ContactEvent::Parry && !guard_out.parry &&
+                  !guard_out.flicked)
+                defence = ContactEvent::ShieldBlock;
+              if (defence != ContactEvent::None) {
+                g_bench.last_event =
                   defence == ContactEvent::Parry ? 3 : 2;
               g_bench.last_target = -2;
               g_bench.last_scale = 0.0f;
               bench_flags|=defence==ContactEvent::Parry ? 4u : 2u;
+                // Slice 6: deflect pulse on classified block/parry geometry.
+              if (cfg.haptics) {
+                const HapticPulse deflect = DeflectHaptic(
+                    cfg.deflect_amplitude, cfg.deflect_duration_ms, true);
+                if (deflect.duration_ms > 0) {
+                  auto& q = g_bench.pulse[side];
+                  q.pending = true;
+                  q.left = (side == 0);
+                  q.amplitude = deflect.amplitude;
+                  q.duration_ms = deflect.duration_ms;
+                }
+              }
             }
           }
           // Report separation only; this diagnostic does not enforce collisions.
@@ -1133,10 +1279,15 @@ void __fastcall PoseUpdateDetour(void* self) {
 // g_hands_mutex must be held. Tracking, calibration or modes can change between the
 // verified native copy and an input/panel read. Both consumers share this
 // lifetime check; once refused, restoring external state cannot revive it.
-bool PublishedHandsCurrent(const Config& cfg,const TrackingFrame& frame,bool have_frame) {
+bool PublishedHandsCurrent(const Config& cfg,TrackingFrame frame,bool have_frame) {
   // A provisional source publication is deliberately invisible until the
   // outer native copy returns. A read must not erase that pending snapshot.
   if(!g_copy_verified.load(std::memory_order_acquire))return false;
+  // Tracking was sampled before taking g_hands_mutex. A natural copy may
+  // have committed since then; refresh that older sample under the lock
+  // before deciding that the newer receipt has lost its lifetime.
+  if(have_frame && frame.sequence && frame.sequence<g_hands.sequence)
+    have_frame=XrLatestTrackingFrame(frame);
   const auto now=GetTickCount64();
   bool current=cfg.vr_enabled && cfg.arm_ik_enabled && cfg.headlook_enabled &&
       !cfg.arm_ik_log_only && !cfg.observer_only &&
@@ -1208,29 +1359,55 @@ bool ArmIkLatestHands(ArmIkHands& out) {
   if (!PublishedHandsCurrent(cfg,frame,have_frame)) return false;
   out=g_hands;return true;
 }
-bool ArmIkCombatBench(CombatBenchSnapshot& out) {
+void ArmIkCopyPublicationStatus(ArmIkCopyPublication& out) {
   out = {};
-  const auto cfg=DiagnosticsCurrentConfig();
+  out.commits = g_copy_commits;
+  out.refusals = g_copy_refusals;
+  out.last_commit_sequence = g_last_commit;
+  out.verified = g_copy_verified.load(std::memory_order_acquire);
+}
+// Inner drain: caller must hold g_hands_mutex (ArmIkCombatBench already
+  // does). A locking wrapper below serves the render-thread poll frame.
+  // Slice 6 drain (never under the pose hook). Fires only from classified
+  // bench geometry; consume-once.
+  static void DrainBenchHapticsLocked(const Config& cfg) {
+  for (int i = 0; i < 2; ++i) {
+      auto& q = g_bench.pulse[i];
+      if (!q.pending) continue;
+      q.pending = false;
+      if (cfg.haptics && q.amplitude > 0.0f && q.duration_ms > 0)
+        InputApplyHaptic(q.left, q.amplitude, q.duration_ms);
+  }
+  }
+  bool ArmIkCombatBench(CombatBenchSnapshot& out) {
+    out = {};
+    const auto cfg=DiagnosticsCurrentConfig();
   out.bench_on=cfg.combat_test_bench;
   if (!out.bench_on || !cfg.motion_attacks) return false;
   TrackingFrame frame{};
   const bool have_frame=XrLatestTrackingFrame(frame);
   std::lock_guard<std::mutex> lock(g_hands_mutex);
   if (!PublishedHandsCurrent(cfg,frame,have_frame) ||
-      g_bench.sequence!=g_hands.sequence || g_bench.epoch!=g_hands.epoch)
+        g_bench.sequence!=g_hands.sequence || g_bench.epoch!=g_hands.epoch)
     return false;
   out.fresh = true;
   for (int i = 0; i < 2; ++i) {
-    out.grip[i] = g_bench.grip[i];
-    out.tip[i] = g_bench.tip[i];
+      out.grip[i] = g_bench.grip[i];
+      out.tip[i] = g_bench.tip[i];
     out.tip_speed[i] = g_bench.tip_speed[i];
-  }
+    }
   out.last_event = g_bench.last_event;
-  out.last_target = g_bench.last_target;
-  out.last_scale = g_bench.last_scale;
-  out.hands_too_close = g_bench.hands_too_close;
-  out.hand_separation_m = g_bench.hand_separation_m;
-  return true;
+    out.last_target = g_bench.last_target;
+    out.last_scale = g_bench.last_scale;
+    out.hands_too_close = g_bench.hands_too_close;
+    out.hand_separation_m = g_bench.hand_separation_m;
+    DrainBenchHapticsLocked(cfg);
+    return true;
+  }
+void ArmIkDrainBenchHaptics() {
+  const auto cfg = DiagnosticsCurrentConfig();
+  std::lock_guard<std::mutex> lock(g_hands_mutex);
+  DrainBenchHapticsLocked(cfg);
 }
 bool ArmIkHookInstall() {
   std::lock_guard<std::mutex> hook_lock(HookInstallMutex());
@@ -1326,7 +1503,39 @@ void ArmIkTick(const TrackingFrame& frame) {
   // leaves the upright stance (a physical lean). Damped below; the raw
   // value here must already be locomotion-free.
   targets.lean=arm_pose_detail::Sub(relative,VAdd(VScale(up,eye_height),VScale(forward,cfg.forward_offset_m*targets.world_scale)));
-  for (unsigned side=0;side<2;++side) {
+  ArmPoseMatrix native_neutral_hand[2]{};
+    bool native_neutral_valid[2]{};
+    if (g_source_reference_valid &&
+      arm_pose_detail::ValidMatrix(g_source_reference[0])) {
+    const ArmPoseMatrix& bind_root = g_source_reference[0];
+    const Vec3 bind_right[3] = {
+        VNorm(arm_pose_detail::Column(bind_root, 0)),
+        VNorm(arm_pose_detail::Column(bind_root, 1)),
+        VNorm(arm_pose_detail::Column(bind_root, 2))};
+    const Vec3 calibration_basis[3] = {right, up, forward};
+    for (unsigned side = 0; side < 2; ++side) {
+      const int hand_bone = g_rig.side[side].hand;
+      if (hand_bone < 0 || hand_bone >= kBones ||
+          !arm_pose_detail::ValidMatrix(g_source_reference[hand_bone]))
+        continue;
+      for (int axis = 0; axis < 3; ++axis) {
+        const Vec3 v =
+            arm_pose_detail::Column(g_source_reference[hand_bone], axis);
+        const Vec3 local{VDot(v, bind_right[0]), VDot(v, bind_right[1]),
+                         VDot(v, bind_right[2])};
+        const Vec3 calibrated =
+            VAdd(VAdd(VScale(calibration_basis[0], local.x),
+                      VScale(calibration_basis[1], local.y)),
+                 VScale(calibration_basis[2], local.z));
+        native_neutral_hand[side].m[axis] = calibrated.x;
+        native_neutral_hand[side].m[4 + axis] = calibrated.y;
+        native_neutral_hand[side].m[8 + axis] = calibrated.z;
+      }
+      native_neutral_valid[side] =
+          arm_pose_detail::ValidMatrix(native_neutral_hand[side]);
+    }
+    }
+    for (unsigned side=0;side<2;++side) {
     const auto& hand=frame.arm[side]; if (!hand.valid) continue;
     targets.squeeze[side]=hand.squeeze_held;
     float norm2=0;
@@ -1348,15 +1557,11 @@ void ArmIkTick(const TrackingFrame& frame) {
       targets.neutral_controller[side].m[4+axis]=neutral_world.y;
       targets.neutral_controller[side].m[8+axis]=neutral_world.z;
     }
-    // c0000's extracted T-pose: +X wrist->fingers points outward, +Z
-    // (palm normal) down. This reference is independent of native animations.
+    // The neutral basis pair is resolved together below so one missing bind
+    // row cannot leave the left hand on a generic T-pose while the right hand
+    // uses a calibrated native twist.
+    
     const float sign=side?1.f:-1.f;
-    const Vec3 hand_axes[]={VScale(right,sign),VScale(forward,sign),VScale(up,-1)};
-    for(int axis=0;axis<3;++axis) {
-      targets.neutral_hand[side].m[axis]=hand_axes[axis].x;
-      targets.neutral_hand[side].m[4+axis]=hand_axes[axis].y;
-      targets.neutral_hand[side].m[8+axis]=hand_axes[axis].z;
-    }
     targets.physical_grip[side]={hand.pos[0],hand.pos[1],hand.pos[2]};
     const Vec3 blade=BladeDirection(hand.quat[0]*inv,hand.quat[1]*inv,
                                     hand.quat[2]*inv,hand.quat[3]*inv);
@@ -1373,6 +1578,42 @@ void ArmIkTick(const TrackingFrame& frame) {
     const float lift=std::clamp(elevation/.5f,0.f,1.f);
     targets.pole[side]=VAdd(VAdd(VScale(right,sign*(.55f+.35f*lift)),VScale(forward,-.4f)),
         VScale(up,-(1.f-.8f*lift)));
+  }
+  ArmPoseMatrix resolved_neutral_hand[2]{};
+      // The right neutral bind matches the operator's calibrated wrist. When it
+      // is available, mirror it for the left instead of preserving a side-specific
+      // left bind twist that remains visible even with both controllers co-located.
+      bool neutral_basis_valid[2]={native_neutral_valid[0],native_neutral_valid[1]};
+      if (neutral_basis_valid[1]) neutral_basis_valid[0]=false;
+  NeutralHandBasisSource neutral_source[2]{};
+  if (!ResolveNeutralHandBases(native_neutral_hand, neutral_basis_valid, right, up, forward, resolved_neutral_hand, neutral_source)) {
+    g_reset_torso.store(true);
+    return;
+  }
+  static std::array<bool,2> neutral_source_logged{};
+  for (unsigned side = 0; side < 2; ++side) {
+    targets.neutral_hand[side] = resolved_neutral_hand[side];
+          targets.neutral_hand_mirrored[side] =
+              neutral_source[side] == NeutralHandBasisSource::MirroredNativeBind;
+    if (neutral_source_logged[side] ||
+              !NeutralHandBasisDiagnosticReady(g_rig.side[side].hand,
+                                               g_source_reference_valid))
+            continue;
+    neutral_source_logged[side] = true;
+    const float fsign = side ? 1.f : -1.f;
+    const Vec3 hand_axes[] = {VScale(right, fsign),
+                              VScale(forward, fsign), VScale(up, -1)};
+    float trace = 0.f;
+    for (int axis = 0; axis < 3; ++axis)
+      trace += VDot(arm_pose_detail::Column(resolved_neutral_hand[side], axis),
+                    hand_axes[axis]);
+    const float angle = std::acos(std::clamp(trace / 3.f, -1.f, 1.f)) * 57.2957795f;
+    const char* source = neutral_source[side] == NeutralHandBasisSource::NativeBind
+        ? "native bind pose"
+        : neutral_source[side] == NeutralHandBasisSource::MirroredNativeBind
+            ? "mirrored native bind pose" : "T-pose fallback";
+    DSVR_LOG("ArmIK: %s neutral hand from %s (hand bone %d, %.1f deg from the T-pose guess)",
+             side ? "right" : "left", source, g_rig.side[side].hand, angle);
   }
   // Head-only packets still drive the torso: controller loss must not
   // freeze the body while the head keeps moving. Without a head basis

@@ -40,10 +40,15 @@ def _record_ok(event):
         return False
     kind = event["event"]
     if kind == "header":
-        if "capture_domain" in event and event["capture_domain"] not in ("full", "combat"):
+        if "capture_domain" in event and event["capture_domain"] not in ("full", "combat", "session"):
             return False
         if any(field in event and (type(event[field]) is not int or event[field] not in (0, 1))
-               for field in ("combat_detail_schema", "combat_context_schema", "combat_hook")):
+                for field in ("combat_detail_schema", "combat_context_schema", "combat_hook",
+                              "combat_health_schema", "combat_health_hook")):
+            return False
+        if "combat_module_base" in event and (not isinstance(event["combat_module_base"], str) or
+                len(event["combat_module_base"]) != 16 or
+                any(c not in "0123456789abcdefABCDEF" for c in event["combat_module_base"])):
             return False
     if kind in ("tracking", "view_consumed", "submit"):
         if not all(_integer(event.get(field), 1) for field in
@@ -179,7 +184,8 @@ def _record_ok(event):
             return False
         return True
 
-    if kind in ("native_combat_contact", "native_combat_identity", "native_combat_diagnostics"):
+    if kind in ("native_combat_contact", "native_combat_identity",
+                "native_combat_diagnostics", "native_combat_health_write"):
         flags = event.get("flags")
         owner = event.get("object")
         if not _integer(event.get("seq"), 1) or not _integer(event.get("thread"), 1) or \
@@ -190,6 +196,17 @@ def _record_ok(event):
                 not _integer(event.get("native_rate")) or event["native_rate"] > 0xffffffff:
             return False
         values = event["values"]
+        if kind == "native_combat_health_write":
+            return (flags == 0 and
+                    all(type(v) in (int, float) and 0 <= v <= 65535 and int(v) == v
+                        for v in values[:10]) and
+                    type(values[10]) in (int, float) and 0 <= values[10] <= 3 and
+                    int(values[10]) == values[10] and
+                    all(type(v) in (int, float) and 0 <= v <= 65535 and int(v) == v
+                        for v in values[11:13]) and
+                    type(values[13]) in (int, float) and values[13] in (0, 1) and
+                    values[14] == 0 and values[15] == 1 and
+                    _limbs(values[11:13]) > values[10])
         if kind == "native_combat_diagnostics":
             if not (0 <= flags <= 0xffff and
                     all(((flags >> shift) & 15) <= 9 for shift in (0, 4, 8, 12)) and
@@ -340,11 +357,11 @@ _ATTRIBUTION_WINDOW_MS = 150
 
 
 def _combat_observations(records, require_diagnostics=False, frequency=0, cases=(),
-                         require_context=False):
-    contacts, identities, diagnostics, motion, contexts = {}, {}, {}, {}, {}
+                         require_context=False, health_schema=0, health_hook=0):
+    contacts, identities, diagnostics, motion, contexts, health = {}, {}, {}, {}, {}, {}
     groups = {"native_combat_contact": contacts, "native_combat_identity": identities,
               "native_combat_diagnostics": diagnostics, "native_combat_motion": motion,
-              "native_combat_context": contexts}
+              "native_combat_context": contexts, "native_combat_health_write": health}
     for record in records:
         kind = record["event"]
         if kind not in groups:
@@ -359,7 +376,7 @@ def _combat_observations(records, require_diagnostics=False, frequency=0, cases=
                     "stats_out_of_range", "record_unreadable", "actor_changed",
                     "not_admitted_before_call")
     for key in sorted(contacts.keys() | identities.keys() | diagnostics.keys() |
-            motion.keys() | contexts.keys()):
+            motion.keys() | contexts.keys() | health.keys()):
         outcome, identity = contacts.get(key, []), identities.get(key, [])
         if len(outcome) != 1 or len(identity) != 1:
             errors.append(f"contact identity pairing {key}: {len(outcome)} contacts, "
@@ -444,6 +461,48 @@ def _combat_observations(records, require_diagnostics=False, frequency=0, cases=
                 "stamina_before": int(values[2]) if before else None,
                 "stamina_after": int(values[3]) if stable else None,
                 "stamina_delta": int(values[3] - values[2]) if stable else None}
+        health_rows = health.get(key, [])
+        parsed_writes = []
+        if len(health_rows) > 4:
+            errors.append(f"contact health-write bound exceeded {key}: {len(health_rows)} records")
+        if health_rows and (health_schema != 1 or health_hook != 1):
+            errors.append(f"health writes present without enabled observer schema {key}")
+        total_calls = None
+        indices = set()
+        for row in health_rows:
+            payload = row["values"]
+            count = _limbs(payload[11:13])
+            index = int(payload[10])
+            if row["native_rate"] != outcome["native_rate"]:
+                errors.append(f"contact health-write return disagrees {key}")
+            if total_calls is not None and total_calls != count:
+                errors.append(f"contact health-write call counts disagree {key}")
+            total_calls = count
+            if index in indices:
+                errors.append(f"duplicate contact health-write index {key}: {index}")
+            indices.add(index)
+            actor = _limbs(payload[0:4])
+            caller = _limbs(payload[4:8])
+            side = ("source" if actor == int(sample["source"]["address"], 16) else
+                    "target" if actor == int(sample["target"]["address"], 16) else None)
+            parsed_writes.append({
+                "actor": f"{actor:016x}", "actor_side": side,
+                "caller": f"{caller:016x}",
+                "requested_hp": _signed_state(payload[8:10]),
+                "index": index, "total_scoped_calls": count,
+                "truncated": bool(payload[13])})
+        if total_calls is not None:
+            expected = min(total_calls, 4)
+            if len(health_rows) != expected or indices != set(range(expected)):
+                errors.append(f"contact health-write sequence incomplete {key}")
+            if any(bool(row["values"][13]) != (total_calls > 4) for row in health_rows):
+                errors.append(f"contact health-write truncation marker disagrees {key}")
+        sample["health_writer_observation"] = {
+            "state": ("writes_observed" if health_rows else
+                      "no_setter_observed_in_scoped_callback" if health_schema == 1 and health_hook == 1
+                      else "unknown_or_observer_unavailable"),
+            "recorded": parsed_writes, "scoped_call_count": total_calls,
+            "truncated": bool(total_calls and total_calls > 4)}
         # Motion is optional extra evidence: a capture from an older build carries
         # none and its absence must not invalidate a contact pairing. More than one
         # motion record for one callback, or a motion record bound to a different
@@ -596,6 +655,10 @@ def _combat_observations(records, require_diagnostics=False, frequency=0, cases=
                 1 for row in rows
                 if (row["target"]["hp_delta"] or 0) < 0 and not bench)}
     return {"status": "UNVERIFIED", "paired_samples": len(samples),
+            "health_writer_capability": {
+                "schema": health_schema, "hook": health_hook,
+                "state": ("enabled" if health_schema == 1 and health_hook == 1 else
+                          "disabled_or_legacy_unknown")},
             "motion_samples": motion_samples, "context_samples": context_samples,
             "case_observations": case_observations,
             "case_attribution": attribution,
@@ -729,9 +792,8 @@ def validate(events):
             "source_counts_are_trace_claims": True, "checks": checks}
 
 
-def read_capture(path, cases_path=None):
-    """Analyse one capture. `cases_path` defaults to combat-cases.json beside it."""
-    records, malformed = [], []
+def _load_capture_records(path):
+    records, malformed, parsed_records = [], [], []
     for line_number, raw_line in enumerate(path.read_bytes().splitlines(), 1):
         try:
             line = raw_line.decode("utf-8-sig")
@@ -742,11 +804,21 @@ def read_capture(path, cases_path=None):
             continue
         try:
             record = json.loads(line)
-            if not _record_ok(record):
-                raise ValueError("event is not an object")
-            records.append(record)
         except ValueError:
             malformed.append(line_number)
+            continue
+        if isinstance(record, dict):
+            parsed_records.append(record)
+        if _record_ok(record):
+            records.append(record)
+        else:
+            malformed.append(line_number)
+    return records, malformed, parsed_records
+
+
+def _read_capture_with_records(path, cases_path=None):
+    """Analyse one capture. `cases_path` defaults to combat-cases.json beside it."""
+    records, malformed, parsed_records = _load_capture_records(path)
     report = validate(records)
     report["malformed_lines"] = malformed
     headers = [e for e in records if e.get("event") == "header"]
@@ -817,9 +889,11 @@ def read_capture(path, cases_path=None):
         cases, case_errors, declared = _case_plan(
             Path(cases_path), headers[0] if len(headers) == 1 else {})
         case_errors = list(case_errors)
+    health_header = headers[0] if len(headers) == 1 else {}
     combat = _combat_observations(records,
         len(headers) == 1 and headers[0].get("combat_detail_schema") == 1, frequency, cases,
-        len(headers) == 1 and headers[0].get("combat_context_schema") == 1)
+        len(headers) == 1 and headers[0].get("combat_context_schema") == 1,
+        health_header.get("combat_health_schema", 0), health_header.get("combat_health_hook", 0))
     report["native_combat_observations"] = combat
     combat["callback_counts"] = {
         field: footers[0].get(field) if len(footers) == 1 else None
@@ -906,6 +980,7 @@ def read_capture(path, cases_path=None):
         report["error_counts"]["case plan rejected"] = len(case_errors)
     combat["coverage_limitations"] = [
         "Only natural callbacks completing within the capture are observed; simulation/contact producer identity is unverified.",
+        "Health-setter calls are recorded only while an admitted detailed contact callback is on the stack. A missing setter record does not rule out an asynchronous or alternate HP path, and a recorded request is not proof that HP changed or that the contact caused it.",
         "Detail admission follows the recorded capture limit when present; legacy captures "
         "may use a 256-call ceiling. Absence of an HP delta does not prove a miss or block."]
     if cases:
@@ -966,7 +1041,322 @@ def read_capture(path, cases_path=None):
     report["limitations"] = ["Camera command production is not GPU/view consumption.",
                             "Written camera motion is not native scenario execution.",
                             "Physical binocular fusion requires a headset verdict."]
+    return report, parsed_records
+
+def read_capture(path, cases_path=None):
+    """Analyse one capture; cases_path defaults to combat-cases.json beside it."""
+    report, _ = _read_capture_with_records(path, cases_path)
     return report
+
+
+def _is_session_index(path):
+    try:
+        for raw in path.read_bytes().splitlines():
+            line = raw.decode("utf-8-sig").strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+                if not isinstance(record, dict):
+                    continue
+                return record.get("event") == "session_start"
+            except ValueError:
+                return False
+    except (OSError, UnicodeError):
+        return False
+    return False
+
+
+def _session_lifecycle_record_valid(record):
+    kind = record["event"]
+    if not _integer(record.get("qpc")):
+        return False
+    if "utc_filetime_100ns" in record and not _integer(record["utc_filetime_100ns"]):
+        return False
+    if kind == "session_start" and any(not _integer(record.get(field), 1)
+                                        for field in ("pid", "qpc_hz")):
+        return False
+    if kind in ("epoch_start", "epoch_end", "segment_start", "segment_end",
+                "segment_failure", "capture_stopped") and not _integer(record.get("epoch"), 1):
+        return False
+    if kind in ("segment_start", "segment_end", "segment_failure") and \
+            not _integer(record.get("segment"), 1):
+        return False
+    if kind == "segment_start":
+        leaf = record.get("segment_file")
+        if not isinstance(leaf, str) or not leaf or leaf in (".", "..") or \
+                any(char in leaf for char in ("/", "\\", "\0")):
+            return False
+        if "gap_qpc" in record and (type(record["gap_qpc"]) is not int or
+                                    not -(1 << 63) <= record["gap_qpc"] < (1 << 63)):
+            return False
+    if kind in ("epoch_end", "capture_stopped") and "reason" not in record:
+        return False
+    if "reason" in record and (not isinstance(record["reason"], str) or not record["reason"]):
+        return False
+    for field in ("duration_qpc", "capture_id", "events", "dropped", "contended", "queue_peak"):
+        if field in record and not _integer(record[field]):
+            return False
+    if "io_error" in record and type(record["io_error"]) is not bool:
+        return False
+    if "degraded" in record and type(record["degraded"]) is not bool:
+        return False
+    if "event_counts" in record:
+        counts = record["event_counts"]
+        if not isinstance(counts, dict) or any(not isinstance(name, str) or not name or
+                                               not _integer(count) for name, count in counts.items()):
+            return False
+    return True
+
+
+def analyze_session_index(path):
+    """Validate one autonomous-session index plus its segment captures.
+
+    The index binds session/epoch/segment identity; every segment file must
+    still close with its own producer footer. Anything less is incomplete,
+    never a negative result about the game.
+    """
+    errors = []
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeError) as error:
+        return dict(report_type="autonomous_vr_session", valid=False,
+                    complete=False, errors=[str(error)])
+    index_records = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+            if not isinstance(record, dict) or not isinstance(record.get("event"), str) or not record["event"]:
+                errors.append("session index has malformed records")
+                continue
+            index_records.append(record)
+        except ValueError:
+            errors.append("session index has malformed records")
+    starts = [r for r in index_records if r.get("event") == "session_start"]
+    if len(starts) != 1:
+        errors.append("session index has no unique session_start")
+    session = starts[0] if len(starts) == 1 else {}
+    session_id = session.get("session_id")
+    lifecycle_events = {"session_start", "session_end", "epoch_start", "epoch_end",
+                        "segment_start", "segment_end", "segment_failure", "capture_stopped"}
+    session_records = []
+    if not isinstance(session_id, str) or not session_id:
+        errors.append("session_start has no valid session_id")
+    else:
+        for record in index_records:
+            if record.get("event") not in lifecycle_events:
+                continue
+            if record.get("session_id") != session_id:
+                errors.append("session index contains foreign lifecycle records")
+                continue
+            if not _session_lifecycle_record_valid(record):
+                errors.append("session index has malformed %s record" % record["event"])
+                continue
+            session_records.append(record)
+    previous_qpc = None
+    for record in session_records:
+        qpc = record["qpc"]
+        if previous_qpc is not None and qpc < previous_qpc:
+            errors.append("session index QPC regressed from %s to %s at %s" %
+                          (previous_qpc, qpc, record["event"]))
+        previous_qpc = qpc
+    for event, fields in (("epoch_start", ("epoch",)), ("epoch_end", ("epoch",)),
+                          ("segment_end", ("epoch", "segment"))):
+        seen = set()
+        for record in session_records:
+            if record["event"] != event:
+                continue
+            key = tuple(record[field] for field in fields)
+            if key in seen:
+                errors.append("session index has duplicate %s record %s" % (event, key))
+            seen.add(key)
+    seg_starts = [r for r in session_records if r.get("event") == "segment_start"]
+    if not seg_starts:
+        errors.append("session index has no captured segments")
+    segment_end_records = {(r.get("epoch"), r.get("segment")): r
+                           for r in session_records if r.get("event") == "segment_end"}
+    seg_ends = set(segment_end_records)
+    for (epoch, segment), record in segment_end_records.items():
+        if record.get("io_error"):
+            errors.append("session segment %s epoch %s index io_error" % (segment, epoch))
+    epoch_start_records = {r.get("epoch"): r for r in session_records
+                           if r.get("event") == "epoch_start"}
+    epoch_end_records = {r.get("epoch"): r for r in session_records
+                         if r.get("event") == "epoch_end"}
+    epoch_starts = set(epoch_start_records)
+    epoch_ends = set(epoch_end_records)
+    for epoch in epoch_ends - epoch_starts:
+        errors.append("session epoch %s has no epoch_start" % (epoch,))
+    for epoch in epoch_starts & epoch_ends:
+        if epoch_end_records[epoch]["qpc"] < epoch_start_records[epoch]["qpc"]:
+            errors.append("session epoch %s ends before it starts" % (epoch,))
+    for epoch, record in epoch_end_records.items():
+        if record.get("degraded"):
+            errors.append("session epoch %s degraded" % (epoch,))
+    session_end_records = [r for r in session_records
+                           if r.get("event") == "session_end"]
+    capture_stops = [r for r in session_records
+                     if r.get("event") == "capture_stopped"]
+    stop_reasons = {r.get("reason") or "unspecified" for r in capture_stops}
+    stop_reasons.update(r.get("reason") for r in session_records
+                        if r.get("event") == "epoch_end" and r.get("reason")
+                        and r.get("reason") != "player_unload")
+    if not epoch_starts:
+        errors.append("session index has no epoch boundaries")
+    if not session_end_records:
+        errors.append("session has no session_end")
+    elif len(session_end_records) != 1:
+        errors.append("session index has duplicate session_end records")
+    gaps = []
+    dropped = contended = 0
+    pad_changes = valid_hands = hand_transitions = 0
+    previous_footers = {}
+    seen_epochs = set()
+    seen_segments = set()
+    event_counts = Counter()
+    for start in seg_starts:
+        epoch, segment = start.get("epoch"), start.get("segment")
+        key = (epoch, segment)
+        if key in seen_segments:
+            errors.append("session segment %s epoch %s has duplicate starts" % (segment, epoch))
+            continue
+        seen_segments.add(key)
+        same_epoch = epoch in seen_epochs
+        seen_epochs.add(epoch)
+        segment_end = segment_end_records.get(key)
+        epoch_start = epoch_start_records.get(epoch)
+        epoch_end = epoch_end_records.get(epoch)
+        if epoch_start is None:
+            errors.append("session segment %s epoch %s has no epoch_start" % (segment, epoch))
+        elif start["qpc"] < epoch_start["qpc"]:
+            errors.append("session segment %s starts before epoch %s" % (segment, epoch))
+        if epoch_end is None:
+            errors.append("session segment %s epoch %s has no epoch_end" % (segment, epoch))
+        elif start["qpc"] > epoch_end["qpc"] or (
+                segment_end is not None and segment_end["qpc"] > epoch_end["qpc"]):
+            errors.append("session segment %s ends outside epoch %s" % (segment, epoch))
+        if segment_end is not None and segment_end["qpc"] < start["qpc"]:
+            errors.append("session segment %s ends before it starts" % (segment,))
+        index_dropped = segment_end.get("dropped", 0) if segment_end else 0
+        index_contended = segment_end.get("contended", 0) if segment_end else 0
+        dropped += index_dropped
+        contended += index_contended
+        leaf = start.get("segment_file")
+        seg_file = path.parent / (path.stem + "-" + leaf) if leaf else None
+        if not leaf or seg_file is None or not seg_file.is_file():
+            errors.append("session segment %s file missing" % (segment,))
+            continue
+        try:
+            seg_report, seg_records = _read_capture_with_records(seg_file)
+            seg_records = [record for record in seg_records if _record_ok(record)]
+        except OSError as error:
+            errors.append(str(error))
+            continue
+        for error in seg_report.get("errors", []):
+            if error in ("no submissions captured",
+                         "submission lacks two verified consumed scene views"):
+                continue
+            errors.append(error)
+        segment_counts = seg_report.get("event_counts", {})
+        event_counts.update(segment_counts)
+        if segment_end and "event_counts" in segment_end and segment_end.get("io_error") is not True:
+            if segment_end["event_counts"] != segment_counts:
+                errors.append("session segment %s event counts mismatch" % (segment,))
+        headers = [e for e in seg_records if e.get("event") == "header"]
+        footers = [e for e in seg_records if e.get("event") == "footer"]
+        if len(headers) != 1:
+            errors.append("session segment %s has no unique header" % (segment,))
+            continue
+        header = headers[0]
+        for field, want in (("pid", session.get("pid")),
+                            ("qpc_hz", session.get("qpc_hz")),
+                            ("capture_domain", "session"),
+                            ("session_id", session_id),
+                            ("player_epoch", epoch),
+                            ("segment_index", segment)):
+            if header.get(field) != want:
+                errors.append("session segment %s header %s mismatch" % (segment, field))
+        if not footers or seg_records[-1].get("event") != "footer":
+            errors.append("session segment %s has no closing footer" % (segment,))
+        else:
+            footer = footers[0]
+            dropped += max(0, footer.get("dropped", 0) - index_dropped)
+            contended += max(0, footer.get("contended", 0) - index_contended)
+            if segment_end and segment_end.get("io_error") is not True:
+                for field in ("dropped", "contended"):
+                    if field in segment_end and segment_end[field] != footer.get(field, 0):
+                        errors.append("session segment %s %s mismatch" % (segment, field))
+            previous_footer = previous_footers.get(epoch)
+            if previous_footer is not None:
+                gap = header["qpc"] - previous_footer
+                if gap:
+                    gaps.append({"segment": segment, "gap_qpc": gap})
+            previous_footers[epoch] = footer["qpc"]
+        declared = start.get("gap_qpc", 0)
+        if same_epoch and declared:
+            gaps.append({"segment": segment, "gap_qpc": declared})
+        if (epoch, segment) not in seg_ends:
+            errors.append("session segment %s has no segment_end" % (segment,))
+        for e in seg_records:
+            if e.get("event") == "virtual_pad_state":
+                pad_changes += 1
+            elif e.get("event") == "hand_tracking":
+                flags = e.get("flags", 0)
+                if type(flags) is not int:
+                    errors.append("session segment %s malformed hand tracking flags" % (segment,))
+                    continue
+                if flags & 1:
+                    valid_hands += 1
+                if flags & 2:
+                    hand_transitions += 1
+    for epoch, segment in seg_ends - seen_segments:
+        errors.append("session segment %s epoch %s has no segment_start" % (segment, epoch))
+    empty_epochs = sorted(epoch_starts - seen_epochs)
+    if empty_epochs:
+        errors.extend("session epoch %s has no captured segments" % (epoch,)
+                      for epoch in empty_epochs)
+    open_epochs = sorted(e for e in epoch_starts if e not in epoch_ends)
+    continuous = not gaps
+    complete = not errors and continuous and not open_epochs and not dropped and not contended and not stop_reasons
+    session_end = session_end_records[-1] if session_end_records else {}
+    utc_bounds = {
+        "session": {
+            "qpc_start": session.get("qpc"),
+            "qpc_end": session_end.get("qpc"),
+            "utc_start_filetime_100ns": session.get("utc_filetime_100ns"),
+            "utc_end_filetime_100ns": session_end.get("utc_filetime_100ns"),
+        },
+        "epochs": [
+            {"epoch": start.get("epoch"), "qpc_start": start.get("qpc"),
+             "qpc_end": epoch_end_records.get(start.get("epoch"), {}).get("qpc"),
+             "utc_start_filetime_100ns": start.get("utc_filetime_100ns"),
+             "utc_end_filetime_100ns": epoch_end_records.get(start.get("epoch"), {}).get("utc_filetime_100ns")}
+            for start in session_records if start.get("event") == "epoch_start"],
+        "segments": [
+            {"epoch": start.get("epoch"), "segment": start.get("segment"),
+             "qpc_start": start.get("qpc"),
+             "qpc_end": segment_end_records.get((start.get("epoch"), start.get("segment")), {}).get("qpc"),
+             "utc_start_filetime_100ns": start.get("utc_filetime_100ns"),
+             "utc_end_filetime_100ns": segment_end_records.get((start.get("epoch"), start.get("segment")), {}).get("utc_filetime_100ns")}
+            for start in seg_starts],
+    }
+    return dict(report_type="autonomous_vr_session",
+                valid=not errors, complete=complete, acceptance="UNVERIFIED",
+                unknowns={"scene_identity": "unknown"},
+                input_observations={
+                    "virtual_pad_state_changes": pad_changes,
+                    "valid_hand_samples": valid_hands,
+                    "hand_validity_or_space_transitions": hand_transitions,
+                    "detail": "Change-gated pad states and <=30 Hz hand samples. "
+                              "Raw input only: no intent, gesture, or menu/dialogue "
+                              "selection is established."},
+                coverage={"continuous": continuous, "gaps": gaps,
+                          "open_epochs": open_epochs},
+                loss={"dropped": dropped, "contended": contended}, event_counts=dict(event_counts),
+                utc_bounds=utc_bounds, stop_reasons=sorted(stop_reasons),
+                errors=errors)
 
 
 def main():
@@ -976,7 +1366,8 @@ def main():
                         help="operator case windows; auto-detected beside the capture")
     args = parser.parse_args()
     try:
-        report = read_capture(args.path, args.cases)
+        report = (analyze_session_index(args.path) if _is_session_index(args.path)
+                else read_capture(args.path, args.cases))
     except OSError as error:
         print(json.dumps(dict(complete=False, errors=[str(error)]), indent=2))
         return 2

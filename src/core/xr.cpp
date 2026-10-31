@@ -35,6 +35,7 @@
 #include "menu_state.h"
 #include "mod_menu.h"
 #include "depth_probe.h"
+#include "xr_eye_resolution.h"
 #include "xr_stereo_frame.h"
 #include "xr_inactive_frame_pump.h"
 
@@ -75,6 +76,7 @@ ID3D11BlendState* g_blit_blend = nullptr;
 ID3D11DepthStencilState* g_blit_depth = nullptr;
 ID3D11RasterizerState* g_blit_raster = nullptr;
 ID3D11Buffer* g_blit_constants = nullptr;
+ID3D11Buffer* g_blit_aa_constants = nullptr;
 ComfortVignette g_comfort_vignette;
 bool g_views_logged = false;
 bool g_fov_logged = false;
@@ -84,31 +86,37 @@ bool g_fov_logged = false;
 // (v0.4.0 first success) stretched 16:9 across the native ~100 deg FOV and
 // sat off-centre on the asymmetric HMD frustum ("too close, misaligned").
 float g_screen_rect[2][4] = {{0, 0, 0, 0}, {0, 0, 0, 0}};
+std::atomic<float> g_theater_pointer_fov_rad{0.0f};
 TrackingFrames g_tracking_frames;
 std::mutex g_camera_tag_mutex;
 std::uint64_t g_camera_sequence = 0;
 DWORD g_camera_thread = 0;
 TrackingFrame g_camera_frame;
 long long g_last_period_ns = 0;
-// Optional, read-only physical refresh source. Only the render thread touches
-// this cache: initialize at session creation/begin, then consume FB events.
+// Observe the runtime-owned headset refresh for the FPS Unlock dependency's
+// next-launch MaxFPS handoff. DSVR does not request or pace this display rate.
 PFN_xrGetDisplayRefreshRateFB g_get_display_refresh_rate = nullptr;
-double g_display_refresh_hz = 0.0;
+std::atomic<double> g_display_refresh_hz = 0.0;
 
 bool ValidDisplayRefresh(float hz) {
-  return std::isfinite(hz) && hz > 0.0f;
+  return std::isfinite(hz) && std::isgreaterequal(hz, 10.0f) &&
+             std::islessequal(hz, 1000.0f);
 }
+
 
 void QueryDisplayRefresh() {
   g_display_refresh_hz = 0.0;
   if (!g_session || !g_get_display_refresh_rate) return;
-  float hz = 0.0f;
-  const auto result = g_get_display_refresh_rate(g_session, &hz);
-  if (result == XR_SUCCESS && ValidDisplayRefresh(hz))
-    g_display_refresh_hz = hz;
-  else
+  float current_hz = 0.0f;
+  const auto result = g_get_display_refresh_rate(g_session, &current_hz);
+  if (result != XR_SUCCESS || !ValidDisplayRefresh(current_hz)) {
     DSVR_WARN("XR: physical display refresh unavailable result=%d hz=%.3f; using predicted period",
-              static_cast<int>(result), static_cast<double>(hz));
+              static_cast<int>(result), static_cast<double>(current_hz));
+    return;
+  }
+  g_display_refresh_hz = current_hz;
+  DSVR_LOG("XR: observing headset refresh %.3fHz; DSR-FPS-Unlock consumes it on next launch",
+           static_cast<double>(current_hz));
 }
 // Effective-rate authority (display_rate.h). Stabilizer is render-thread
 // only; the snapshot is mutex-published for XrEffectiveRate readers.
@@ -122,25 +130,22 @@ std::uint64_t g_metrics_sequence = 0;
 GpuFrameTimer g_gpu_timer;
 
 void PublishRate(long long period_ns) {
-  const int requested = DiagnosticsCurrentConfig().frame_limit_fps;
-  const EffectiveRate rate = g_rate_stabilizer.Update(
-      requested, period_ns, period_ns > 0 ? g_display_refresh_hz : 0.0);
+  const double display_hz = g_display_refresh_hz.load();
+  const EffectiveRate rate = g_rate_stabilizer.Update(period_ns, period_ns > 0 ? display_hz : 0.0);
   g_last_period_ns = period_ns;
   std::lock_guard<std::mutex> lock(g_rate_mutex);
   g_rate_snapshot = rate;
   if (rate.generation != g_rate_logged_generation) {
     g_rate_logged_generation = rate.generation;
     if (rate.from_runtime)
-      DSVR_LOG("RateMatch: source=%s period_ns=%lld runtime=%.3fHz display=%.3fHz "
-               "effective=%d requested=%d%s (see FrameRate for native application)",
+      DSVR_LOG("RateObserve: source=%s period_ns=%lld app=%.3fHz headset=%.3fHz observed=%dHz; "
+               "frame limiting delegated to DSR-FPS-Unlock",
                rate.from_display ? "physical-display" :
-                   (rate.runtime_throttled ? "runtime-cap-held" : "runtime"),
-               rate.runtime_period_ns, rate.runtime_hz, rate.display_hz, rate.effective_fps,
-               rate.requested_fps, rate.mismatch ? " MISMATCH" : "");
+                   (rate.runtime_throttled ? "runtime-throttled" : "runtime"),
+               rate.runtime_period_ns, rate.runtime_hz, rate.display_hz,
+               rate.effective_fps);
     else
-      DSVR_LOG("RateMatch: source=config-fallback effective=%d requested=%d "
-               "(no live runtime period; see FrameRate for native application)",
-               rate.effective_fps, rate.requested_fps);
+      DSVR_LOG("RateObserve: no live runtime cadence; DSR-FPS-Unlock owns frame limiting");
   }
 }
 XrTime g_space_change_time = 0;
@@ -170,6 +175,7 @@ uint32_t g_stage_h = 0;
 DXGI_FORMAT g_stage_fmt = DXGI_FORMAT_UNKNOWN;
 std::vector<ID3D11RenderTargetView*> g_rtvs[2];
 bool g_format_logged = false;
+bool g_theater_parity_logged = false;
 XrStereoFrame g_native_frame;
 XrInactiveFramePump g_inactive_pump({xrWaitFrame,xrBeginFrame,xrEndFrame});
 std::atomic<bool> g_session_visible{false};
@@ -213,24 +219,7 @@ void SampleCalibration(const TrackingFrame& frame) {
                      profile.valid ? profile.eye_height_m : Config{}.eye_height);
 }
 
-bool DrainMonoImages() {
-  bool drained = true;
-  for (auto& image : g_mono_images) {
-    if (!image.chain) continue;
-    if (!image.ready) {
-      XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
-      wait.timeout = 0;
-      const auto result = xrWaitSwapchainImage(image.chain, &wait);
-      image.ready = XR_SUCCEEDED(result) && result != XR_TIMEOUT_EXPIRED;
-    }
-    if (image.ready) {
-      XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-      if (XR_SUCCEEDED(xrReleaseSwapchainImage(image.chain, &release))) image = {};
-    }
-    if (image.chain) drained = false;
-  }
-  return drained;
-}
+bool DrainMonoImages() { return DrainSwapchainLeases(g_mono_images); }
 
 long long QpcNow() {
   LARGE_INTEGER value{};
@@ -364,8 +353,7 @@ void PollEvents() {
       const auto* refresh = reinterpret_cast<const XrEventDataDisplayRefreshRateChangedFB*>(&ev);
       g_display_refresh_hz = ValidDisplayRefresh(refresh->toDisplayRefreshRate)
           ? refresh->toDisplayRefreshRate : 0.0;
-      // Publication still happens at the existing frame boundary, retaining
-      // rate hysteresis without another runtime call on every frame.
+      // Observe the new panel rate; the dependency is updated for the next launch.
     }
     if (ev.type == XR_TYPE_EVENT_DATA_EVENTS_LOST && g_running.load())
       QueryDisplayRefresh(); // a missing FB event may have changed the cache
@@ -482,22 +470,50 @@ bool DestroySwapchains() {
 
 bool EnsureBlit() {
   if (g_blit_vs && g_blit_ps && g_blit_sampler && g_blit_blend &&
-      g_blit_depth && g_blit_raster && g_blit_constants) return true;
+      g_blit_depth && g_blit_raster && g_blit_constants &&
+        g_blit_aa_constants) return true;
   // A failed creation retries cleanly rather than leaking the partial pipeline.
   const auto release = [](auto*& p) { if (p) p->Release(); p = nullptr; };
   release(g_blit_vs); release(g_blit_ps); release(g_blit_sampler);
   release(g_blit_blend); release(g_blit_depth); release(g_blit_raster);
-  release(g_blit_constants);
-  static const char* kShader =
+  release(g_blit_constants); release(g_blit_aa_constants);
+  // FXAA 3.11-style luma edge pass folded into the blit: single-tap
+    // fast path when disabled (aa_on == 0), 5-tap + 4 edge taps when on.
+    // MSAA resolve happens in hardware on the RTV; this pass only smooths
+    // the sampled image. Runs on every blit; cost is one fullscreen pass.
+    static const char* kShader =
       "Texture2D tex : register(t0); SamplerState samp : register(s0);"
       "cbuffer Comfort : register(b0) { float4 tangents; float4 vignette; };"
+      "cbuffer Aa : register(b1) { float4 aa; };"
       "struct PSIn { float4 pos : SV_Position; float2 uv : TEXCOORD0; };"
       "PSIn VSMain(uint id : SV_VertexID) { PSIn o;"
       "  o.uv = float2((id << 1) & 2, id & 2);"
       "  o.pos = float4(o.uv * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);"
       "  return o; }"
+      "float Luma(float3 c) { return dot(c, float3(0.299, 0.587, 0.114)); }"
       "float4 PSMain(PSIn i) : SV_Target {"
       "  float4 c = tex.Sample(samp, i.uv);"
+      "  if (aa.x > 0.5) {"
+      "    float2 px = aa.yz;"
+      "    float l0 = Luma(c.rgb);"
+      "    float lx = Luma(tex.Sample(samp, i.uv + float2(px.x, 0)).rgb);"
+      "    float ly = Luma(tex.Sample(samp, i.uv + float2(0, px.y)).rgb);"
+      "    float lxn = Luma(tex.Sample(samp, i.uv - float2(px.x, 0)).rgb);"
+      "    float lyn = Luma(tex.Sample(samp, i.uv - float2(0, px.y)).rgb);"
+      "    float range = max(max(lx, ly), max(lxn, lyn)) - min(min(lx, ly), min(lxn, lyn));"
+      "    if (range > 0.0312) {"
+      "      float2 dir = float2(lx - lxn, ly - lyn);"
+      "      float len = max(length(dir), 1e-4);"
+      "      dir /= len;"
+      "      float2 off = dir * px * 0.5;"
+      "      float3 avg = (tex.Sample(samp, i.uv + off).rgb +"
+      "                  tex.Sample(samp, i.uv - off).rgb) * 0.5;"
+      "      float la = Luma(avg);"
+      "      float blend = smoothstep(0.0312, 0.125, range) * 0.75;"
+      "      blend *= 1.0 - abs(la - l0) / max(range, 1e-4);"
+      "      c.rgb = lerp(c.rgb, avg, saturate(blend));"
+      "    }"
+      "  }"
       "  float2 uv = i.pos.xy * vignette.yz;"
       "  float2 t = float2(lerp(tangents.x,tangents.y,uv.x),"
       "                    lerp(tangents.z,tangents.w,uv.y));"
@@ -548,8 +564,14 @@ bool EnsureBlit() {
   constants.Usage = D3D11_USAGE_DEFAULT;
   constants.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
   g_device->CreateBuffer(&constants, nullptr, &g_blit_constants);
-  return g_blit_vs && g_blit_ps && g_blit_sampler && g_blit_blend &&
-         g_blit_depth && g_blit_raster && g_blit_constants;
+  D3D11_BUFFER_DESC aa_constants{};
+    aa_constants.ByteWidth = 4 * sizeof(float);
+    aa_constants.Usage = D3D11_USAGE_DEFAULT;
+    aa_constants.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    g_device->CreateBuffer(&aa_constants, nullptr, &g_blit_aa_constants);
+    return g_blit_vs && g_blit_ps && g_blit_sampler && g_blit_blend &&
+         g_blit_depth && g_blit_raster && g_blit_constants &&
+         g_blit_aa_constants;
 }
 
 bool PrepareMonoSource(ID3D11Texture2D* backbuffer,
@@ -651,6 +673,16 @@ bool BlitToEye(int eye, uint32_t index, const D3D11_TEXTURE2D_DESC& src_desc,
       1.f / g_eye_width, 1.f / g_eye_height, 0};
   g_context->UpdateSubresource(g_blit_constants, 0, nullptr, constants, 0, 0);
   g_context->PSSetConstantBuffers(0, 1, &g_blit_constants);
+  // FXAA constants: on/off + source texel size. MSAA resolve is hardware.
+  {
+    const int aa = DiagnosticsCurrentConfig().aa_mode;
+    const float aa_on = (aa == 1) ? 1.0f : 0.0f;
+    const float aa_c[4]{aa_on,
+        src_desc.Width ? 1.0f / (float)src_desc.Width : 0.0f,
+        src_desc.Height ? 1.0f / (float)src_desc.Height : 0.0f, 0.0f};
+    g_context->UpdateSubresource(g_blit_aa_constants, 0, nullptr, aa_c, 0, 0);
+    g_context->PSSetConstantBuffers(1, 1, &g_blit_aa_constants);
+  }
   g_context->IASetInputLayout(nullptr);
   g_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
   g_context->Draw(3, 0);
@@ -660,9 +692,14 @@ bool BlitToEye(int eye, uint32_t index, const D3D11_TEXTURE2D_DESC& src_desc,
   return true;
 }
 
+
 bool EnsureSwapchains(ID3D11Texture2D* backbuffer) {
   D3D11_TEXTURE2D_DESC desc{};
   backbuffer->GetDesc(&desc);
+  // One eye size for the whole session: the virtual-screen rect is computed
+  // from g_eye_width/height, so rebuilding the swapchains mid-session leaves
+  // that rect pointing at extents that no longer exist. Sizing comes from the
+  // runtime's recommended rect, which is what the compositor costs fairly.
   if (g_swapchain[0] && g_swapchain[1] && !g_images[0].empty() &&
       !g_images[1].empty() && g_head_space && !g_destroy_pending) return true;
   if (!DestroySwapchains()) return false;
@@ -674,14 +711,11 @@ bool EnsureSwapchains(ID3D11Texture2D* backbuffer) {
   if (!EnsureBlit()) return false;
   if (!g_eye_scale_percent)
     g_eye_scale_percent = std::clamp(DiagnosticsCurrentConfig().render_scale_percent, 50, 200);
-  const auto scaled = [](uint32_t recommended, uint32_t fallback, uint32_t maximum) {
-    const auto base = recommended ? recommended : fallback;
-    const auto value = static_cast<std::uint64_t>(base) * g_eye_scale_percent / 100;
-    const auto limit = maximum ? maximum : UINT32_MAX;
-    return static_cast<uint32_t>(std::max<std::uint64_t>(1, std::min<std::uint64_t>(value, limit)));
-  };
-  const uint32_t eye_width = scaled(g_rec_width, desc.Width, g_max_eye_width);
-  const uint32_t eye_height = scaled(g_rec_height, desc.Height, g_max_eye_height);
+  const auto chosen_size = ChooseEyeBufferSize(g_rec_width, g_rec_height, g_max_eye_width,
+                                               g_max_eye_height, desc.Width, desc.Height,
+                                               g_eye_scale_percent);
+  const uint32_t eye_width = chosen_size.width;
+  const uint32_t eye_height = chosen_size.height;
 
   uint32_t fmt_count = 0;
   if (!Ok(xrEnumerateSwapchainFormats(g_session, 0, &fmt_count, nullptr),
@@ -754,14 +788,18 @@ bool EnsureSwapchains(ID3D11Texture2D* backbuffer) {
     }
   }
 
-  for (int eye = 0; eye < 2; ++eye) {
-    XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+  // AA: MSAA sample count from config (FXAA/off = 1 sample + shader pass).
+    // Unsupported counts fall back to 1; the FXAA pass still runs when asked.
+    const int aa_mode = DiagnosticsCurrentConfig().aa_mode;
+    uint32_t want_samples = (aa_mode == 3) ? 4 : (aa_mode == 2) ? 2 : 1;
+    for (int eye = 0; eye < 2; ++eye) {
+      XrSwapchainCreateInfo info{XR_TYPE_SWAPCHAIN_CREATE_INFO};
     info.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT |
-                      XR_SWAPCHAIN_USAGE_SAMPLED_BIT |
+                        XR_SWAPCHAIN_USAGE_SAMPLED_BIT |
                       XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT |
                       XR_SWAPCHAIN_USAGE_TRANSFER_SRC_BIT;
     info.format = chosen;
-    info.sampleCount = 1;
+    info.sampleCount = want_samples;
     info.width = eye_width;
     info.height = eye_height;
     info.faceCount = 1;
@@ -784,12 +822,18 @@ bool EnsureSwapchains(ID3D11Texture2D* backbuffer) {
       if (!g_images[eye][i].texture) return false;
       // SteamVR swapchain textures are TYPELESS: a default RTV inherits the
       // typeless format and fails with E_INVALIDARG (found live). An
-      // explicit RTV format (the swapchain format) is required.
+      // explicit RTV format (the swapchain format) is required. MSAA
+      // swapchains need the MSAA RTV dimension; a failed MSAA RTV falls
+      // back to a single-sample swapchain for this eye.
       D3D11_RENDER_TARGET_VIEW_DESC rtv_desc{};
       rtv_desc.Format = (DXGI_FORMAT)chosen;
-      rtv_desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
-      rtv_desc.Texture2D.MipSlice = 0;
-      HRESULT hr = g_device->CreateRenderTargetView(
+      if (info.sampleCount > 1) {
+          rtv_desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DMS;
+        } else {
+          rtv_desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+          rtv_desc.Texture2D.MipSlice = 0;
+        }
+        HRESULT hr = g_device->CreateRenderTargetView(
           g_images[eye][i].texture, &rtv_desc, &g_rtvs[eye][i]);
       if (FAILED(hr) || !g_rtvs[eye][i]) {
         D3D11_TEXTURE2D_DESC td{};
@@ -812,7 +856,8 @@ bool EnsureSwapchains(ID3D11Texture2D* backbuffer) {
            "(runtime recommended %ux%u max %ux%u; restart to change scale)",
            g_eye_width, g_eye_height, (int)chosen,
            (unsigned)g_images[0].size(), (unsigned)g_images[1].size(),
-           g_eye_scale_percent, g_rec_width, g_rec_height, g_max_eye_width, g_max_eye_height);
+           g_eye_scale_percent,
+           g_rec_width, g_rec_height, g_max_eye_width, g_max_eye_height);
   return true;
 }
 
@@ -889,7 +934,7 @@ void XrOnDeviceCaptured(void* d3d11_device) {
     if (!g_get_display_refresh_rate)
       DSVR_WARN("XR: advertised display refresh query unavailable; using predicted period");
   }
-  DSVR_LOG("XR: instance created (physical refresh query %s)",
+  DSVR_LOG("XR: instance created (physical refresh observation %s; FPS Unlock dependency owns app pacing)",
            g_get_display_refresh_rate ? "enabled" : "unavailable");
 
   XrInstanceProperties props{XR_TYPE_INSTANCE_PROPERTIES};
@@ -1243,26 +1288,42 @@ void XrSubmitMonoFrame(void* backbuffer_texture2d) {
       // Raw reading: manual override (config or F8) outranks the title
       // heuristic. Only the debounced snapshot may change presentation;
       // the native all-menu detector is still pending (H2), so in-game
-      // menus remain manual (F8) -- do not claim otherwise.
-      const MenuState raw_menu =
-          (presentation_cfg.sanctuary_override ||
-           g_sanctuary_override.load() || ModMenuVisible() ||
-           CalibrationGetStatus().screen_visible)
-              ? MenuState::ReadingMenu
-              : (!g_gameplay_observed || CameraIsTitle()) ? MenuState::FrontEnd : MenuState::Gameplay;
+      // menus remain manual (F8) -- do not claim otherwise. Loading (no
+      // gameplay sample yet) and non-3D cutscenes force theater: they are
+        // never immersive, and the stick must read as menu navigation there.
+        // Gameplay itself is immersive by default (headlook_enabled=true);
+        // [vr] gameplay_theater=true is the manual flat-screen escape.
+        const bool loading = !g_gameplay_observed;
+        const bool cutscene = CameraNativeCutscene();
+        // Two questions that used to be one boolean: does a panel need the
+          // pointer/stick route, and should the game image be replaced by a
+          // head-anchored canvas. The calibration screen is drawn INTO the game
+          // image, so it routes input but never takes the canvas -- taking it
+          // filled the view up close and hid the loading image behind it
+          // (live report 31 Oct 2026).
+          const MenuState raw_menu =
+              presentation_cfg.sanctuary_override ||
+                    g_sanctuary_override.load() || ModMenuVisible()
+                ? MenuState::ReadingMenu
+                : CalibrationGetStatus().screen_visible
+                      ? MenuState::CalibrationPanel
+                : (loading || cutscene || CameraIsTitle())
+                      ? MenuState::FrontEnd
+                      : MenuState::Gameplay;
       const unsigned long long gen_before =
           g_menu_debounce.Current().generation;
       const MenuSnapshot snap =
           g_menu_debounce.Feed(raw_menu, (long long)GetTickCount64());
       const bool title = snap.state == MenuState::FrontEnd;
-      const bool menu = MenuStateWantsSanctuary(snap.state);
-      const bool spatial_menu = menu && g_local_space;
-      if (snap.generation != gen_before) {
+      const bool menu = MenuStateWantsPanel(snap.state);
+      const bool spatial_menu =
+            MenuStateWantsSanctuary(snap.state) && g_local_space;
+        if (snap.generation != gen_before) {
         g_menu_anchored = false;
-        DSVR_LOG("XR: sanctuary %s (debounced state=%d gen=%llu); "
+          DSVR_LOG("XR: panel %s (debounced state=%d gen=%llu); "
                  "in-game automatic detection pending",
                  menu ? "open" : "closed", (int)snap.state,
-                 snap.generation);
+                   snap.generation);
       }
       g_menu_active.store(menu);
       if (g_recenter_menu.exchange(false)) g_menu_anchored = false;
@@ -1296,7 +1357,7 @@ void XrSubmitMonoFrame(void* backbuffer_texture2d) {
                      widest, g_vfov_rad * 57.29578f, g_fov_aspect);
           }
         }
-        g_immersive = cfg.headlook_enabled && !menu;
+        g_immersive = cfg.headlook_enabled && !cfg.gameplay_theater && !menu;
         if (g_immersive) {
           // Immersive mode: draw the FP image at the tangent-correct
           // position in each eye. Filling the whole eye buffer per eye
@@ -1311,61 +1372,103 @@ void XrSubmitMonoFrame(void* backbuffer_texture2d) {
           float tan_v = std::tan(immersive_vfov * 0.5f);
           float tan_h_game = tan_v * (camera_frame_at_entry.sequence
               ? camera_frame_at_entry.fov_aspect : g_fov_aspect);
-          for (int eye = 0; eye < 2; ++eye) {
-            float tl = std::tan(views[eye].fov.angleLeft);
-            float tr = std::tan(views[eye].fov.angleRight);
-            float x0 = TangentToFraction(-tan_h_game, tl, tr);
-            float x1 = TangentToFraction(tan_h_game, tl, tr);
-            g_screen_rect[eye][0] = x0 * g_eye_width;
-            // Vertical must be tangent-mapped too (it was full-height
-            // pixel-linear, which stretches the image increasingly
-            // toward the edges -- a visible warp on pitch). Fractions
-            // run from angleDown, pixel rows from angleUp.
-            float etu = std::tan(views[eye].fov.angleUp);
-            float etd = std::tan(views[eye].fov.angleDown);
-            float frac_lo = TangentToFraction(-tan_v, etd, etu);
-            float frac_hi = TangentToFraction(tan_v, etd, etu);
-            g_screen_rect[eye][1] = (1.0f - frac_hi) * g_eye_height;
-            g_screen_rect[eye][2] = (x1 - x0) * g_eye_width;
-            g_screen_rect[eye][3] = (frac_hi - frac_lo) * g_eye_height;
+          const SymmetricFrustum game{tan_h_game, tan_v, immersive_vfov,
+                camera_frame_at_entry.sequence ? camera_frame_at_entry.fov_aspect
+                                               : g_fov_aspect};
+            for (int eye = 0; eye < 2; ++eye) {
+            // One tested implementation for both the mono immersive path and
+            // the H3 hook (stereo_math.h SubRectForEye). Filling the whole eye
+            // buffer per eye put the image centre ~15 deg apart between eyes
+            // because the two frustums are mirror-asymmetric -- the eyes could
+            // not fuse it ("2 overlapping images"). Vertical is tangent-mapped
+            // too: a pixel-linear full-height form stretched the image
+            // increasingly toward the edges, a visible warp on pitch.
+            const EyeFrustum frustum{std::tan(views[eye].fov.angleLeft),
+                                       std::tan(views[eye].fov.angleRight),
+                                       std::tan(views[eye].fov.angleUp),
+                                       std::tan(views[eye].fov.angleDown)};
+            const EyeSubRect r = SubRectForEye(game, frustum);
+            g_screen_rect[eye][0] = r.x * g_eye_width;
+              g_screen_rect[eye][1] = r.y * g_eye_height;
+            g_screen_rect[eye][2] = r.w * g_eye_width;
+            g_screen_rect[eye][3] = r.h * g_eye_height;
           }
         } else {
         // Virtual-screen rects from each eye's (asymmetric) native FOV:
         // map desired tangent extents to pixel fractions of the eye buffer.
-        const EyeFrustum theater_eyes[2] = {
+        // Trigger held + right stick up/down resizes the window live: the
+          // stick Y nudges the FOV while the trigger is down, clamped to the
+          // same 30..110 deg range as the config slider. The stick vector
+          // lives in the pad bridge (VrPadHand), not the hand sample.
+          float theater_fov_deg = cfg.mono_screen_fov_deg;
+          {
+            VirtualPadState pad_now{};
+              float stick_y = 0.0f;
+              bool trigger_down = false;
+              if (InputLatestPad(pad_now)) {
+              stick_y = pad_now.thumb_ry / 32767.0f;
+                trigger_down = pad_now.right_trigger > 128;
+              }
+              if (trigger_down && std::isfinite(stick_y) &&
+                std::fabs(stick_y) > 0.25f) {
+                theater_fov_deg = std::clamp(
+                    theater_fov_deg + stick_y * 30.0f * 0.016f, 30.0f, 110.0f);
+              if (theater_fov_deg != cfg.mono_screen_fov_deg) {
+                  Config live = cfg;
+                  live.mono_screen_fov_deg = theater_fov_deg;
+                DiagnosticsRequestConfig(live, true);
+              }
+            }
+          }
+          const EyeFrustum theater_eyes[2] = {
               FrustumFromAngles(views[0].fov.angleLeft, views[0].fov.angleRight,
                                 views[0].fov.angleUp, views[0].fov.angleDown),
               FrustumFromAngles(views[1].fov.angleLeft, views[1].fov.angleRight,
                                 views[1].fov.angleUp, views[1].fov.angleDown)};
-          const auto requested_screen = TheaterScreenExtents(
-              cfg.mono_screen_fov_deg * 0.0174532925f, g_fov_aspect);
-          const auto theater_screen = FitTheaterScreenToEyes(
-              requested_screen, theater_eyes, g_fov_aspect);
-          const float tan_h = theater_screen.tan_half_h;
-          const float tan_v = theater_screen.tan_half_v;
+            // The panel IS the game image, so its aspect is the source image's
+            // own. Deriving it from the eye frustum instead (aspect 0.925 on
+          // this runtime) produced a near-square panel with the 2.39:1 game
+            // image letterboxed inside it: the image filled ~41% of the panel,
+          // so it read far away and blurry while the panel itself was far too
+          // wide (live report 31 Oct 2026). Ask the backbuffer directly:
+          // g_stage_w/h are only filled by PrepareMonoSource later in this
+          // same frame, so on the first frame and after a format change they
+          // still read 0.
+          D3D11_TEXTURE2D_DESC theater_source{};
+          backbuffer->GetDesc(&theater_source);
+          const float source_aspect =
+                theater_source.Height
+                    ? (float)theater_source.Width / (float)theater_source.Height
+                    : g_fov_aspect;
+            const auto requested_screen = TheaterScreenExtents(
+              theater_fov_deg * 0.0174532925f, source_aspect);
+            const auto eye_fitted = FitTheaterScreenToEyes(
+              requested_screen, theater_eyes, source_aspect);
+            // Pixel parity: never magnify the game image past its own source
+            // resolution, or the panel reads soft and jagged.
+            const auto theater_screen = FitTheaterScreenToPixels(
+              eye_fitted, theater_eyes, g_eye_width, g_eye_height,
+              theater_source.Width, theater_source.Height);
+          if (!g_theater_parity_logged &&
+              theater_screen.tan_half_h + 1e-6f < eye_fitted.tan_half_h) {
+            g_theater_parity_logged = true;
+            DSVR_LOG("XR: theater screen shrunk to source parity "
+                     "(%.1fdeg -> %.1fdeg; source %ux%u, eye %ux%u)",
+                     2.0f * std::atan(eye_fitted.tan_half_h) * 57.29578f,
+                     2.0f * std::atan(theater_screen.tan_half_h) * 57.29578f,
+                     theater_source.Width, theater_source.Height,
+                     g_eye_width, g_eye_height);
+          }
+          g_theater_pointer_fov_rad.store(2.0f * std::atan(theater_screen.tan_half_h), std::memory_order_relaxed);
           for (int eye = 0; eye < 2; ++eye) {
-          const float tl = theater_eyes[eye].tan_left;
-          const float tr = theater_eyes[eye].tan_right;
-          const float tu = theater_eyes[eye].tan_up;
-          const float td = theater_eyes[eye].tan_down;
-          float x0 = (-tan_h - tl) / (tr - tl);
-          float x1 = (tan_h - tl) / (tr - tl);
-          // Vertical uses the direct tangent->row mapping (row 0 = angleUp).
-          // The previous (1-y1) form inverted it and put the screen centre
-          // at 59.8% of buffer height vs the 40.2% optical centre -- the
-          // "image too low" report. Optical centre row is tu/(tu-td).
-          float y_top = (tu - tan_v) / (tu - td);
-          float y_bot = (tu + tan_v) / (tu - td);
-          g_screen_rect[eye][0] = x0 * g_eye_width;
-          // User-tuned centre: first rect sat at 59.8% buffer height (too
-          // low), pure optical centre at 40.2% (too high). 50% is the
-          // midpoint the user asked for ("middle of the last two").
-          g_screen_rect[eye][1] =
-              (0.5f - (y_bot - y_top) * 0.5f) * g_eye_height;
-          g_screen_rect[eye][2] = (x1 - x0) * g_eye_width;
-          g_screen_rect[eye][3] = (y_bot - y_top) * g_eye_height;
-          (void)y_top;
-        }
+              const PixelRect rect = TheaterRectForEye(
+                  theater_screen, theater_eyes[eye], (float)g_eye_width,
+                  (float)g_eye_height);
+              g_screen_rect[eye][0] = rect.x;
+              g_screen_rect[eye][1] = rect.y;
+              g_screen_rect[eye][2] = rect.w;
+              g_screen_rect[eye][3] = rect.h;
+          }
         }  // immersive vs theater rect
         if (spatial_menu) {
           // Reuse the left swapchain, with its aspect-fit content cropped
@@ -1625,6 +1728,12 @@ void XrSubmitMonoFrame(void* backbuffer_texture2d) {
 
 bool XrSessionRunning() { return g_running.load(); }
 bool XrMenuPresentationActive() {
+  // Every signal here is hard: no running session, a session the runtime is
+  // not showing, a faulted frame pump, or the debounced front-end reading.
+  // VISIBLE and FOCUSED both count as visible (PollEvents), so a focus blip
+  // cannot flip this on its own; MenuDebouncer already carries the hysteresis
+  // on the menu reading, and a missing camera sample must force theater at
+  // once (loading and non-3D cutscenes are never immersive).
   return !g_running.load() || !g_session_visible.load() || g_pump_failed.load() || g_menu_active.load();
 }
 void XrToggleSanctuary() {
@@ -1645,43 +1754,54 @@ bool XrLatestTrackingFrame(TrackingFrame& out) {
   return g_tracking_frames.Read(GetTickCount64(), 100, out);
 }
 
-MenuPointerState XrMenuPointerInput(unsigned display_width,
-                                    unsigned display_height) {
-  // Aim samples are located in g_space by InputPollFrame; the quad's
-  // composition-layer space is also g_space, so no tracking-space conversion
-  // is applied here. This getter is consumed on that same Present/render thread.
-  const bool spatial_menu = g_running.load() && g_menu_active.load() &&
-                            g_local_space;
+MenuPointerState XrMenuPointerInput(unsigned display_width, unsigned display_height) {
+  const Config cfg = DiagnosticsCurrentConfig();
+  const bool running = g_running.load();
+  const bool menu_surface = running && g_menu_active.load() && g_space && g_local_space;
+  const bool theater_screen = running && !menu_surface && g_space && (g_menu_active.load() || !cfg.headlook_enabled || cfg.gameplay_theater);
+  const bool pointer_surface = menu_surface || theater_screen;
   TrackingFrame frame{};
-  const bool fresh_frame = spatial_menu && XrLatestTrackingFrame(frame);
-  const HandSample& right = frame.hand[1];
-  bool tracking_valid = fresh_frame && right.aim_valid;
-  Vec3 forward{};
+  const bool fresh_frame = pointer_surface && XrLatestTrackingFrame(frame);
+  const unsigned hand_index = static_cast<unsigned>(WeaponHandIndex(cfg.dominant_hand_left));
+  const HandSample& hand = frame.hand[hand_index];
+  bool tracking_valid = fresh_frame && hand.aim_valid;
+  Vec3 direction{};
   if (tracking_valid) {
     float norm2 = 0.0f;
-    for (float component : right.aim_quat) norm2 += component * component;
+    for (float component : hand.aim_quat) norm2 += component * component;
     if (!std::isfinite(norm2) || norm2 <= 1e-6f) {
       tracking_valid = false;
     } else {
       const float inv_norm = 1.0f / std::sqrt(norm2);
-      forward = QuatRotate({0,0,-1},right.aim_quat[0] * inv_norm,
-                               right.aim_quat[1] * inv_norm,
-                               right.aim_quat[2] * inv_norm,
-                               right.aim_quat[3] * inv_norm);
+      direction = QuatRotate({0, 0, -1}, hand.aim_quat[0] * inv_norm,
+                             hand.aim_quat[1] * inv_norm,
+                             hand.aim_quat[2] * inv_norm,
+                             hand.aim_quat[3] * inv_norm);
     }
   }
-  const bool select = right.trigger_held && !CalibrationCapturesInput();
-  const Config cfg = DiagnosticsCurrentConfig();
-  const bool title = g_menu_debounce.Current().state == MenuState::FrontEnd;
   const float aspect = display_height
       ? static_cast<float>(display_width) / display_height : 0.0f;
-  auto pointer = ProjectMenuPointer(spatial_menu, g_menu_anchored, tracking_valid,
-      select, {frame.head_pos[0], frame.head_pos[1], frame.head_pos[2]},
-      {right.aim_pos[0], right.aim_pos[1], right.aim_pos[2]}, forward,
+  if (theater_screen) {
+    float fov = g_theater_pointer_fov_rad.load(std::memory_order_relaxed);
+    if (!std::isfinite(fov) || fov <= 0.0f)
+      fov = cfg.mono_screen_fov_deg * 0.0174532925f;
+    auto pointer = ProjectTheaterPointer(
+        true, tracking_valid, hand.trigger_held,
+        {frame.head_pos[0], frame.head_pos[1], frame.head_pos[2]},
+        frame.head_quat, {hand.aim_pos[0], hand.aim_pos[1], hand.aim_pos[2]},
+        direction, cfg.menu_distance_m, fov, aspect, display_width, display_height);
+    pointer.navigation_select = fresh_frame && hand.primary_held;
+    return pointer;
+  }
+  const bool title = g_menu_debounce.Current().state == MenuState::FrontEnd;
+  auto pointer = ProjectMenuPointer(
+      menu_surface, g_menu_anchored, tracking_valid, hand.trigger_held,
+      {frame.head_pos[0], frame.head_pos[1], frame.head_pos[2]},
+      {hand.aim_pos[0], hand.aim_pos[1], hand.aim_pos[2]}, direction,
       g_menu_anchor, MenuWidth(cfg.menu_distance_m,
-          title ? 60.0f : cfg.menu_reading_fov_deg), aspect,
-      display_width, display_height);
-  pointer.navigation_select=fresh_frame && right.primary_held;
+          title ? 60.0f : cfg.menu_reading_fov_deg),
+      aspect, display_width, display_height);
+  pointer.navigation_select = fresh_frame && hand.primary_held;
   return pointer;
 }
 
@@ -1706,9 +1826,11 @@ std::uint64_t XrAppliedCameraSequence() {
 bool XrEffectiveRate(EffectiveRate& out) {
   std::lock_guard<std::mutex> lock(g_rate_mutex);
   if (g_rate_snapshot.generation != 0) { out = g_rate_snapshot; return true; }
-  out = ResolveEffectiveRate(DiagnosticsCurrentConfig().frame_limit_fps, 0);
+  out = ResolveEffectiveRate(0, 0);
   return true;
 }
+
+double XrLastDisplayRefreshHz() { return g_display_refresh_hz.load(); }
 
 bool XrRenderMetricsSnapshot(RenderMetrics& out) {
   std::lock_guard<std::mutex> lock(g_metrics_mutex);

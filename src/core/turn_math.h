@@ -24,7 +24,7 @@ struct TurnParams {
   bool snap_enabled = false;
   bool smooth_enabled = true;
   float snap_degrees = 45.0f;         // [vr] snap_turn_degrees, 15..90
-  float smooth_speed_dps = 240.0f;    // [vr] smooth_turn_speed_dps, matches Config
+  float smooth_speed_dps = 360.0f;    // [vr] smooth_turn_speed_dps, matches Config
   float deadzone = 0.25f;             // |stick| below this is centred
   float snap_trigger = 0.5f;          // snap fires crossing this
   float snap_rearm = 0.3f;            // re-arms below this (< trigger)

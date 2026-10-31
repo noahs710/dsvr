@@ -18,6 +18,9 @@ enum class MenuState {
   FrontEnd,     // title / main menu
   ReadingMenu,  // inventory, equipment, status, pause
   OtherMenu,    // shops, bonfire, dialogue, confirmations
+  // Our own calibration screen: a panel drawn into the game image. It needs
+  // the pointer/stick route but must never take the head-anchored canvas.
+  CalibrationPanel,
 };
 
 struct MenuSnapshot {
@@ -67,12 +70,22 @@ class MenuDebouncer {
   long long candidate_since_ = 0;
 };
 
-// Presentation policy: only these states take the spatial canvas.
-// Gameplay and Unknown never do (Unknown = detector absent/unverified,
-// which per spec stays disabled and logs its limitation).
+// Presentation policy: only these states take the spatial canvas (a
+// head-anchored quad that replaces the game image). Gameplay and Unknown never
+// do (Unknown = detector absent/unverified, which per spec stays disabled and
+// logs its limitation).
 inline bool MenuStateWantsSanctuary(MenuState s) {
   return s == MenuState::FrontEnd || s == MenuState::ReadingMenu ||
          s == MenuState::OtherMenu;
+}
+
+// Input policy: these states need the pointer/stick route aimed at a panel.
+// Wider than the canvas set: the calibration panel lives inside the flat
+// theater image, so it navigates without ever becoming a canvas. Conflating
+// the two questions is what put the calibration screen in the user's face and
+// hid the loading image behind it (live report 31 Oct 2026).
+inline bool MenuStateWantsPanel(MenuState s) {
+  return MenuStateWantsSanctuary(s) || s == MenuState::CalibrationPanel;
 }
 
 }  // namespace dsvr

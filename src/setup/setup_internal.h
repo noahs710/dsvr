@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 
+#include "../core/perf_fit.h"
+
 namespace setup {
 
 using LogFn = std::function<void(const std::wstring& line)>;
@@ -34,8 +36,56 @@ struct InstallState {
 };
 InstallState InstallStateOf(const std::wstring& exe);
 
+dsvr::HardwareSpec ProbeHardware();  // fail-soft: unknown fields stay zero (lowest tier)
+
 bool FirewallSupported(const std::wstring& exe, const LogFn& log, bool add);
 bool FirewallBlocked();  // true when both DSVR block rules exist
+
+// ---------------------------------------------------------------------------
+// DSR-FPS-Unlock dependency (the chain-loaded frame-rate owner).
+//
+// DSVR never caps the game itself; high-rate pacing belongs to this external
+// MIT dependency, loaded through the loader's chain_proxy. The pin below is the
+// exact GitHub release asset this build installs: the URL is allow-listed to one
+// host/path, and both the ZIP and the extracted DLL must hash to the pinned
+// digests before anything is written next to the game.
+// ---------------------------------------------------------------------------
+struct FpsUnlockPin {
+  const wchar_t* url = L"";
+  const wchar_t* zip_sha256 = L"";
+  const wchar_t* dll_sha256 = L"";
+  const wchar_t* chain_file = L"dinput8-chain.dll";  // installed name
+  const wchar_t* ini_file = L"DSR-FPS-Unlock.ini";
+};
+const FpsUnlockPin& FpsUnlockPinInfo();
+
+// True only for the exact pinned https://github.com release asset. Anything
+// else (http, a mirror, a redirect host other than the release CDN, a
+// different path) is refused before a byte is fetched.
+bool FpsUnlockUrlAllowed(const std::wstring& url);
+
+// What the game folder holds for the dependency right now.
+struct FpsUnlockState {
+  bool chain_present = false;  // dinput8-chain.dll next to the exe
+  bool ini_present = false;    // DSR-FPS-Unlock.ini next to the exe
+  bool proxy_set = false;      // DSVR.toml chain_proxy names the chain file
+  bool installed() const { return chain_present && ini_present && proxy_set; }
+};
+FpsUnlockState FpsUnlockStateOf(const std::wstring& exe);
+
+// Download the pinned asset, verify it, and install it as the chain proxy.
+// Refuses while the game is running, snapshots anything it is about to
+// overwrite into %TEMP% first, and never touches the root dinput8.dll.
+// Returns 0 on success, non-zero on failure (reasons go to `log`).
+int InstallFpsUnlock(const std::wstring& exe, const LogFn& log,
+                     const ConfirmFn& confirm);
+
+// Download the user-requested TPUP 1.5 release to the Windows Downloads folder
+// and extract it there. The tool is never launched and game files are untouched.
+const wchar_t* TextureToolsUrl();
+bool TextureToolsUrlAllowed(const std::wstring& url);
+int DownloadTextureTools(const LogFn& log, const ConfirmFn& confirm,
+                         std::wstring& extracted_folder);
 
 struct InstallOptions {
   bool unattended = false;  // --yes: skip safe prompts, never auto-destroy

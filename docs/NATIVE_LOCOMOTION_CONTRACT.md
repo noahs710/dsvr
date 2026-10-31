@@ -4,11 +4,19 @@ Status: **UNRESOLVED — no native motor binding.** E1 orientation selection is
 finished (Head default, or selected/non-dominant hand with head fallback); the
 follow path and every owner below remain unattributed. No direct root or
 player-facing write is enabled. Task order and gates belong to the
-[execution guide](superpowers/plans/2026-10-21-native-conversion-execution.md)
-(E1–E6); architecture to [ENGINEERING](ENGINEERING.md); thresholds to the
+[cockpit plan](../MODDING_PLAN.md) and lane E
+(../.empryo/cockpit/lanes/E.md, E1–E6); architecture to [ENGINEERING](ENGINEERING.md); thresholds to the
 [runbook](VERIFICATION_RUNBOOK.md).
 
 ## Owner table
+
+28 October source checkpoint: tests/test_input.cpp exercises InputPollFrame /
+InputLatestPad at five non-cardinal angles during the deferred B tap and its
+release. Both axes preserve continuous angle; this is input delivery evidence,
+not a native dodge fix. The requested 360-degree dodge (including lock-on)
+requires locating the roll-direction selection/root-motion consumer after the
+pad seam, then verifying resolved displacement, collision, stamina and native
+invulnerability. No roll-motor address or write is inferred here.
 
 | Owner | Status | Evidence pointer |
 |---|---|---|

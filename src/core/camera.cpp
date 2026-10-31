@@ -30,6 +30,19 @@ bool FinitePos(Vec3 v) {
          std::fabs(v.z) < 10000.0f;
 }
 
+// A refused first-person application is the gate on the whole immersive path:
+// while it stays closed the mono/theater panel is the only presentation, the IK
+// body never commits hands and head-directed locomotion never publishes. That
+// refusal used to be silent, so name the closed predicate once per change (the
+// same pattern as LogBridgeReadiness) instead of leaving a flat low-quality view
+// with no clue which read failed.
+std::atomic<unsigned> g_apply_gate{0};
+void LogApplyRefusal(unsigned gate, const char* why) {
+  if (g_apply_gate.load(std::memory_order_relaxed) == gate) return;
+  g_apply_gate.store(gate, std::memory_order_relaxed);
+  DSVR_WARN("Camera: first-person apply refused (%s); immersive view unavailable", why);
+}
+
 // Player physics pos (verified chain): WorldChrMan -> PlayerIns ->
 // +0x7b8 -> +0x2e0 -> +0x120. Returns false at title/loading.
 bool ReadPlayerPos(Vec3& out, std::uintptr_t* player_out = nullptr) {
@@ -171,6 +184,12 @@ bool g_traced = false;
 // Present reads this value, never an unsynchronized live camera pointer.
 std::atomic<unsigned long long> g_title_sample{0};
 std::atomic<unsigned long long> g_gameplay_sample{0};
+// Cutscene latch: scripted camera teleports the follow-cam far without
+// player motion. Set by the owning callback, read by Present. A gameplay
+// sample clears it; stale (>1 s) clears itself.
+std::atomic<unsigned long long> g_cutscene_at{0};
+Vec3 g_cutscene_camera_pos{}, g_cutscene_player_pos{};
+bool g_cutscene_sample_valid = false;
 
 bool IsTitleCamera(Vec3 pos) {
   // Title/default camera sits at (0,4,-8) (observed live, twice).
@@ -193,6 +212,17 @@ bool CameraGameplayReady() {
   if (!sample)return false;
   const auto at=sample-1,now=GetTickCount64();
   return now>=at && now-at<=250;
+}
+
+bool CameraNativeCutscene() {
+  const auto at = g_cutscene_at.load(std::memory_order_acquire);
+  if (!at) return false;
+  const auto now = GetTickCount64();
+  if (now < at || now - at > 1000) {
+    g_cutscene_at.store(0, std::memory_order_release);
+    return false;
+  }
+  return true;
 }
 
 void CameraReadLabObservation(void* self, LabObservation& out) {
@@ -274,7 +304,10 @@ bool CameraApplyFirstPerson(void* follow_cam_self, float qx, float qy,
   if (!std::isfinite(eye_height) || !(eye_height > 0.f) ||
       !std::isfinite(world_scale) || !(world_scale > 0.f) ||
       (mapping && (!mapping->valid || mapping->world_scale != world_scale ||
-                   mapping->eye_height != eye_height))) return false;
+                   mapping->eye_height != eye_height))) {
+    LogApplyRefusal(1, "calibration mapping invalid or non-finite height/scale");
+    return false;
+  }
   static std::uint64_t recenter_seen=0;
   const auto recenter=CalibrationRecenterGeneration();
   if (recenter_seen!=recenter) {
@@ -283,13 +316,27 @@ bool CameraApplyFirstPerson(void* follow_cam_self, float qx, float qy,
     g_reference_captured=false;
     g_view_heading.Reset();
   }
-  if (!follow_cam_self) return false;
+  if (!follow_cam_self) {
+    LogApplyRefusal(2, "follow camera pointer null");
+    return false;
+  }
   CpuStageScope reads_time(CpuStage::CameraReads);
   Vec3 physics;
   Vec3 gr, gu, gf, gp;
-  if (!ReadPlayerPos(physics) || !ReadFollowMatrix(follow_cam_self, gr, gu, gf,
-                                                  gp) ||
-      IsTitleCamera(gp)) {
+  if (!ReadPlayerPos(physics)) {
+    LogApplyRefusal(3, "player physics position unreadable (title/loading/invalid)");
+    g_captured = false;
+    g_wrote = false;
+    return false;
+  }
+  if (!ReadFollowMatrix(follow_cam_self, gr, gu, gf, gp)) {
+    LogApplyRefusal(4, "follow-camera matrix unreadable or non-finite basis");
+    g_captured = false;
+    g_wrote = false;
+    return false;
+  }
+  if (IsTitleCamera(gp)) {
+    LogApplyRefusal(5, "title camera");
     g_captured = false;
     g_wrote = false;
     return false;
@@ -310,9 +357,14 @@ bool CameraApplyFirstPerson(void* follow_cam_self, float qx, float qy,
                               player.z - g_last_player.z}) > 3.0f;
   if (!g_captured || teleported) {
     Vec3 native_forward{};
-    if (!ReadPlayerRenderFacing(native_forward) ||
-        (!g_view_heading.IsReady() && !g_view_heading.SeedOnce(native_forward)))
+    if (!ReadPlayerRenderFacing(native_forward)) {
+      LogApplyRefusal(6, "native render facing unreadable at anchor bind");
       return false;
+    }
+    if (!g_view_heading.IsReady() && !g_view_heading.SeedOnce(native_forward)) {
+      LogApplyRefusal(7, "VR heading seed refused");
+      return false;
+    }
     ArmIkResetCalibration();  // transient rig binding only; saved user measurements survive
     if(!g_reference_captured) {
       const float tracked[4] = {qx, qy, qz, qw};
@@ -354,8 +406,9 @@ bool CameraApplyFirstPerson(void* follow_cam_self, float qx, float qy,
   if (g_have_last_player && !teleported && std::isfinite(world_scale) &&
       world_scale > 0.0f) {
     RoomscaleMotion motion{};
-    if (InputLatestRoomscaleMotion(motion) && motion.active &&
-        motion.space_epoch != 0) {
+    if (InputLatestRoomscaleMotion(motion) && motion.active && motion.space_epoch != 0 &&
+              motion.calibration_revision == g_tracking_mapping.calibration_revision &&
+              motion.world_scale == world_scale) {
       const Vec3 root_delta{player.x - g_last_player.x,
                             player.y - g_last_player.y,
                             player.z - g_last_player.z};
@@ -517,6 +570,7 @@ bool CameraApplyFirstPerson(void* follow_cam_self, float qx, float qy,
   }
   g_head_right = hb.r; g_head_up = hb.u; g_head_fwd = hb.f;
   g_wrote = true;
+  g_apply_gate.store(0, std::memory_order_relaxed);  // a good frame clears the refusal note
   if (++g_frames % 300 == 0) {
     // Head angles relative to the body frame, for log diagnosis only.
     float hyaw = std::atan2(VDot(f, g_right0), VDot(f, g_fwd0));
@@ -552,6 +606,34 @@ void CameraTraceFollowCam(void* follow_cam_self) {
   const bool title = IsTitleCamera(pos);
   Vec3 player{};
   const bool gameplay=!title && ReadPlayerPos(player);
+  // A large camera teleport with a nearly stationary player identifies a
+  // scripted view transition. Compare consecutive samples in native world units.
+  if (title) {
+    g_cutscene_sample_valid = false;
+    g_cutscene_at.store(0, std::memory_order_release);
+  } else if (gameplay && g_tracking_mapping.valid &&
+             std::isfinite(g_tracking_mapping.world_scale) &&
+             g_tracking_mapping.world_scale > 0.0f) {
+    if (g_cutscene_sample_valid) {
+      const Vec3 camera_delta{pos.x - g_cutscene_camera_pos.x,
+                              pos.y - g_cutscene_camera_pos.y,
+                              pos.z - g_cutscene_camera_pos.z};
+      const Vec3 player_delta{player.x - g_cutscene_player_pos.x,
+                              player.y - g_cutscene_player_pos.y,
+                              player.z - g_cutscene_player_pos.z};
+      const float units_per_meter = g_tracking_mapping.world_scale;
+      if (VLen(camera_delta) > 3.0f * units_per_meter &&
+          VLen(player_delta) < 0.25f * units_per_meter)
+        g_cutscene_at.store(GetTickCount64(), std::memory_order_release);
+      else if (VLen(player_delta) >= 0.25f * units_per_meter)
+        g_cutscene_at.store(0, std::memory_order_release);
+    }
+    g_cutscene_camera_pos = pos;
+    g_cutscene_player_pos = player;
+    g_cutscene_sample_valid = true;
+  } else {
+    g_cutscene_sample_valid = false;
+  }
   g_gameplay_sample.store(gameplay?GetTickCount64()+1:0,std::memory_order_release);
   g_title_sample.store(((GetTickCount64()+1) << 1) | (title ? 1ull : 0ull),
                        std::memory_order_release);
@@ -632,8 +714,7 @@ void CameraPublishHeadDirectedLocomotion(std::uint64_t space_epoch) {
   // only - native's own turn assist rotates the capsule toward the direction
   // the camera-relative stick asks for, so vision and travel stay oriented
   // without any player-facing write.
-  InputPublishHeadDirectedLocomotion(g_last_planar_heading, g_last_planar_heading,
-                                     space_epoch);
+  
   RoomscaleBasis roomscale{};
   roomscale.tracking_right = HeadTranslationFromReference(
       {1, 0, 0}, g_q0, g_right0, g_up0, g_fwd0, 1.0f);
@@ -646,7 +727,7 @@ void CameraPublishHeadDirectedLocomotion(std::uint64_t space_epoch) {
   roomscale.world_scale = g_tracking_mapping.world_scale;
   roomscale.calibration_revision = g_tracking_mapping.calibration_revision;
   roomscale.valid = true;
-  InputPublishRoomscaleBasis(roomscale);
+  InputPublishCameraMotionBasis(roomscale, g_last_planar_heading, g_last_planar_heading, space_epoch);
 }
 
 }  // namespace dsvr

@@ -3,9 +3,34 @@
 #include <openxr/openxr.h>
 #include <cmath>
 #include <cstdint>
+#include <cstddef>
 #include <thread>
 
 namespace dsvr {
+
+// The single image-release order, shared by the stereo frame's per-eye leases
+// and the mono path's per-eye leases: a timed-out wait is retried rather than
+// abandoned, an unwaited image is never released, and a released lease forgets
+// its chain so a later acquire may take it. True when every slot is empty.
+template <class Lease, std::size_t N>
+inline bool DrainSwapchainLeases(Lease (&leases)[N]) {
+  bool drained = true;
+  for (auto& lease : leases) {
+    if (!lease.chain) continue;
+    if (!lease.ready) {
+      XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+      wait.timeout = 0;
+      const auto result = xrWaitSwapchainImage(lease.chain, &wait);
+      lease.ready = XR_SUCCEEDED(result) && result != XR_TIMEOUT_EXPIRED;
+    }
+    if (lease.ready) {
+      XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+      if (XR_SUCCEEDED(xrReleaseSwapchainImage(lease.chain, &release))) lease = {};
+    }
+    if (lease.chain) drained = false;
+  }
+  return drained;
+}
 
 // Owns the real XR frame/image call order, not native render provenance.
 // A timed-out acquisition stays owned until a later wait succeeds; never
@@ -105,22 +130,7 @@ class XrStereoFrame {
 
   bool Drain() {
     if (!OnOwner()) return false;
-    bool drained = true;
-    for (auto& lease : leases_) {
-      if (!lease.chain) continue;
-      if (!lease.ready) {
-        XrSwapchainImageWaitInfo wait{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
-        wait.timeout = 0;
-        const auto result = xrWaitSwapchainImage(lease.chain, &wait);
-        lease.ready = XR_SUCCEEDED(result) && result != XR_TIMEOUT_EXPIRED;
-      }
-      if (lease.ready) {
-        XrSwapchainImageReleaseInfo release{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-        if (XR_SUCCEEDED(xrReleaseSwapchainImage(lease.chain, &release))) lease = {};
-      }
-      if (lease.chain) drained = false;
-    }
-    return drained;
+    return DrainSwapchainLeases(leases_);
   }
 
   bool Busy() const { return active_ || faulted_ || leases_[0].chain || leases_[1].chain; }

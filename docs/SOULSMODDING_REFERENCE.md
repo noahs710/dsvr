@@ -31,6 +31,50 @@ images/attachments and every external link have not been exhaustively reviewed.
 One unrelated FXR spreadsheet export failed. Smithbox's recursive source tree
 exceeded the collection size bound; its README was recovered separately.
 
+## Tool fit for DSR work (29 October 2026)
+
+The Souls Modding Wiki's tool database and upstream project documentation confirm
+these practical routes. This is tool-scope evidence, not proof that a particular
+DSR asset or runtime behavior is correctly understood.
+
+- **Smithbox**: maps, params, text, models/materials, file browser and asset
+  extraction; its current upstream README lists DSR/DS1 support. It says DSR
+  files need not be unpacked for its editors. It is not the EMEVD/ESD editor.
+- **WitchyBND**: unpack/repack supported binders and compression formats. Prefer
+  only when a workflow requires loose files or direct archive inspection; use a
+  mod loader rather than overwrite game files.
+- **Soulstruct**: strongest DSR-specific suite among these options: maps, events,
+  params, text, AI and talk/ESD, with project import/edit/export and Python APIs.
+  Its upstream compatibility list distinguishes which features support DS1R.
+- **DarkScript 3**: EMEVD event editing. **ESDLang** converts ESD to/from its
+  source language; **ESDStudio** offers a GUI over esdtool. They are alternatives
+  by workflow, not interchangeable evidence for runtime behavior.
+- **FLVER Editor**: inspect/edit FLVER models, materials and dummy polys;
+  Soulstruct for Blender is a DS1R-specific import/export alternative.
+- **DSAnimStudio**: inspect/edit TAE animation events; verify the DS1 template
+  and game-specific event types before editing.
+- **FXR Playground**: the wiki catalog scopes it to DS3/Sekiro/ER/AC6, not DS1R.
+  Do not select it for DSR FXR editing without a tool-specific compatibility
+  demonstration; the catalog instead points to WitchyBND's integrated DS1 FFXMLR
+  handling (noted as more current than standalone FXMLR).
+- **HkbEditor**: listed for DS3/Sekiro/ER/Nightreign, not DSR. Treat DSR HKX
+  behavior editing as unsupported by this listing; the catalog separately lists
+  Havok tooling, but not a validated DSR HkbEditor path.
+- **yonder**: listed for ER/Nightreign Wwise soundbanks, not DSR. Do not treat it
+  as a DSR audio-bank editor without format/game support evidence.
+
+For the current native-combat investigation, these tools can establish asset,
+parameter, animation-event, map and script hypotheses; none establishes the
+native damage submission ABI, caller ownership, or applied player/enemy HP. Keep
+those claims behind the pinned Ghidra/native evidence in
+[NATIVE_MELEE_CONTRACT.md](NATIVE_MELEE_CONTRACT.md). Preserve the existing
+read-only game-data policy and never copy cross-game offsets or schemas into
+native memory layouts.
+
+Sources: [Souls Modding tool database][tools]; [Smithbox upstream README][p7];
+[Soulstruct upstream README][p8]. Captured 29 October 2026. The tool database is
+community-maintained; compatibility labels may be incomplete or stale.
+
 ## Evidence levels and compatibility
 
 1. **Wiki observation:** community-authored descriptions and enum labels. Useful
@@ -88,6 +132,17 @@ and [editor BehaviorParam reader][p2-behavior] describe complementary pieces:
   `sfxVariationId`, action stamina/MP costs, category and humanity cost.
   `refType` 0/1/2 selects Attack/Bullet/SpEffect. AtkParam_PC and AtkParam_Npc
   must not be conflated merely because they share a definition.
+ - 29 October 2026 measurement of this snapshot, which pins the last sentence:
+  `refType` is **not** the Pc/Npc selector. `BehaviorParam.param` (2401 rows,
+  stride 32) resolves its `refId` (+0x0C) into `AtkParam_Npc` for 2146 rows
+  (89.4%) across all three refType values, and into `AtkParam_Pc` for 22. The
+  player half is a separate file that shares the layout,
+  `BehaviorParam_PC.param` (3163 rows, stride 32), whose `refId` resolves into
+  `AtkParam_Pc` for 3124 rows (98.8%). So the Pc/Npc choice is made by which
+  behaviour table the caller reads, and the engine addresses that choice by
+  table index, not by a column: `FUN_140531bc0` builds the 39-entry
+  (name, index) list in which `AtkParam_Npc` = 7, `AtkParam_Pc` = 8,
+  `BehaviorParam` = 12 and `BehaviorParam_PC` = 13.
 - TAE type **2** is `BulletBehavior`; type **5** is `CommonBehavior` in the DS1
   template. These are separate event forms, not interchangeable melee calls.
 
@@ -120,6 +175,22 @@ the selected game's definition before use.
 | `0x7C` | `hitSourceType` | Wiki enum: 0 weapon, 1 body, 2..33 part 0..31. Resolve the owning model, not just the numeric dummy ID. |
 | `0x7D` | `throwFlag` | Throw transition versus throw itself are different cases. |
 | `0x7E` bits | `disableGuard`, `disableStaminaAttack`, `disableHitSpEffect`, AI miss notification, repeated hit SFX, arrow/ghost flags, `isDisableNoDamage` | Ignoring guard, suppressing guard stamina damage and ignoring ordinary i-frames are distinct flags. |
+
+29 October 2026 offline corroboration: the table above was reproduced
+independently from the shipped data, not from the wiki. `tools/dsr_param.py`
+measures `ATK_PARAM_ST` rows at **stride 128** (AtkParam_Pc 1397 rows,
+AtkParam_Npc 2164; `lastRowOffset + 128 == dataEnd` exactly), and a cumulative
+walk of the paramdef field records lands on the same offsets the wiki lists for
+`0x00..0x2C` and for the s16 dummy-polygon pairs at `0x2C`/`0x34`. The wiki
+table also ends at `0x7E`, which fits a 128-byte row exactly — so where our
+paramdef field walk declares more than 128 bytes, the walk is wrong and the
+wiki is right. Do not "correct" the table from the walk. Distribution measured
+over the shipped rows: `hit0_DmyPoly2 >= 0` on 823/1396 PC and 1632/2164 NPC
+rows, i.e. only those rows are true capsules and the rest are spheres, which is
+the upstream "-1 means sphere" rule observed rather than assumed. PC radii
+min/median/max 0.010/0.350/5.000 m (p99 1.200), NPC 0.050/0.700/12.000 m
+(p99 6.500). See MODLOG for the paramdef record-layout gap that still blocks
+the tail fields.
 
 The wiki describes `isDisableNoDamage` as bypassing ordinary i-frames but not
 complete invulnerability. It is not proof that a roll or parry succeeded in a

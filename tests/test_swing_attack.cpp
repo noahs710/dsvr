@@ -3,9 +3,6 @@
 #include <cmath>
 #include <cstdio>
 
-// The physical attack bridge: a swing only attacks when it starts from a real
-// backswing, one swing is one attack, and speed plus thrust/slash decide
-// whether the game sees a light or a strong attack.
 int main() {
   int failures = 0;
   auto check = [&](bool ok, const char* what) {
@@ -15,249 +12,95 @@ int main() {
     }
   };
   using namespace dsvr;
+  const SwingAttackParams params{};
 
-  SwingAttackParams p;  // shipped defaults
-  long long t = 0;
-  auto frame = [&](SwingAttackTrigger& tr, float speed, bool thrust) {
-    t += 11;  // 90 Hz
-    return tr.Feed(speed, thrust, t, p);
-  };
-  auto hold = [&](SwingAttackTrigger& tr, float speed, bool thrust, int ms,
-                  int& fires, bool& light_any, bool& heavy_any) {
-    SwingAttackOutput last{};
-    for (int elapsed = 0; elapsed < ms; elapsed += 11) {
-      last = frame(tr, speed, thrust);
-      if (last.fired) ++fires;
-      if (last.light) light_any = true;
-      if (last.heavy) heavy_any = true;
-    }
-    return last;
-  };
-  auto rest = [&](SwingAttackTrigger& tr, int ms) {
-    int fires = 0;
-    bool light = false, heavy = false;
-    return hold(tr, 0.0f, false, ms, fires, light, heavy), fires;
-  };
-
-  // Waving without ever lowering the arm is not an attack.
+  // The first threshold crossing requests the native attack immediately. Keep
+  // holding it through the physical swing and release only in the stop-speed band.
   {
-    SwingAttackTrigger tr;
-    int fires = 0;
-    bool light = false, heavy = false;
-    hold(tr, 6.0f, false, 900, fires, light, heavy);
-    check(fires == 0 && !light && !heavy, "a continuous wave never attacks");
-    check(!tr.Armed(), "an arm that never rests is never armed");
+    SwingAttackTrigger trigger;
+    trigger.Feed(0.0f, false, 0, params);  // one stop-band sample arms the motion edge
+    const auto start = trigger.Feed(params.slash_speed_min, false, 11, params);
+    check(start.fired && start.light && !start.heavy,
+          "slash threshold starts the native attack on this sample");
+    const auto moving = trigger.Feed(1.2f, false, 20, params);
+    check(moving.light && !moving.fired,
+          "native attack stays held while sword speed exceeds the stop threshold");
+    const auto stopped = trigger.Feed(params.rest_speed_max, false, 30, params);
+    check(!stopped.light && !stopped.heavy && !trigger.Holding(),
+          "motion slowing into the stop band ends the attack hold");
+    const auto next = trigger.Feed(params.slash_speed_min, false, 31, params);
+    check(next.fired && next.light,
+          "a following swing starts immediately without a timed cooldown");
   }
 
-  // Backswing then a moderate slash: exactly one light attack.
+  // Attack weight is selected at animation start, while the native animation
+  // and collision system retains its normal timing and damage rules.
   {
-    SwingAttackTrigger tr;
-    rest(tr, 320);
-    check(tr.Armed(), "resting the arm arms the next swing");
-    int fires = 0;
-    bool light = false, heavy = false;
-    hold(tr, 3.0f, false, 220, fires, light, heavy);
-    check(fires == 1 && light && !heavy, "a moderate slash is one light attack");
+    SwingAttackTrigger trigger;
+    trigger.Feed(0.0f, false, 0, params);
+    const auto strong = trigger.Feed(params.slash_heavy_min, false, 11, params);
+    check(strong.fired && strong.heavy && !strong.light,
+          "strong threshold starts the native strong attack immediately");
+    const auto follow_through = trigger.Feed(3.0f, false, 1000, params);
+    check(follow_through.heavy && !follow_through.fired,
+          "follow-through keeps one native attack held without repeating it");
   }
 
-  // A fast slash is a strong attack.
+  // Thrust bars are lower, but the same stop-speed end condition applies.
   {
-    SwingAttackTrigger tr;
-    rest(tr, 320);
-    int fires = 0;
-    bool light = false, heavy = false;
-    hold(tr, 6.5f, false, 220, fires, light, heavy);
-    check(fires == 1 && heavy && !light, "a fast slash is a strong attack");
+    SwingAttackTrigger trigger;
+    trigger.Feed(0.0f, true, 0, params);
+    const auto thrust = trigger.Feed(params.slash_speed_min * params.thrust_ratio,
+                                     true, 11, params);
+    check(thrust.fired && thrust.light,
+          "a thrust starts at its lower speed threshold");
+    const auto end = trigger.Feed(params.rest_speed_max, true, 11, params);
+    check(!end.light && !end.heavy,
+          "a thrust also ends when the tracked motion slows");
   }
 
-  // Thrusts qualify lower, both for light and for strong.
+  // Speeds between start and stop bands neither start nor end a swing.
   {
-    SwingAttackTrigger tr;
-    rest(tr, 320);
-    int fires = 0;
-    bool light = false, heavy = false;
-    hold(tr, 1.7f, true, 220, fires, light, heavy);
-    check(fires == 1 && light, "a slow thrust attacks where a slow slash would not");
-
-    SwingAttackTrigger slow;
-    rest(slow, 320);
-    fires = 0;
-    light = heavy = false;
-    hold(slow, 1.7f, false, 220, fires, light, heavy);
-    check(fires == 0, "the same speed as a slash stays below the slash bar");
-
-    SwingAttackTrigger stab;
-    rest(stab, 320);
-    fires = 0;
-    light = heavy = false;
-    hold(stab, 3.6f, true, 220, fires, light, heavy);
-    check(fires == 1 && heavy, "a thrust reaches strong at its lower bar");
+    SwingAttackTrigger trigger;
+    check(!trigger.Feed(2.1f, false, 0, params).fired,
+          "startup mid-swing waits for an observed stop-speed sample");
+    trigger.Feed(0.0f, false, 1, params);
+    check(!trigger.Feed(1.0f, false, 2, params).fired,
+          "sub-threshold motion does not start an attack");
+    check(trigger.Feed(2.0f, false, 11, params).light,
+          "threshold crossing starts immediately after the stop sample");
+    check(trigger.Feed(1.0f, false, 22, params).light,
+          "the hysteresis band keeps an active swing held");
+    check(!trigger.Feed(0.5f, false, 33, params).light,
+          "the stop band releases an active swing");
   }
 
-  // A single-frame spike (tracking jitter, teleport) is not a swing.
+  // Invalid tracking/parameters fail closed; a subsequent valid sample can start.
   {
-    SwingAttackTrigger tr;
-    rest(tr, 320);
-    int fires = 0;
-    bool light = false, heavy = false;
-    frame(tr, 9.0f, false);
-    rest(tr, 320);
-    hold(tr, 9.0f, false, 11, fires, light, heavy);
-    check(fires == 0 && !light && !heavy, "one spike frame does not attack");
+    SwingAttackTrigger trigger;
+    check(!trigger.Feed(NAN, false, 0, params).fired,
+          "non-finite speed is refused");
+    trigger.Feed(0.0f, false, 1, params);
+    check(trigger.Feed(2.1f, false, 11, params).fired,
+          "valid speed starts immediately after recovery");
+    auto invalid = params;
+    invalid.rest_speed_max = invalid.slash_speed_min;
+    check(!trigger.Feed(3.0f, false, 22, invalid).fired && !trigger.Holding(),
+          "overlapping start and stop thresholds fail closed");
   }
 
-  // One swing, one attack: follow-through and flailing cannot machine-gun.
+  // Backwards timestamps discard the current sample rather than queueing an attack.
   {
-    SwingAttackTrigger tr;
-    rest(tr, 320);
-    int fires = 0;
-    bool light = false, heavy = false;
-    hold(tr, 6.0f, false, 1200, fires, light, heavy);
-    check(fires == 1 && heavy && !light,
-          "one swing is one attack however long it lasts");
-  }
-
-  // The press is discrete: held long enough to register, then released even
-  // though the arm is still moving.
-  {
-    SwingAttackTrigger tr;
-    rest(tr, 320);
-    int fires = 0;
-    SwingAttackOutput out{};
-    bool held_after_release = false;
-    for (int elapsed = 0; elapsed < 400; elapsed += 11) {
-      out = frame(tr, 3.0f, false);
-      if (out.fired) ++fires;
-      if (fires && elapsed > 200 && out.light) held_after_release = true;
-    }
-    check(fires == 1 && !held_after_release && !out.light,
-          "the attack press releases while the arm is still moving");
-  }
-
-  // Cooldown: a second swing needs both a fresh backswing and the interval.
-  {
-    SwingAttackTrigger tr;
-    rest(tr, 320);
-    int fires = 0;
-    bool light = false, heavy = false;
-    hold(tr, 3.0f, false, 220, fires, light, heavy);
-    check(fires == 1, "first swing attacks");
-    rest(tr, 300);
-    light = heavy = false;
-    hold(tr, 3.0f, false, 220, fires, light, heavy);
-    check(fires == 1, "a second swing inside the cooldown does not attack");
-    rest(tr, 400);
-    light = heavy = false;
-    hold(tr, 3.0f, false, 220, fires, light, heavy);
-    check(fires == 2, "after the cooldown a fresh backswing attacks again");
-  }
-
-  // Fail closed: non-finite speed drops the swing history, and the next real
-  // backswing still works.
-  {
-    SwingAttackTrigger tr;
-    rest(tr, 320);
-    frame(tr, NAN, false);
-    int fires = 0;
-    bool light = false, heavy = false;
-    hold(tr, 3.0f, false, 220, fires, light, heavy);
-    check(fires == 0, "a NaN speed discards the armed backswing");
-    rest(tr, 320);
-    light = heavy = false;
-    hold(tr, 3.0f, false, 220, fires, light, heavy);
-    check(fires == 1, "the bridge recovers after invalid tracking");
-  }
-
-  // A clock that steps behind the last attack (restarted timer) must not fire.
-  {
-    SwingAttackTrigger tr;
-    rest(tr, 320);
-    int fires = 0;
-    bool light = false, heavy = false;
-    hold(tr, 3.0f, false, 220, fires, light, heavy);
-    check(fires == 1, "the clock test starts from one real attack");
-    const long long saved = t;
-    t -= 4000;
-    light = heavy = false;
-    hold(tr, 6.0f, false, 220, fires, light, heavy);
-    check(fires == 1, "a backwards clock never attacks");
-    t = saved + 1000;
-    rest(tr, 320);
-    light = heavy = false;
-    hold(tr, 3.0f, false, 220, fires, light, heavy);
-    check(fires == 2, "the bridge re-arms after a clock reset");
-  }
-
-  // Impossible parameters attack nobody.
-  {
-    SwingAttackParams bad;
-    bad.slash_heavy_min = 0.5f;  // below the light bar
-    SwingAttackTrigger tr;
-    long long local = 0;
-    int fires = 0;
-    for (int i = 0; i < 100; ++i) {
-      local += 11;
-      if (tr.Feed(i < 20 ? 0.0f : 7.0f, false, local, bad).fired) ++fires;
-    }
-    check(fires == 0, "an inverted speed band never attacks");
-  }
-
-  // Stopping immediately after firing must not truncate the native press.
-  {
-    SwingAttackTrigger tr;
-    tr.Feed(0, false, 0, p);
-    tr.Feed(0, false, 250, p);
-    tr.Feed(3, false, 260, p);
-    const auto fired = tr.Feed(3, false, 330, p);
-    const auto stopped = tr.Feed(0, false, 341, p);
-    const auto released = tr.Feed(0, false, 430, p);
-    check(fired.fired && stopped.light && tr.Holding() == false &&
-          !released.light && !released.heavy,
-          "resting does not truncate the press or keep it held past its deadline");
-  }
-  // A rejected swing is consumed, not queued until its cooldown expires.
-  {
-    SwingAttackTrigger tr;
-    tr.Feed(0, false, 0, p);
-    tr.Feed(0, false, 250, p);
-    tr.Feed(3, false, 260, p);
-    check(tr.Feed(3, false, 330, p).fired, "cooldown probe fires once");
-    tr.Feed(0, false, 400, p);
-    tr.Feed(0, false, 650, p);
-    int fires = 0;
-    for (long long ms = 660; ms <= 1100; ms += 11)
-      fires += tr.Feed(3, false, ms, p).fired;
-    check(fires == 0, "a swing begun during cooldown cannot attack later");
-  }
-  // A spike followed by sub-threshold movement is not sustained attack energy.
-  {
-    SwingAttackTrigger tr;
-    tr.Feed(0, false, 0, p);
-    tr.Feed(0, false, 250, p);
-    tr.Feed(9, false, 260, p);
-    int fires = 0;
-    for (long long ms = 271; ms < 500; ms += 11)
-      fires += tr.Feed(0.8f, false, ms, p).fired;
-    check(fires == 0, "one speed spike plus slow movement is not an attack");
-  }
-  // Check the sample clock, not just the time of the previous attack.
-  {
-    SwingAttackTrigger tr;
-    tr.Feed(0, false, 1000, p);
-    tr.Feed(0, false, 1300, p);
-    tr.Feed(3, false, 1400, p);
-    check(!tr.Feed(3, false, 1350, p).fired && !tr.Armed(),
-          "clock reversal before the first attack discards the armed swing");
-  }
-  {
-    SwingAttackTrigger tr;
-    tr.Feed(6, false, 0, p);
-    tr.Feed(0, false, 250, p);
-    check(!tr.Armed(), "moving initial sample cannot count as rest");
-    auto bad = p;
-    bad.hold_ms = 0;
-    check(!tr.Feed(6, false, 500, bad).fired && !tr.Armed(),
-          "invalid timing parameters fail closed");
+    SwingAttackTrigger trigger;
+    trigger.Feed(0.0f, false, 100, params);
+    check(trigger.Feed(2.1f, false, 111, params).fired,
+            "clock test starts an attack");
+    const auto reversed = trigger.Feed(3.0f, false, 99, params);
+    check(!reversed.fired && !reversed.light && !trigger.Holding(),
+          "backwards sample clock cancels the active hold");
+    trigger.Feed(0.0f, false, 100, params);
+    check(trigger.Feed(2.1f, false, 111, params).fired,
+          "the next monotonic sample can start again immediately");
   }
 
   if (failures) return 1;
