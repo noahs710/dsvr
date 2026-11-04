@@ -1,0 +1,31 @@
+{
+  "name": "dsvr-launcher",
+  "version": "0.1.0",
+  "description": "Optional DSVR launcher for the native Setup engine.",
+  "private": true,
+  "type": "module",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "smoke": "electron . --smoke",
+    "dist": "electron-builder --win --dir",
+    "package": "py -3 ../tools/package_launcher.py --package-dir ../dist/DSVR-latest --out ../dist/DSVR-Launcher-x64.zip"
+  },
+  "devDependencies": {
+    "electron": "45.2.1",
+    "electron-builder": "26.0.12"
+  },
+  "build": {
+    "appId": "dev.dsvr.launcher",
+    "productName": "DSVR-Launcher",
+    "asar": true,
+    "directories": { "output": "../build/launcher-portable" },
+    "files": ["src/**/*", "package.json"],
+    "extraResources": [{ "from": "engine", "to": "." }],
+    "win": {
+      "target": "dir",
+      "executableName": "DSVR-Launcher",
+      "icon": "assets/dsvr.ico"
+    }
+  }
+}

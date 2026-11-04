@@ -3,6 +3,8 @@ Testing/
 build/
 dist/
 out/
+launcher/engine/
+launcher/dist/
 .vs/
 CMakeCache.txt
 CMakeFiles/

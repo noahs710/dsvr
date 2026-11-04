@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; object-src 'none'; base-uri 'none'" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DSVR Launcher</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header>
+      <div class="brand" aria-label="Dark Souls VR">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <span>DSVR</span>
+      </div>
+      <nav id="nav" aria-label="Launcher pages">
+        <button data-page="home" class="active">Home</button>
+        <button data-page="game">Install</button>
+        <button data-page="settings">Settings</button>
+        <button data-page="activity">Activity</button>
+      </nav>
+      <span id="engine-state" role="status"></span>
+    </header>
+    <main>
+      <section id="page-home" class="page active">
+        <div id="status-card"></div>
+        <div class="home-launch">
+          <button id="launch" class="big" disabled>Launch through Steam</button>
+          <p class="hint">DSVR is for offline play only. Uninstall before returning online.</p>
+        </div>
+      </section>
+
+      <section id="page-game" class="page">
+        <section class="card install-card">
+          <div class="section-head">
+            <div>
+              <h1>Install and repair</h1>
+            </div>
+            <span class="section-mark" aria-hidden="true"></span>
+          </div>
+          <label class="field-label" for="game-path">Game folder</label>
+          <div class="path-row">
+            <input id="game-path" type="text" readonly placeholder="Choose or auto-detect DARK SOULS REMASTERED" />
+            <button id="choose-game">Browse</button>
+          </div>
+          <p class="hint compact">The installer verifies the game, backs up saves before changes, and keeps your existing settings.</p>
+          <div class="install-options">
+            <label class="check"><input id="enable-vr-after" type="checkbox" /> Enable VR after install</label>
+            <label class="check"><input id="remove-settings" type="checkbox" /> Also remove DSVR settings on uninstall</label>
+          </div>
+          <div class="action-row">
+            <button id="install-action" class="primary-action" disabled>Install DSVR</button>
+            <button id="uninstall-action" class="danger" data-verb="uninstall" disabled>Uninstall</button>
+          </div>
+          <p id="install-hint" class="hint compact"></p>
+        </section>
+
+        <div class="tool-grid">
+          <section class="card tool-card">
+            <h2>Verify before play</h2>
+            <p class="hint">Confirm the supported game build or inspect setup health.</p>
+            <div class="row">
+              <button data-verb="verify">Verify game build</button>
+              <button data-verb="doctor">Run doctor</button>
+            </div>
+          </section>
+          <section class="card tool-card">
+            <h2>Community add-ons</h2>
+            <p class="hint">FPS Unlock is a separate MIT mod. Texture tools download to your Downloads folder and are never launched by setup.</p>
+            <div class="row">
+              <button data-verb="fpsunlock-install">Install FPS Unlock</button>
+              <button data-verb="tpup-download">Download texture tools</button>
+            </div>
+          </section>
+          <section class="card tool-card">
+            <h2>Network block</h2>
+            <p class="hint">Steam Offline is still required. These reversible firewall rules add another barrier.</p>
+            <div class="row">
+              <button data-verb="firewall-block">Block game network</button>
+              <button data-verb="firewall-unblock">Remove network block</button>
+              <button data-verb="firewall-status">Check block</button>
+            </div>
+          </section>
+        </div>
+        <div id="game-result" aria-live="polite"></div>
+        <p class="credits">Built with MinHook, OpenXR SDK and Dear ImGui. DSR-FPS-Unlock by zofrea1 is optional and installed separately. Full license notices ship in <code>licenses/</code>.</p>
+      </section>
+
+      <section id="page-settings" class="page">
+        <div class="settings-intro">
+          <h1>Settings</h1>
+          <p class="hint">Start with the essentials. Every setting remains available below, grouped by use.</p>
+        </div>
+        <section class="card quick-card">
+          <h2>Quick setup</h2>
+          <div class="row preset-row">
+            <button data-preset="comfort">Comfort</button>
+            <button data-preset="perf">Performance</button>
+            <button data-preset="veteran">Veteran</button>
+            <button data-preset="smooth">Auto Smooth</button>
+            <button data-preset="res">Auto Resolution</button>
+            <button id="safe-defaults" class="danger">Safe defaults</button>
+          </div>
+          <p class="hint compact">Presets keep the refresh rate under headset or monitor control.</p>
+        </section>
+        <div class="settings-toolbar">
+          <label for="settings-search">All controls</label>
+          <input id="settings-search" type="search" placeholder="Find a setting…" autocomplete="off" />
+          <span id="settings-count" class="hint"></span>
+        </div>
+        <div id="settings-list" class="setting-groups">
+          <p class="hint">Choose a game folder to load settings.</p>
+        </div>
+        <div class="settings-footer">
+          <button id="dev-toggle" hidden>Developer mode</button>
+          <span class="hint">Saved settings take effect after pressing F7 in game.</span>
+        </div>
+      </section>
+
+      <section id="page-activity" class="page">
+        <div class="section-head activity-head">
+          <div>
+            <h1>Activity</h1>
+          </div>
+          <button id="clear-log">Clear</button>
+        </div>
+        <pre id="log" aria-live="polite"></pre>
+      </section>
+    </main>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>
