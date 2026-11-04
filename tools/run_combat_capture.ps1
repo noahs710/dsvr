@@ -1,5 +1,5 @@
 #requires -Version 7.0
-# Desktop natural-combat observation only. No input injection, XR or game writes.
+# Bounded combat observer. Synthetic HMD input is an explicit opt-in mode.
 # Files/save roots are changed only inside a receipted, reversible transaction.
 # Recovered from build/desktop-observer-session.ps1; do not use its old observer
 # deployment (duplicate observer_only and regular, non-LAB core).
@@ -13,7 +13,11 @@ param(
   [ValidateRange(1,30)][int]$CloseWaitMinutes=5,
   [ValidateRange(1,120)][int]$FooterWaitSeconds=30,
   [string]$Cases,
-  [string]$SeedVault=(Join-Path $env:USERPROFILE '.dsvr-backups\desktop-observer-20261023-140650')
+  [string]$SeedVault=(Join-Path $env:USERPROFILE '.dsvr-backups\desktop-observer-20261023-140650'),
+  [ValidateSet('ObserverOnly','SyntheticHmd','OpenXRSimulator')][string]$InputMode='OpenXRSimulator',
+  [string]$HmdLayerDir='build\tools\hmd\Release',
+  [ValidateRange(0,1800)][int]$SimulatorSoakSeconds=600,
+  [ValidateRange(0,600)][int]$MenuBudgetSeconds=150
 )
 $ErrorActionPreference='Stop'
 $repo=Split-Path $PSScriptRoot -Parent
@@ -25,6 +29,23 @@ $transactionParent=[IO.Path]::GetFullPath((Join-Path $repo 'build\native-transac
 $saveRoots=@((Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'NBGI\DARK SOULS REMASTERED'),
              (Join-Path $env:APPDATA 'DarkSoulsRemastered'))
 $installNames=@('dinput8.dll','DSVR.dll','DSVR.toml')
+$script:runtimeRoot=$null
+$script:steamVrSettingsPath=$null
+$script:steamVrOriginal=$null
+$script:simulatorRuntimeRoot=$null
+$script:simulatorDataDir=$null
+$script:simulatorControlProcess=$null
+$script:simulatorControlStopPath=$null
+$script:simulatorControlReport=$null
+$script:simulatorLastMemorySample=[datetime]::MinValue
+$script:simulatorLastReceiptSave=[datetime]::MinValue
+$script:simulatorRuntimeLock=$null
+$script:steamVrRequested=[ordered]@{
+  'steamvr.forcedDriver'='null';'steamvr.activateMultipleDrivers'=$false;'driver_null.enable'=$true
+  'steamvr.startMonitorFromAppLaunch'=$false;'steamvr.startDashboardFromAppLaunch'=$false
+  'steamvr.startOverlayAppsFromDashboard'=$false
+}
+$script:hmdMutex=$null
 function Hash($path) {
   (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
@@ -32,6 +53,95 @@ function RelPath($root,$full) {
   [IO.Path]::GetRelativePath([IO.Path]::GetFullPath($root),[IO.Path]::GetFullPath($full))
 }
 function Games { @(Get-Process -Name DarkSoulsRemastered -ErrorAction SilentlyContinue | Where-Object { -not $_.HasExited }) }
+function RuntimeRootFromActiveRuntime([string]$activeRuntime) {
+  if(-not $activeRuntime -or [IO.Path]::GetFileName($activeRuntime) -ine 'steamxr_win64.json') {
+    throw 'Active OpenXR runtime is not the expected SteamVR manifest.'
+  }
+  return [IO.Path]::GetFullPath([IO.Path]::GetDirectoryName($activeRuntime)).TrimEnd('\')
+}
+function SteamVrProcesses {
+  if(-not $script:runtimeRoot) { return @() }
+  $prefix=$script:runtimeRoot.TrimEnd('\')+'\'
+  @(Get-Process -Name vrserver,vrcompositor,vrmonitor,vrstartup,vrdashboard,vrwebhelper -ErrorAction SilentlyContinue |
+    Where-Object { $_.Path -and $_.Path.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase) })
+}
+function ReadJsonSetting($settings,[string]$key) {
+  $group,$name=$key.Split('.',2)
+  if($settings.Contains($group) -and $settings[$group].Contains($name)) { return @{present=$true;value=$settings[$group][$name]} }
+  return @{present=$false;value=$null}
+}
+function SetJsonSetting($settings,[string]$key,$value) {
+  $group,$name=$key.Split('.',2)
+  if(-not $settings.Contains($group)) { $settings[$group]=@{} }
+  $settings[$group][$name]=$value
+}
+function WriteJsonSettings([string]$path,$settings) {
+  $temporary=$path+'.dsvr-'+[guid]::NewGuid().ToString('N')+'.tmp'
+  try {
+    [IO.File]::WriteAllText($temporary,($settings|ConvertTo-Json -Depth 30),[Text.UTF8Encoding]::new($false))
+    [IO.File]::Move($temporary,$path,$true)
+  } finally { if(Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force } }
+}
+function RestoreJsonSettings([string]$path,$original,$requested) {
+  $current=Get-Content -LiteralPath $path -Raw | ConvertFrom-Json -AsHashtable
+  foreach($key in $requested.Keys) {
+    $now=ReadJsonSetting $current $key
+    if(-not $now.present -or $now.value -cne $requested[$key]) { throw "Concurrent change to SteamVR setting $key; preserved current settings." }
+  }
+  foreach($key in $requested.Keys) {
+    $before=ReadJsonSetting $original $key
+    if($before.present) { SetJsonSetting $current $key $before.value }
+    else {
+      $group,$name=$key.Split('.',2)
+      $current[$group].Remove($name)|Out-Null
+      if($current[$group].Count -eq 0 -and -not $original.Contains($group)) { $current.Remove($group)|Out-Null }
+    }
+  }
+  WriteJsonSettings $path $current
+  $verified=Get-Content -LiteralPath $path -Raw | ConvertFrom-Json -AsHashtable
+  foreach($key in $requested.Keys) {
+    $before=ReadJsonSetting $original $key; $after=ReadJsonSetting $verified $key
+    if($before.present -ne $after.present -or $before.value -cne $after.value) { throw "Failed to restore SteamVR setting $key." }
+  }
+}
+function ApplySteamVrSettings {
+  if($InputMode -ne 'SyntheticHmd') { return }
+  if(@(SteamVrProcesses).Count) { throw 'SteamVR started before its null-HMD settings transaction; refusing to take over the runtime.' }
+  $script:steamVrOriginal=Get-Content -LiteralPath $script:steamVrSettingsPath -Raw | ConvertFrom-Json -AsHashtable
+  $snapshot=Join-Path $vault 'steamvr-settings-before.json'
+  Copy-Item -LiteralPath $script:steamVrSettingsPath -Destination $snapshot
+  $r.runtime_settings_path=$script:steamVrSettingsPath
+  $r.runtime_settings_snapshot=$snapshot
+  $r.runtime_settings_snapshot_sha256=Hash $snapshot
+  $r.runtime_settings_requested=$script:steamVrRequested
+  if($r.synthetic_layer.settings_baseline_sha256 -and $r.runtime_settings_snapshot_sha256 -ne $r.synthetic_layer.settings_baseline_sha256) {
+    $r.runtime_settings_state='preflight_conflict'; SaveReceipt
+    throw 'SteamVR settings changed after read-only preflight.'
+  }
+  $r.runtime_settings_state='pending'
+  SaveReceipt
+  $current=Get-Content -LiteralPath $script:steamVrSettingsPath -Raw | ConvertFrom-Json -AsHashtable
+  foreach($key in $script:steamVrRequested.Keys) { SetJsonSetting $current $key $script:steamVrRequested[$key] }
+  WriteJsonSettings $script:steamVrSettingsPath $current
+  $r.runtime_settings_state='applied'
+  SaveReceipt
+}
+function RestoreSteamVrSettings {
+  if($InputMode -ne 'SyntheticHmd' -or $r.runtime_settings_state -notin @('pending','applied')) { return }
+  # The launch path keeps an ordered dictionary, while -Mode Restore reads
+  # the receipt as a PSCustomObject and normalizes it before recovery.
+  $requested=$script:steamVrRequested
+  $original=Get-Content -LiteralPath $r.runtime_settings_snapshot -Raw | ConvertFrom-Json -AsHashtable
+  $current=Get-Content -LiteralPath $r.runtime_settings_path -Raw | ConvertFrom-Json -AsHashtable
+  $alreadyOriginal=$true
+  foreach($key in $requested.Keys) {
+    $before=ReadJsonSetting $original $key; $now=ReadJsonSetting $current $key
+    if($before.present -ne $now.present -or $before.value -cne $now.value) { $alreadyOriginal=$false }
+  }
+  if(-not $alreadyOriginal) { RestoreJsonSettings $r.runtime_settings_path $original $requested }
+  $r.runtime_settings_state='restored'
+  SaveReceipt
+}
 function Inventory($path) {
   if(-not (Test-Path -LiteralPath $path)) { return }
   $entries=@(Get-Item -LiteralPath $path -Force)+@(Get-ChildItem -LiteralPath $path -Force -Recurse)
@@ -219,6 +329,203 @@ verbose_logging = true
 offline_only_ack = true
 '@
 }
+function OpenXRSimulatorConfig {
+  return @'
+[loader]
+chain_proxy = ""
+[vr]
+vr_enabled = true
+headlook_enabled = true
+reshade_host = false
+force_disable_motion_blur = false
+gameplay_theater = false
+[controls]
+xr_input_enabled = true
+hotkeys_enabled = false
+log_marker_vk = 0x78
+[camera]
+hide_player_model = false
+hide_second_model = false
+hide_head = false
+[combat]
+motion_attacks = true
+physical_attacks = true
+physical_defence = false
+haptics = false
+arm_ik_enabled = true
+arm_ik_log_only = true
+combat_test_bench = false
+[diagnostics]
+observer_only = false
+combat_trace_only = false
+verbose_logging = true
+[safety]
+offline_only_ack = true
+'@
+}
+function OpenXRSimulatorLock {
+  $root=[IO.Path]::GetFullPath((Join-Path $repo 'build\research\openxr-simulator-upstream-build'))
+  $lockPath=Join-Path $root 'upstream-lock.json'
+  if(-not (Test-Path -LiteralPath $lockPath -PathType Leaf)) { throw 'Official OpenXR-Simulator lock is missing; run tools/hmd/setup_openxr_simulator.ps1.' }
+  $lock=Get-Content -LiteralPath $lockPath -Raw | ConvertFrom-Json
+  if($lock.schema -ne 2 -or $lock.source_commit -ne '692a66de570189b29c684f48c6ef306a07d5764f' -or $lock.upstream_unmodified -ne $true) {
+    throw 'OpenXR-Simulator source is not the pinned unmodified upstream checkout.'
+  }
+  foreach($field in @('runtime_manifest','runtime_dll','mcp_server','mcp_python','viewer')) {
+    if(-not (Test-Path -LiteralPath $lock.$field -PathType Leaf)) { throw "OpenXR-Simulator $field is missing." }
+  }
+  foreach($pair in @(@($lock.runtime_manifest,$lock.runtime_manifest_sha256),@($lock.runtime_dll,$lock.runtime_dll_sha256),@($lock.mcp_server,$lock.mcp_server_sha256),@($lock.viewer,$lock.viewer_sha256))) {
+    if((Hash $pair[0]) -ne $pair[1]) { throw "OpenXR-Simulator pinned artifact hash mismatch: $($pair[0])" }
+  }
+  & $lock.mcp_python -B -c 'import mcp, numpy, PIL'
+  if($LASTEXITCODE -ne 0) { throw 'Official OpenXR-Simulator MCP dependencies failed their import check.' }
+  & $lock.mcp_python -m pip check
+  if($LASTEXITCODE -ne 0) { throw 'Official OpenXR-Simulator MCP dependencies are inconsistent.' }
+  return $lock
+}
+function TrackOpenXRSimulatorProcesses {
+  if($InputMode -ne 'OpenXRSimulator' -or -not $script:simulatorControlProcess -or -not $r.launch_requested) { return }
+  $control=$script:simulatorControlProcess
+  try { $control.Refresh() } catch { return }
+  if($control.HasExited) { return }
+  $controlPath=$control.Path
+  $controlStart=$control.StartTime.ToUniversalTime()
+  $existing=@($r.simulator_control | Where-Object { [int]$_.id -eq $control.Id })
+  if($existing.Count -and ($existing.Count -ne 1 -or $existing[0].path -ine $controlPath -or
+     ([datetime]$existing[0].started_utc).Ticks -ne $controlStart.Ticks)) {
+    throw 'Simulator MCP controller PID was reused or changed identity.'
+  }
+  if(-not $existing.Count) {
+    $r.simulator_control+=@([pscustomobject]@{id=$control.Id;path=$controlPath;started_utc=$controlStart.ToString('o')})
+    SaveReceipt
+  }
+  $serverScript=[IO.Path]::GetFullPath($r.simulator.mcp_server)
+  $children=@(Get-CimInstance Win32_Process | Where-Object {
+    $_.ParentProcessId -eq $control.Id -and $_.CommandLine -like "*$serverScript*"
+  })
+  foreach($child in $children) {
+    $id=[int]$child.ProcessId
+    $identity=@($r.simulator_server_processes | Where-Object { [int]$_.id -eq $id })
+    if($identity.Count -and $identity[0].command_line -cne $child.CommandLine) {
+      throw "Simulator MCP server PID $id was reused or its command changed."
+    }
+    if(-not $identity.Count) {
+      $r.simulator_server_processes+=@([pscustomobject]@{id=$id;name=$child.Name;command_line=$child.CommandLine;started_utc=$child.CreationDate.ToUniversalTime().ToString('o')})
+      SaveReceipt
+    }
+  }
+}
+function SampleOpenXRSimulatorMemory {
+  if($InputMode -ne 'OpenXRSimulator' -or -not $script:simulatorControlProcess -or $script:simulatorControlProcess.HasExited) { return }
+  $now=[datetime]::UtcNow
+  if($script:simulatorLastMemorySample -ne [datetime]::MinValue -and ($now-$script:simulatorLastMemorySample).TotalSeconds -lt 1) { return }
+  $script:simulatorLastMemorySample=$now
+  TrackGames
+  TrackOpenXRSimulatorProcesses
+  foreach($identity in @($r.pids)) {
+    $process=Get-Process -Id ([int]$identity.id) -ErrorAction SilentlyContinue
+    if(-not $process -or $process.Path -ine $identity.path -or $process.StartTime.Ticks -ne ([datetime]$identity.start).Ticks) {
+      throw 'Owned DSR process disappeared or changed identity during simulator memory sampling.'
+    }
+    $private=[math]::Ceiling($process.PrivateMemorySize64/1MB)
+    $working=[math]::Ceiling($process.WorkingSet64/1MB)
+    Add-Content -LiteralPath $script:simulatorMemoryPath -Value (([datetime]::UtcNow.ToString('o'))+',game,'+$process.Id+','+$private+','+$working)
+    $r.memory_samples++
+    $key="game:$($process.Id)"
+    if(-not $r.memory_peak_private_mb.Contains($key) -or $r.memory_peak_private_mb[$key] -lt $private) { $r.memory_peak_private_mb[$key]=$private }
+    if($private -gt 6144) { throw "DSR/OpenXR-Simulator process memory exceeded 6144 MiB: $private MiB." }
+    try {
+      $modules=@($process.Modules | ForEach-Object { [IO.Path]::GetFullPath($_.FileName) })
+      if($modules -contains [IO.Path]::GetFullPath($r.simulator.runtime_dll)) { $r.simulator.runtime_module_loaded=$true }
+      if($modules -contains [IO.Path]::GetFullPath($r.synthetic_layer.directory+'\DSVR-HmdLayer.dll')) { $r.simulator.layer_module_loaded=$true }
+    } catch { }
+  }
+  $control=$script:simulatorControlProcess
+  $control.Refresh()
+  if(-not $control.HasExited) {
+    $private=[math]::Ceiling($control.PrivateMemorySize64/1MB); $working=[math]::Ceiling($control.WorkingSet64/1MB)
+    Add-Content -LiteralPath $script:simulatorMemoryPath -Value (([datetime]::UtcNow.ToString('o'))+',mcp_driver,'+$control.Id+','+$private+','+$working)
+    $r.memory_samples++; $key="mcp_driver:$($control.Id)"
+    if(-not $r.memory_peak_private_mb.Contains($key) -or $r.memory_peak_private_mb[$key] -lt $private) { $r.memory_peak_private_mb[$key]=$private }
+    if($private -gt 1024) { throw "Simulator MCP driver exceeded 1024 MiB: $private MiB." }
+  }
+  foreach($identity in @($r.simulator_server_processes)) {
+    $id=[int]$identity.id
+    $process=Get-Process -Id $id -ErrorAction SilentlyContinue
+    if(-not $process) { continue }
+    $observed=Get-CimInstance Win32_Process -Filter "ProcessId=$id" -ErrorAction SilentlyContinue
+    if(-not $observed -or $observed.CommandLine -cne $identity.command_line) { throw "MCP server process identity changed for PID $id." }
+    $private=[math]::Ceiling($process.PrivateMemorySize64/1MB); $working=[math]::Ceiling($process.WorkingSet64/1MB)
+    Add-Content -LiteralPath $script:simulatorMemoryPath -Value (([datetime]::UtcNow.ToString('o'))+',mcp_server,'+$id+','+$private+','+$working)
+    $r.memory_samples++; $key="mcp_server:$id"
+    if(-not $r.memory_peak_private_mb.Contains($key) -or $r.memory_peak_private_mb[$key] -lt $private) { $r.memory_peak_private_mb[$key]=$private }
+    if($private -gt 1024) { throw "Simulator MCP server exceeded 1024 MiB: $private MiB." }
+  }
+  if($script:simulatorLastReceiptSave -eq [datetime]::MinValue -or ($now-$script:simulatorLastReceiptSave).TotalSeconds -ge 10) {
+    $script:simulatorLastReceiptSave=$now; SaveReceipt
+  }
+}
+function StartOpenXRSimulatorControl {
+  if($InputMode -ne 'OpenXRSimulator') { return }
+  $script:simulatorDataDir=Join-Path $evidence 'simxr-data'
+  New-Item -ItemType Directory -Force -Path $script:simulatorDataDir | Out-Null
+  $script:simulatorMemoryPath=Join-Path $evidence 'memory.csv'
+  [IO.File]::WriteAllText($script:simulatorMemoryPath,"time_utc,role,pid,private_mb,working_set_mb`n",[Text.Encoding]::ASCII)
+  $driver=Join-Path $repo 'tools\hmd\simulator_mcp_driver.py'
+  $runtimeLock=OpenXRSimulatorLock
+  $python=[IO.Path]::GetFullPath($runtimeLock.mcp_python)
+  $arguments=@('"'+$driver+'"','--server','"'+$runtimeLock.mcp_server+'"',
+    '--data-dir','"'+$script:simulatorDataDir+'"','--output','"'+(Join-Path $evidence 'mcp-run.json')+'"',
+    '--soak-seconds',"$SimulatorSoakSeconds",'--menu-seconds',"$MenuBudgetSeconds",'--game-dir','"'+$game+'"','--stop-file','"'+(Join-Path $evidence 'mcp.stop')+'"',
+    '--finish-file','"'+$script:FinishPath+'"','--done-file','"'+(Join-Path $evidence 'mcp.done')+'"') -join ' '
+  $script:simulatorControlProcess=Start-Process -FilePath $python -ArgumentList $arguments -WorkingDirectory (Split-Path $driver -Parent) -PassThru `
+    -RedirectStandardOutput (Join-Path $evidence 'mcp.stdout.log') -RedirectStandardError (Join-Path $evidence 'mcp.stderr.log')
+  $r.simulator_control_id=$script:simulatorControlProcess.Id
+  $r.simulator_control_path=$script:simulatorControlProcess.Path
+  $r.simulator_control_started_utc=$script:simulatorControlProcess.StartTime.ToUniversalTime().ToString('o')
+  SaveReceipt
+}
+function WaitForOpenXRSimulatorControl {
+  if($InputMode -ne 'OpenXRSimulator' -or -not $script:simulatorControlProcess) { return }
+  $limit=[datetime]::UtcNow.AddSeconds(120)
+  while(-not $script:simulatorControlProcess.HasExited -and [datetime]::UtcNow -lt $limit) {
+    TrackGames; SampleOpenXRSimulatorMemory
+    Start-Sleep -Milliseconds 200
+  }
+  if(-not $script:simulatorControlProcess.HasExited) { throw 'Simulator MCP controller did not complete within 120 seconds after the declared soak.' }
+  $script:simulatorControlProcess.WaitForExit()
+  $r.simulator_control_exit=$script:simulatorControlProcess.ExitCode
+  $mcpPath=Join-Path $evidence 'mcp-run.json'
+  if(-not (Test-Path -LiteralPath $mcpPath -PathType Leaf)) { throw 'Simulator MCP driver exited without mcp-run.json.' }
+  $r.simulator_mcp_report=$mcpPath
+  $r.simulator_mcp_verdict=(Get-Content -LiteralPath $mcpPath -Raw | ConvertFrom-Json).verdict
+  SaveReceipt
+  if($r.simulator_control_exit -ne 0 -or $r.simulator_mcp_verdict -ne 'PASS') { throw "Simulator MCP run failed (exit=$($r.simulator_control_exit), verdict=$($r.simulator_mcp_verdict))." }
+}
+function StopOpenXRSimulatorControl {
+  if($InputMode -ne 'OpenXRSimulator') { return }
+  if($script:simulatorControlProcess -and -not $script:simulatorControlProcess.HasExited) {
+    $stopPath=Join-Path $evidence 'mcp.stop'
+    if(-not (Test-Path -LiteralPath $stopPath)) { [IO.File]::WriteAllText($stopPath,'supervisor-cleanup',[Text.Encoding]::ASCII) }
+    if(-not $script:simulatorControlProcess.WaitForExit(20000)) {
+      $script:simulatorControlProcess.Refresh()
+      if(-not $script:simulatorControlProcess.HasExited) {
+        $r.simulator_control_forced=$true
+        Stop-Process -Id $script:simulatorControlProcess.Id -Force
+      }
+    }
+    if($script:simulatorControlProcess.HasExited) { $r.simulator_control_exit=$script:simulatorControlProcess.ExitCode }
+  }
+  foreach($identity in @($r.simulator_server_processes)) {
+    $id=[int]$identity.id
+    $observed=Get-CimInstance Win32_Process -Filter "ProcessId=$id" -ErrorAction SilentlyContinue
+    if($observed -and $observed.CommandLine -ceq $identity.command_line) {
+      $process=Get-Process -Id $id -ErrorAction SilentlyContinue
+      if($process) { $r.simulator_control_forced=$true; Stop-Process -Id $id -Force }
+    }
+  }
+  SaveReceipt
+}
 function ValidateReceipt {
   $vault=[IO.Path]::GetFullPath($r.vault)
   if((Split-Path $vault -Parent) -ine $transactionParent -or (Split-Path $vault -Leaf) -notlike 'combat-observer-*') { throw 'Unsafe or legacy transaction directory; existing backup vault is not writable through this runner.' }
@@ -240,7 +547,74 @@ function ValidateReceipt {
        $r.files[$i].backup -ine (Join-Path $vault $installNames[$i])) { throw 'Unsafe file target.' }
   }
 }
+function TrackSteamVrRuntime {
+  if($InputMode -ne 'SyntheticHmd' -or -not $r.launch_requested) { return }
+  $floor=([datetime]$r.launch_requested).ToUniversalTime()
+  $total=0
+  foreach($process in @(SteamVrProcesses)) {
+    $started=$process.StartTime.ToUniversalTime()
+    if($started -lt $floor) { throw 'Unexpected SteamVR runtime process predates this synthetic game launch.' }
+    $existing=@($r.runtime_processes | Where-Object { [int]$_.id -eq $process.Id })
+    if($existing.Count -and ($existing.Count -ne 1 -or $existing[0].path -ine $process.Path -or
+       ([datetime]$existing[0].started_utc).Ticks -ne $started.Ticks)) { throw 'SteamVR runtime PID was reused or changed identity.' }
+    if(-not $existing.Count) {
+      $r.runtime_processes+=@([pscustomobject]@{id=$process.Id;path=$process.Path;started_utc=$started.ToString('o')})
+      SaveReceipt
+    }
+    $mb=[math]::Ceiling($process.PrivateMemorySize64/1MB)
+    if($r.runtime_peak_private_mb -isnot [Collections.IDictionary]) {
+      $peak=@{}
+      foreach($property in $r.runtime_peak_private_mb.PSObject.Properties) { $peak[$property.Name]=[int]$property.Value }
+      SetReceiptValue 'runtime_peak_private_mb' $peak
+    }
+    $key="$($process.ProcessName):$($process.Id)"
+    if(-not $r.runtime_peak_private_mb.Contains($key) -or $r.runtime_peak_private_mb[$key] -lt $mb) {
+      $r.runtime_peak_private_mb[$key]=$mb; SaveReceipt
+    }
+    if($mb -gt 6144) { throw "SteamVR memory limit exceeded: $key uses $mb MiB (limit 6144)." }
+    $total+=$mb
+  }
+  if($total -gt 12288) { throw "Combined SteamVR memory limit exceeded: $total MiB." }
+}
+function StopOwnedSteamVrRuntime {
+  if($InputMode -ne 'SyntheticHmd') { return }
+  TrackSteamVrRuntime
+  foreach($identity in @($r.runtime_processes | Where-Object { [IO.Path]::GetFileName($_.path) -ieq 'vrmonitor.exe' })) {
+    $process=Get-Process -Id ([int]$identity.id) -ErrorAction SilentlyContinue
+    if($process -and $process.Path -ieq $identity.path -and $process.StartTime.ToUniversalTime().Ticks -eq ([datetime]$identity.started_utc).ToUniversalTime().Ticks) {
+      $null=$process.CloseMainWindow()
+    }
+  }
+  $deadline=[datetime]::UtcNow.AddSeconds(10); $forceAfter=[datetime]::UtcNow.AddSeconds(2)
+  $r.runtime_forced_pids=@(); $quietSince=$null
+  while([datetime]::UtcNow -lt $deadline) {
+    TrackSteamVrRuntime
+    $live=@()
+    foreach($identity in @($r.runtime_processes)) {
+      $process=Get-Process -Id ([int]$identity.id) -ErrorAction SilentlyContinue
+      if($process -and $process.Path -ieq $identity.path -and
+         $process.StartTime.ToUniversalTime().Ticks -eq ([datetime]$identity.started_utc).ToUniversalTime().Ticks) { $live+=@($process) }
+    }
+    if(-not $live.Count) {
+      if(@(SteamVrProcesses).Count) { throw 'An unowned SteamVR runtime process remains; it was not stopped.' }
+      if(-not $quietSince) { $quietSince=[datetime]::UtcNow }
+      if(([datetime]::UtcNow-$quietSince).TotalSeconds -ge 1) { $r.runtime_cleanup_ok=$true; SaveReceipt; return }
+      Start-Sleep -Milliseconds 100
+      continue
+    }
+    $quietSince=$null
+    if([datetime]::UtcNow -ge $forceAfter) {
+      foreach($process in $live) {
+        $r.runtime_forced_pids+=@($process.Id); SaveReceipt
+        Stop-Process -Id $process.Id -Force
+      }
+    }
+    Start-Sleep -Milliseconds 250
+  }
+  throw 'Owned SteamVR runtime processes did not stop within 10 seconds.'
+}
 function TrackGames {
+  TrackSteamVrRuntime
   # Ownership floor: only generations created after this session's own launch
   # request can belong to us. Legacy receipts have no launch_requested, so
   # their staging start remains the floor. Never infer ownership solely from
@@ -300,6 +674,14 @@ function WaitForGameSession {
   # TrackGames still refuses unexpected identities; never swallow that failure.
   while((Get-Date) -lt [datetime]$r.deadline -and -not (FinishRequested)) {
     TrackGames
+    if($InputMode -eq 'OpenXRSimulator' -and $script:simulatorControlProcess) {
+      $script:simulatorControlProcess.Refresh()
+      if($script:simulatorControlProcess.HasExited) {
+        if($script:simulatorControlProcess.ExitCode -ne 0) { throw "Simulator MCP controller exited with code $($script:simulatorControlProcess.ExitCode)." }
+        return
+      }
+      SampleOpenXRSimulatorMemory
+    }
     Start-Sleep -Milliseconds 500
   }
 }
@@ -335,20 +717,63 @@ function FinishRequested {
 # New trace files this transaction produced, with the one fact that decides
 # whether each is usable evidence: a closing footer. An unclosed capture cannot
 # be repaired later, so it is named while it is still visible.
+# A capture's identity and closure live in its first and last records. Reading
+# every line to find them made Restore linear in accumulated trace bytes (and
+# the line-append itself quadratic), which cost tens of minutes per run as the
+# game directory grew. Read only the head line and a bounded tail window.
+function ReadFirstLine([string]$path) {
+  $stream=$null;$reader=$null
+  try {
+    $stream=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::Read,
+      ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+    $reader=[IO.StreamReader]::new($stream)
+    return $reader.ReadLine()
+  } finally {
+    if($reader) { $reader.Dispose() } elseif($stream) { $stream.Dispose() }
+  }
+}
+function ReadLastLine([string]$path) {
+  $stream=$null
+  try {
+    $stream=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::Read,
+      ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+    $length=$stream.Length
+    if(-not $length) { return $null }
+    $window=[int][Math]::Min($length,262144)
+    $null=$stream.Seek(-$window,[IO.SeekOrigin]::End)
+    $buffer=New-Object byte[] $window
+    $read=0
+    while($read -lt $window) {
+      $n=$stream.Read($buffer,$read,$window-$read)
+      if(-not $n) { break }
+      $read+=$n
+    }
+    $text=[Text.Encoding]::UTF8.GetString($buffer,0,$read).TrimEnd("`r","`n"," ","`t")
+    if(-not $text) { return $null }
+    $nl=$text.LastIndexOf("`n")
+    return $(if($nl -ge 0) { $text.Substring($nl+1) } else { $text })
+  } finally { if($stream) { $stream.Dispose() } }
+}
 function TraceInventory {
   $spans=@()
   foreach($trace in @(Get-ChildItem -LiteralPath $game -Filter 'DSVR-trace-*.jsonl' |
                         Where-Object { $_.Name -notin $r.traces_before })) {
     $start=$null;$end=$null;$capturePid=$null;$footer=$null
     try {
-      $lines=[IO.File]::ReadAllLines($trace.FullName)
-      if($lines.Length) {
-        $head=$lines[0]|ConvertFrom-Json
+      # FileShare ReadWrite+Delete: a capture this session is still writing is
+      # open with write access, so ReadAllLines (share Read only) would fail
+      # exactly while the footer question matters most.
+      $firstLine=ReadFirstLine $trace.FullName
+      if($firstLine) {
+        $head=$firstLine|ConvertFrom-Json
         if($head.event -eq 'header') {
           $start=[long]$head.qpc
           if($head.pid) { $capturePid=[int]$head.pid }
         }
-        $last=$lines[$lines.Length-1]|ConvertFrom-Json
+      }
+      $lastLine=ReadLastLine $trace.FullName
+      if($lastLine) {
+        $last=$lastLine|ConvertFrom-Json
         if($last.event -eq 'footer') {
           $end=[long]$last.qpc
           $footer=[pscustomobject]@{interrupted=[bool]$last.interrupted;
@@ -366,17 +791,22 @@ function TraceInventory {
 function WaitForTraceStart {
   while((Get-Date) -lt [datetime]$r.deadline -and -not (FinishRequested)) {
     TrackGames
+    if($InputMode -eq 'OpenXRSimulator' -and $script:simulatorControlProcess) {
+      $script:simulatorControlProcess.Refresh()
+      if($script:simulatorControlProcess.HasExited -and $script:simulatorControlProcess.ExitCode -ne 0) {
+        throw "Simulator MCP controller exited with code $($script:simulatorControlProcess.ExitCode) before any trace started; see mcp stderr log in the run evidence."
+      }
+    }
     $liveIds=@(Games | ForEach-Object { [int]$_.Id })
     $ownedIds=@($r.pids | ForEach-Object { [int]$_.id })
     foreach($trace in @(Get-ChildItem -LiteralPath $game -Filter 'DSVR-trace-*.jsonl' -ErrorAction SilentlyContinue |
                         Where-Object { $_.Name -notin $r.traces_before })) {
-      $stream=$null; $reader=$null
       try {
-        $stream=[IO.File]::Open($trace.FullName,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite)
-        $reader=[IO.StreamReader]::new($stream)
-        $line=$reader.ReadLine()
-        if($line) {
-          $header=$line | ConvertFrom-Json
+        # @() wrapper: a one-line capture would otherwise unroll to a bare
+        # string and $lines[0] would hand ConvertFrom-Json a single character.
+        $firstLine=ReadFirstLine $trace.FullName
+        if($firstLine) {
+          $header=$firstLine | ConvertFrom-Json
           $capturePid=[int]$header.pid
           if($header.event -eq 'header' -and [long]$header.qpc -gt 0 -and
              $capturePid -in $ownedIds -and $capturePid -in $liveIds) {
@@ -388,12 +818,19 @@ function WaitForTraceStart {
             return
           }
         }
-      } catch { }
-      finally { if($reader) { $reader.Dispose() } elseif($stream) { $stream.Dispose() } }
+      } catch {
+        # A failed read used to be swallowed forever; the first two failures are
+        # recorded so a timeout names the real reason instead of only the deadline.
+        if(-not $script:traceWaitErrors) { $script:traceWaitErrors=@() }
+        if($script:traceWaitErrors.Count -lt 2) {
+          $script:traceWaitErrors+="$($trace.Name): $($_.Exception.GetType().Name): $($_.Exception.Message)"
+        }
+      }
     }
     Start-Sleep -Milliseconds 250
   }
-  throw 'Trace header for the owned game did not arrive before the fixed session deadline.'
+  $detail=if($script:traceWaitErrors) { " Last read failures: $($script:traceWaitErrors -join ' | ')" } else { '' }
+  throw "Trace header for the owned game did not arrive before the fixed session deadline.$detail"
 }
 function TraceStopRequestPath([int]$processId) {
   return Join-Path $game ("DSVR-trace-stop-{0}.request" -f $processId)
@@ -471,7 +908,18 @@ function WaitForTraceFooters {
   }
 }
 function WaitForNormalGameExit {
-  Write-Output "Trace closure requested. Close Dark Souls Remastered normally within $CloseWaitMinutes minute(s); the runner will not terminate it."
+  if($InputMode -eq 'OpenXRSimulator') {
+    Write-Output 'Trace footer is closed. Asking the exact owned DSR window to exit normally.'
+    TrackGames
+    foreach($identity in @($r.pids)) {
+      $process=Get-Process -Id ([int]$identity.id) -ErrorAction SilentlyContinue
+      if($process -and $process.Path -ieq $identity.path -and $process.StartTime.Ticks -eq ([datetime]$identity.start).Ticks) {
+        $null=$process.CloseMainWindow()
+      }
+    }
+  } else {
+    Write-Output "Trace closure requested. Close Dark Souls Remastered normally within $CloseWaitMinutes minute(s); the runner will not terminate it."
+  }
   $limit=(Get-Date).AddMinutes($CloseWaitMinutes)
   while((Get-Date) -lt $limit) {
     TrackGames
@@ -483,6 +931,7 @@ function WaitForNormalGameExit {
   }
 }
 function CloseTraceAndWaitForGame {
+  StopOpenXRSimulatorControl
   RequestTraceStop
   WaitForTraceFooters
   ReportCaseCoverage
@@ -510,8 +959,9 @@ function RunCasePlan($plan,$tick) {
       start_qpc=$start;end_qpc=$null}
     $script:casePlan.cases=@($script:casePlan.cases)+@($row)
     SaveCases
-    Write-Output ("CASE $($entry.label): perform it now for $($entry.seconds) seconds. " +
-      'The observer capture starts automatically after the local player appears. ' +
+    $instruction=if($InputMode -eq 'SyntheticHmd') { 'Synthetic OpenXR inputs run automatically; no physical-hit claim is made. ' } else { 'Perform it now. ' }
+    Write-Output ("CASE $($entry.label): $instruction" +
+      "Capture window $($entry.seconds) seconds. The trace starts automatically after the local player appears. " +
       'A case outside a closed trace interval has no evidence.')
     $stop=(Get-Date).AddSeconds($entry.seconds)
     while((Get-Date) -lt $stop -and -not (FinishRequested)) {
@@ -557,6 +1007,22 @@ function RestoreTransaction {
   if(@(Games).Count) { throw 'Game process is still live; close it normally before restoring. No files or save roots were changed.' }
   RemoveOwnedTraceStopRequests
   AssertFiles $r.files; AssertRoots $r.roots
+  $runtimeCleanupError=$null
+  if($InputMode -eq 'SyntheticHmd') {
+    try { StopOwnedSteamVrRuntime; RestoreSteamVrSettings }
+    catch { $runtimeCleanupError=$_.Exception.Message; SetReceiptValue 'runtime_cleanup_error' $runtimeCleanupError }
+    try { SetReceiptValue 'runtime_registration_unchanged' ((Get-ItemProperty 'HKLM:\SOFTWARE\Khronos\OpenXR\1').ActiveRuntime -eq $r.synthetic_layer.active_runtime) }
+    catch { $runtimeCleanupError=$_.Exception.Message; SetReceiptValue 'runtime_cleanup_error' $runtimeCleanupError }
+  } elseif($InputMode -eq 'OpenXRSimulator') {
+    try {
+      StopOpenXRSimulatorControl
+      $after=(Get-ItemProperty 'HKLM:\SOFTWARE\Khronos\OpenXR\1').ActiveRuntime
+      $same=$after -ceq $r.simulator.system_runtime_before
+      SetReceiptValue 'runtime_registration_unchanged' $same
+      if(-not $same) { throw 'System OpenXR runtime registration changed during the process-overridden simulator run; the changed value was preserved.' }
+      if($r.simulator_control_forced) { throw 'The simulator MCP controller or server required forced termination.' }
+    } catch { $runtimeCleanupError=$_.Exception.Message; SetReceiptValue 'runtime_cleanup_error' $runtimeCleanupError }
+  }
   foreach($trace in @(Get-ChildItem -LiteralPath $game -Filter 'DSVR-trace-*.jsonl')) {
     if($trace.Name -notin $r.traces_before) { Copy-Item -LiteralPath $trace.FullName -Destination $r.evidence }
   }
@@ -579,8 +1045,9 @@ function RestoreTransaction {
   # newer in-memory/client metadata or stop/restart Steam to manufacture a match.
   RestoreRoots $r.roots
   RestoreFiles $r.files
-  $r.state='Restored'; SaveReceipt
+  $r.state=if($runtimeCleanupError) { 'RecoveryBlocked' } else { 'Restored' }; SaveReceipt
   Write-Output "Restored and hash-verified original save roots and install files. Receipt: $Receipt"
+  if($runtimeCleanupError) { throw "Save roots and game files restored, but simulator/runtime recovery is blocked: $runtimeCleanupError" }
 }
 function CompleteTransaction {
   # Do not let a tracking refusal skip safe cleanup, but first request a footer
@@ -612,6 +1079,37 @@ function SetReceiptValue($name,$value) {
   else { $r | Add-Member -NotePropertyName $name -NotePropertyValue $value -Force }
 }
 if($Mode -eq 'SelfTest') {
+  $runtimeManifest=Join-Path $steam 'steamapps\common\SteamVR\steamxr_win64.json'
+  if((RuntimeRootFromActiveRuntime $runtimeManifest) -ine (Join-Path $steam 'steamapps\common\SteamVR')) {
+    throw 'Active-runtime path resolution returned the wrong SteamVR root.'
+  }
+  $badRuntimeRefused=$false
+  try { RuntimeRootFromActiveRuntime (Join-Path $steam 'steamapps\common\SteamVR\other.json') | Out-Null }
+  catch { $badRuntimeRefused=$true }
+  if(-not $badRuntimeRefused) { throw 'Unknown active-runtime manifest was accepted.' }
+  & {
+    $fixture=Join-Path ([IO.Path]::GetTempPath()) ('dsvr-steamvr-settings-'+[guid]::NewGuid().ToString('N'))
+    [IO.Directory]::CreateDirectory($fixture)|Out-Null
+    $path=Join-Path $fixture 'steamvr.vrsettings'
+    $original=@{steamvr=@{forcedDriver='real';other=7}}
+    $requested=[ordered]@{'steamvr.forcedDriver'='null';'steamvr.activateMultipleDrivers'=$false;'driver_null.enable'=$true}
+    $updated=@{steamvr=@{forcedDriver='null';activateMultipleDrivers=$false;other=9};driver_null=@{enable=$true}}
+    WriteJsonSettings $path $updated
+    RestoreJsonSettings $path $original $requested
+    $restored=Get-Content $path -Raw|ConvertFrom-Json -AsHashtable
+    if($restored.steamvr.forcedDriver -ne 'real' -or $restored.steamvr.other -ne 9 -or
+       $restored.steamvr.Contains('activateMultipleDrivers') -or $restored.Contains('driver_null')) {
+      throw 'SteamVR setting restoration did not restore requested values or preserve unrelated updates.'
+    }
+    $updated.steamvr.forcedDriver='foreign'
+    WriteJsonSettings $path $updated
+    $refused=$false
+    try { RestoreJsonSettings $path $original $requested } catch { $refused=$true }
+    if(-not $refused -or (Get-Content $path -Raw|ConvertFrom-Json -AsHashtable).steamvr.forcedDriver -ne 'foreign') {
+      throw 'SteamVR setting conflict was overwritten instead of refused.'
+    }
+    Remove-Item -LiteralPath $fixture -Recurse -Force
+  }
   & {
     $base=[datetime]'2026-10-25T12:00:00Z'
     $path=Join-Path $game 'DarkSoulsRemastered.exe'
@@ -1011,11 +1509,13 @@ if($Mode -eq 'Launch') {
   $childArgs=@('-NoProfile','-NoLogo','-NonInteractive','-File',$PSCommandPath,
     '-Mode','Run','-Receipt',$Receipt,'-CandidateReceipt',$CandidateReceipt,
     '-WindowMinutes',"$WindowMinutes",'-CloseWaitMinutes',"$CloseWaitMinutes",
-    '-FooterWaitSeconds',"$FooterWaitSeconds",'-SeedVault',$SeedVault)
+    '-FooterWaitSeconds',"$FooterWaitSeconds",'-SeedVault',$SeedVault,
+    '-InputMode',$InputMode,'-HmdLayerDir',$HmdLayerDir,
+    '-SimulatorSoakSeconds',"$SimulatorSoakSeconds",'-MenuBudgetSeconds',"$MenuBudgetSeconds")
   if($Cases) { $childArgs+=@('-Cases',$Cases) }
   $child=StartDetachedPowerShell $childArgs $stdoutPath $stderrPath $repo
   $launch=[ordered]@{schema=1;receipt=$Receipt;pid=$child.Id;started=(Get-Date).ToString('o');
-    stdout=$stdoutPath;stderr=$stderrPath;mode='Run'}
+    stdout=$stdoutPath;stderr=$stderrPath;mode='Run';input_mode=$InputMode}
   try { WriteNewReceiptJson $launchPath $launch }
   catch { throw "Detached child PID $($child.Id) started but launch record could not be written. Logs: $stdoutPath ; $stderrPath. $($_.Exception.Message)" }
   Write-Output "Detached protected runner PID $($child.Id). Logs: $stdoutPath ; $stderrPath. Finish with: pwsh -NoProfile -File `"$PSCommandPath`" -Mode Finish -Receipt `"$Receipt`". Close the game normally after the footer is reported."
@@ -1055,7 +1555,36 @@ if($Mode -eq 'Restore') {
   [IO.Directory]::CreateDirectory($transactionParent) | Out-Null
   $script:transactionLease=[IO.File]::Open((Join-Path $transactionParent 'active-session.lock'),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
   $script:r=ReadReceipt
-  RestoreTransaction
+  if($r.input_mode -eq 'SyntheticHmd') {
+    $InputMode='SyntheticHmd'
+    $script:runtimeRoot=RuntimeRootFromActiveRuntime $r.synthetic_layer.active_runtime
+    $script:steamVrSettingsPath=$r.runtime_settings_path
+    $requested=[ordered]@{}
+    foreach($property in $r.runtime_settings_requested.PSObject.Properties) { $requested[$property.Name]=$property.Value }
+    $script:steamVrRequested=$requested
+    $script:hmdMutex=[Threading.Mutex]::new($false,'Local\DSVR-HmdLab')
+    $acquired=$false
+    try { $acquired=$script:hmdMutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $acquired=$true }
+    if(-not $acquired) { $script:hmdMutex.Dispose(); $script:hmdMutex=$null; throw 'The standalone HMD lab is active; refusing runtime recovery concurrently.' }
+  } elseif($r.input_mode -eq 'OpenXRSimulator') {
+    $InputMode='OpenXRSimulator'
+    $script:simulatorDataDir=$r.simulator.data_dir
+    $script:simulatorMemoryPath=Join-Path $r.evidence 'memory.csv'
+    $script:simulatorRuntimeLock=OpenXRSimulatorLock
+    if($r.simulator_control_id) {
+      $control=Get-Process -Id ([int]$r.simulator_control_id) -ErrorAction SilentlyContinue
+      if($control -and $control.Path -ieq $r.simulator_control_path -and
+         $control.StartTime.ToUniversalTime().Ticks -eq ([datetime]$r.simulator_control_started_utc).ToUniversalTime().Ticks) {
+        $script:simulatorControlProcess=$control
+      }
+    }
+    $script:hmdMutex=[Threading.Mutex]::new($false,'Local\DSVR-HmdLab')
+    $acquired=$false
+    try { $acquired=$script:hmdMutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $acquired=$true }
+    if(-not $acquired) { $script:hmdMutex.Dispose(); $script:hmdMutex=$null; throw 'Another OpenXR-Simulator run is active; refusing transaction recovery concurrently.' }
+  }
+  try { RestoreTransaction }
+  finally { if($script:hmdMutex) { $script:hmdMutex.ReleaseMutex(); $script:hmdMutex.Dispose(); $script:hmdMutex=$null } }
   exit 0
 }
 # Entire preflight is read-only. Never infer safety from a prior run's receipt.
@@ -1086,6 +1615,47 @@ foreach($path in @($core,$loader)) {
   $relative=(RelPath $repo $path).Replace('\','/')
   if((Hash $path) -ne $verified.binaries_and_package.$relative) { throw "Candidate hash differs from qualified build: $relative" }
 }
+$syntheticLayer=$null
+$simulatorLock=$null
+if($InputMode -eq 'SyntheticHmd') {
+  $syntheticLayerDir=if([IO.Path]::IsPathRooted($HmdLayerDir)) { [IO.Path]::GetFullPath($HmdLayerDir) } else { [IO.Path]::GetFullPath((Join-Path $repo $HmdLayerDir)) }
+  $buildRoot=[IO.Path]::GetFullPath((Join-Path $repo 'build'))+[IO.Path]::DirectorySeparatorChar
+  if(-not $syntheticLayerDir.StartsWith($buildRoot,[StringComparison]::OrdinalIgnoreCase)) { throw 'Synthetic HMD layer must be built under the repository build directory.' }
+  $layerDll=Join-Path $syntheticLayerDir 'DSVR-HmdLayer.dll'
+  $layerManifest=Join-Path $syntheticLayerDir 'DSVR_hmd_lab.json'
+  foreach($path in @($layerDll,$layerManifest)) { if(-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Missing synthetic HMD layer artifact: $path" } }
+  $manifest=Get-Content -LiteralPath $layerManifest -Raw | ConvertFrom-Json
+  if($manifest.api_layer.name -ne 'XR_APILAYER_DSVR_hmd_lab' -or $manifest.api_layer.library_path -ne './DSVR-HmdLayer.dll') { throw 'Synthetic HMD layer manifest identity is unexpected.' }
+  $activeRuntime=(Get-ItemProperty 'HKLM:\SOFTWARE\Khronos\OpenXR\1').ActiveRuntime
+  if([IO.Path]::GetFileName($activeRuntime) -ine 'steamxr_win64.json') { throw 'SyntheticHmd mode requires SteamVR as the unchanged active OpenXR runtime.' }
+  $script:runtimeRoot=RuntimeRootFromActiveRuntime $activeRuntime
+  $steamRoot=[IO.Path]::GetFullPath((Join-Path $script:runtimeRoot '..\..\..'))
+  $script:steamVrSettingsPath=Join-Path $steamRoot 'config\steamvr.vrsettings'
+  if(-not (Test-Path -LiteralPath $script:steamVrSettingsPath -PathType Leaf)) { throw 'SteamVR settings file is missing.' }
+  if(@(SteamVrProcesses).Count) { throw 'SteamVR is already running; SyntheticHmd mode will not change settings beneath a live runtime.' }
+  Get-Content -LiteralPath $script:steamVrSettingsPath -Raw | ConvertFrom-Json -AsHashtable | Out-Null
+  $syntheticLayer=[ordered]@{directory=$syntheticLayerDir;dll_sha256=(Hash $layerDll);manifest_sha256=(Hash $layerManifest);active_runtime=$activeRuntime;settings_path=$script:steamVrSettingsPath;settings_baseline_sha256=(Hash $script:steamVrSettingsPath);scenario='game-smoke-delay900-v1'}
+  if(-not $Cases -or @((ParseCases $Cases) | Where-Object { $_.label -notlike 'synthetic_*' }).Count) { throw 'SyntheticHmd mode requires only synthetic_* case labels.' }
+} elseif($InputMode -eq 'OpenXRSimulator') {
+  $syntheticLayerDir=if([IO.Path]::IsPathRooted($HmdLayerDir)) { [IO.Path]::GetFullPath($HmdLayerDir) } else { [IO.Path]::GetFullPath((Join-Path $repo $HmdLayerDir)) }
+  $buildRoot=[IO.Path]::GetFullPath((Join-Path $repo 'build'))+[IO.Path]::DirectorySeparatorChar
+  if(-not $syntheticLayerDir.StartsWith($buildRoot,[StringComparison]::OrdinalIgnoreCase)) { throw 'DSVR HMD telemetry layer must be built under the repository build directory.' }
+  $layerDll=Join-Path $syntheticLayerDir 'DSVR-HmdLayer.dll'
+  $layerManifest=Join-Path $syntheticLayerDir 'DSVR_hmd_lab.json'
+  foreach($path in @($layerDll,$layerManifest)) { if(-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Missing DSVR HMD telemetry-layer artifact: $path" } }
+  $manifest=Get-Content -LiteralPath $layerManifest -Raw | ConvertFrom-Json
+  if($manifest.api_layer.name -ne 'XR_APILAYER_DSVR_hmd_lab' -or $manifest.api_layer.library_path -ne './DSVR-HmdLayer.dll') { throw 'DSVR HMD layer manifest identity is unexpected.' }
+  $simulatorLock=OpenXRSimulatorLock
+  if(Get-Process -Name DarkSoulsRemastered -ErrorAction SilentlyContinue) { throw 'DSR must be closed before OpenXR-Simulator preflight.' }
+  $script:systemRuntimeBefore=(Get-ItemProperty 'HKLM:\SOFTWARE\Khronos\OpenXR\1').ActiveRuntime
+  if(-not $script:systemRuntimeBefore -or -not (Test-Path -LiteralPath $script:systemRuntimeBefore -PathType Leaf)) { throw 'Current system OpenXR runtime registration is missing or invalid.' }
+  if(Get-Process -Name vrserver,vrcompositor,vrmonitor,vrstartup -ErrorAction SilentlyContinue) { throw 'A SteamVR session is already active; this runner will not take over or stop it.' }
+  $syntheticLayer=[ordered]@{directory=$syntheticLayerDir;dll_sha256=(Hash $layerDll);manifest_sha256=(Hash $layerManifest);
+    scenario='game-smoke-simulator-v1';runtime_manifest=$simulatorLock.runtime_manifest;
+    runtime_manifest_sha256=$simulatorLock.runtime_manifest_sha256;runtime_dll=$simulatorLock.runtime_dll;
+    runtime_dll_sha256=$simulatorLock.runtime_dll_sha256;source_commit=$simulatorLock.source_commit;
+    mcp_server=$simulatorLock.mcp_server;input_source='upstream MCP ray actions and simulator-native keyboard controls';system_runtime_before=$script:systemRuntimeBefore}
+}
 $seeds=@((Join-Path $SeedVault 'test-root-0'),(Join-Path $SeedVault 'test-root-1'))
 if(-not (Test-Path -LiteralPath (Join-Path $seeds[0] "$account\DRAKS0005.sl2"))) { throw 'Disposable active-account seed missing.' }
 foreach($path in @($saveRoots+$seeds)) { if(-not (Test-Path -LiteralPath $path -PathType Container)) { throw "Missing root: $path" }; @(Inventory $path) | Out-Null }
@@ -1094,13 +1664,31 @@ $steamData=Join-Path $steam "userdata\$account\570940"
 foreach($name in $installNames) { Hash (Join-Path $game $name) | Out-Null }
 if(Test-Path -LiteralPath $Receipt) { throw 'Receipt already exists; use Restore or a new run ID.' }
 $plan=ParseCases $Cases
+if($InputMode -eq 'OpenXRSimulator' -and -not $Cases) {
+  $remaining=[int]$SimulatorSoakSeconds+[int]$MenuBudgetSeconds
+  if($remaining -eq 0) { $plan=@([pscustomobject]@{label='simulator_hmd';seconds=60}) }
+  else {
+    $index=1
+    while($remaining -gt 0) {
+      $window=[math]::Min(600,$remaining)
+      $plan+=@([pscustomobject]@{label="simulator_hmd_$index";seconds=$window})
+      $remaining-=$window; $index++
+    }
+  }
+}
 if($plan.Count) {
   $total=[int](($plan | Measure-Object -Property seconds -Sum).Sum)
   if($total -gt $WindowMinutes*60) { throw "Case plan needs $total s; the observer window is $($WindowMinutes*60) s." }
   Write-Output "Case plan: $($plan.Count) declared windows totalling $total s."
 }
-Write-Output 'CHECK PASS: pinned candidate, offline/disconnected Steam, exact-game block, disposable seeds and original roots. No changes yet.'
+Write-Output "CHECK PASS: pinned candidate, offline/disconnected Steam, exact-game block, disposable seeds and original roots. Input mode: $InputMode. No changes yet."
 if($Mode -eq 'Check') { exit 0 }
+if($InputMode -eq 'SyntheticHmd') {
+  $script:hmdMutex=[Threading.Mutex]::new($false,'Local\DSVR-HmdLab')
+  $acquired=$false
+  try { $acquired=$script:hmdMutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $acquired=$true }
+  if(-not $acquired) { $script:hmdMutex.Dispose(); $script:hmdMutex=$null; throw 'Another standalone or protected HMD test run is active.' }
+}
 [IO.Directory]::CreateDirectory($evidence) | Out-Null
 $CasesPath=Join-Path $evidence 'combat-cases.json'
 [IO.Directory]::CreateDirectory($transactionParent) | Out-Null
@@ -1108,7 +1696,23 @@ $script:transactionLease=[IO.File]::Open((Join-Path $transactionParent 'active-s
 $vault=Join-Path $transactionParent ('combat-observer-'+(Get-Date -Format 'yyyyMMdd-HHmmss')+'-'+[guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $vault | Out-Null
 $steamConfig=Join-Path $steam "userdata\$account\config\localconfig.vdf"
-$script:r=[ordered]@{state='Preparing';vault=$vault;started=(Get-Date).ToString('o');deadline=(Get-Date).AddMinutes($WindowMinutes).ToString('o');pids=@();trace_stop_pids=@();trace_stop_token=[guid]::NewGuid().ToString('N');roots=@();files=@();evidence=$evidence;steam_data=$steamData;steam_config=$steamConfig;steam_before=@();traces_before=@((Get-ChildItem -LiteralPath $game -Filter 'DSVR-trace-*.jsonl').Name);notes='Operator controls all gameplay. Observer-only LAB core; no XR/input/gameplay writes. Steam metadata snapshotted, live cache not overwritten. Keep Steam Offline. Cloud state is not independently proven; offline/exact-EXE blocking remain required.'}
+$script:r=[ordered]@{state='Preparing';vault=$vault;started=(Get-Date).ToString('o');deadline=(Get-Date).AddMinutes($WindowMinutes).ToString('o');pids=@();runtime_processes=@();runtime_processes_before=@();runtime_peak_private_mb=@{};runtime_cleanup_ok=$null;runtime_forced_pids=@();trace_stop_pids=@();trace_stop_token=[guid]::NewGuid().ToString('N');roots=@();files=@();evidence=$evidence;steam_data=$steamData;steam_config=$steamConfig;steam_before=@();traces_before=@((Get-ChildItem -LiteralPath $game -Filter 'DSVR-trace-*.jsonl').Name);input_mode=$InputMode;synthetic_layer=$syntheticLayer;simulator_control=@();simulator_server_processes=@();simulator_control_forced=$false;runtime_registration_unchanged=$null;memory_samples=0;memory_peak_private_mb=@{};notes=if($InputMode -eq 'SyntheticHmd') {'Legacy SteamVR null-driver synthetic OpenXR route retained for historical receipts; not used by the selected OpenXR-Simulator runner. No physical-hit claim.'} elseif($InputMode -eq 'OpenXRSimulator') {'Unmodified upstream OpenXR Simulator v1.7.1 selected with child-process XR_RUNTIME_JSON. MCP screenshot-based controller-ray actions and the simulator documented keyboard map drive only supported controls; per-process SIMXR_DATA_DIR and Background input polling are isolated to this receipt. System runtime registration is preserved. Steam stays Offline; exact-game outbound blocking and disposable save/install transactions remain enforced. No physical-hit claim.'} else {'Observer-only LAB core; no XR/input/gameplay writes. Steam metadata snapshotted, live cache not overwritten. Keep Steam Offline. Cloud state is not independently proven; offline/exact-EXE blocking remain required.'}}
+if($InputMode -eq 'OpenXRSimulator') {
+  $script:simulatorRuntimeLock=$simulatorLock
+  $script:simulatorDataDir=Join-Path $evidence 'simxr-data'
+  [IO.Directory]::CreateDirectory($script:simulatorDataDir) | Out-Null
+  [IO.File]::WriteAllText((Join-Path $script:simulatorDataDir 'settings.json'),'{"input_polling":"background"}',[Text.Encoding]::ASCII)
+  $script:r.simulator=[ordered]@{
+    input_polling='background'
+    runtime_name='OpenXR Simulator';runtime_version='1.7.1';source_commit=$simulatorLock.source_commit
+    runtime_manifest=$simulatorLock.runtime_manifest;runtime_manifest_sha256=$simulatorLock.runtime_manifest_sha256
+    runtime_dll=$simulatorLock.runtime_dll;runtime_dll_sha256=$simulatorLock.runtime_dll_sha256
+    mcp_server=$simulatorLock.mcp_server;data_dir=$script:simulatorDataDir;isolated_data_dir=$true
+    input_source='upstream MCP ray actions and simulator-native keyboard controls'
+    system_runtime_before=$script:systemRuntimeBefore;process_override_used=$true
+    runtime_module_loaded=$false;layer_module_loaded=$false
+    }
+}
 SaveReceipt
 try {
   $r.candidate_receipt=$candidateReceiptPath
@@ -1132,22 +1736,81 @@ try {
   }
   SaveReceipt
   StageRoots $r.roots
-  $config=Join-Path $vault 'observer-candidate.toml'
-  [IO.File]::WriteAllText($config,(ObserverConfig),[Text.UTF8Encoding]::new($false))
+  $configName=if($InputMode -eq 'OpenXRSimulator') { 'openxr-simulator-candidate.toml' } else { 'observer-candidate.toml' }
+  $config=Join-Path $vault $configName
+  $configContent=if($InputMode -eq 'OpenXRSimulator') { OpenXRSimulatorConfig } else { ObserverConfig }
+  [IO.File]::WriteAllText($config,$configContent,[Text.UTF8Encoding]::new($false))
   StageFile $r.files[0] $loader; StageFile $r.files[1] $core; StageFile $r.files[2] $config
+  if($InputMode -eq 'SyntheticHmd') {
+    $r.runtime_processes_before=@(SteamVrProcesses | ForEach-Object { @{id=$_.Id;path=$_.Path;started_utc=$_.StartTime.ToUniversalTime().ToString('o')} })
+    if($r.runtime_processes_before.Count) { throw 'SteamVR started during preparation; refusing to change settings beneath it.' }
+    SaveReceipt
+    ApplySteamVrSettings
+  }
   $r.state='ObserverReady'; SaveReceipt
   # Generation-adoption floor: any game created before this instant came from
   # someone else's launch, so TrackGames must refuse it (see fixtures).
   $r.launch_requested=(Get-Date).ToString('o'); SaveReceipt
-  Write-Output "Launching protected desktop observer; operator input only; deadline $($r.deadline). Combat recording starts automatically for ten minutes; no F9 required."
+  Write-Output "Launching protected game session in $InputMode mode; deadline $($r.deadline). Combat recording starts automatically for ten minutes; no F9 required."
   Write-Output "After the declared work, the runner will request a trace footer and wait for normal game exit. To finish early: pwsh -NoProfile -File `"$PSCommandPath`" -Mode Finish -Receipt `"$Receipt`"."
-  Start-Process -FilePath (Join-Path $steam 'steam.exe') -ArgumentList '-applaunch','570940' | Out-Null
+  if($InputMode -eq 'SyntheticHmd') {
+    $environmentNames=@('XR_API_LAYER_PATH','XR_ENABLE_API_LAYERS','DSVR_HMD_LAB','DSVR_HMD_LAB_DIR','DSVR_HMD_LAB_SCENARIO','SteamAppId','SteamGameId')
+    $environmentBefore=@{}
+    foreach($name in $environmentNames) { $environmentBefore[$name]=[Environment]::GetEnvironmentVariable($name,'Process') }
+    try {
+      [Environment]::SetEnvironmentVariable('XR_API_LAYER_PATH',$syntheticLayer.directory,'Process')
+      [Environment]::SetEnvironmentVariable('XR_ENABLE_API_LAYERS','XR_APILAYER_DSVR_hmd_lab','Process')
+      [Environment]::SetEnvironmentVariable('DSVR_HMD_LAB','1','Process')
+      [Environment]::SetEnvironmentVariable('DSVR_HMD_LAB_DIR',$evidence,'Process')
+      [Environment]::SetEnvironmentVariable('DSVR_HMD_LAB_SCENARIO','game-smoke','Process')
+      [Environment]::SetEnvironmentVariable('SteamAppId','570940','Process')
+      [Environment]::SetEnvironmentVariable('SteamGameId','570940','Process')
+      Start-Process -FilePath (Join-Path $game 'DarkSoulsRemastered.exe') -WorkingDirectory $game | Out-Null
+    } finally {
+      foreach($name in $environmentNames) { [Environment]::SetEnvironmentVariable($name,$environmentBefore[$name],'Process') }
+    }
+  } elseif($InputMode -eq 'OpenXRSimulator') {
+    $environmentNames=@('XR_RUNTIME_JSON','XR_API_LAYER_PATH','XR_ENABLE_API_LAYERS','DSVR_HMD_LAB','DSVR_HMD_LAB_DIR',
+      'DSVR_HMD_LAB_SCENARIO','SIMXR_DATA_DIR','SteamAppId','SteamGameId')
+    $environmentBefore=@{}
+    foreach($name in $environmentNames) { $environmentBefore[$name]=[Environment]::GetEnvironmentVariable($name,'Process') }
+    try {
+      [Environment]::SetEnvironmentVariable('XR_RUNTIME_JSON',$simulatorLock.runtime_manifest,'Process')
+      [Environment]::SetEnvironmentVariable('XR_API_LAYER_PATH',$syntheticLayer.directory,'Process')
+      [Environment]::SetEnvironmentVariable('XR_ENABLE_API_LAYERS','XR_APILAYER_DSVR_hmd_lab','Process')
+      [Environment]::SetEnvironmentVariable('DSVR_HMD_LAB','1','Process')
+      [Environment]::SetEnvironmentVariable('DSVR_HMD_LAB_DIR',$evidence,'Process')
+      [Environment]::SetEnvironmentVariable('DSVR_HMD_LAB_SCENARIO','game-smoke-simulator-v1','Process')
+      [Environment]::SetEnvironmentVariable('SIMXR_DATA_DIR',$script:simulatorDataDir,'Process')
+      [Environment]::SetEnvironmentVariable('SteamAppId','570940','Process')
+      [Environment]::SetEnvironmentVariable('SteamGameId','570940','Process')
+      Start-Process -FilePath (Join-Path $game 'DarkSoulsRemastered.exe') -WorkingDirectory $game | Out-Null
+    } finally {
+      foreach($name in $environmentNames) { [Environment]::SetEnvironmentVariable($name,$environmentBefore[$name],'Process') }
+    }
+  } else {
+    Start-Process -FilePath (Join-Path $steam 'steam.exe') -ArgumentList '-applaunch','570940' | Out-Null
+  }
   WaitForSingleGameLaunch
+  if($InputMode -eq 'OpenXRSimulator') { StartOpenXRSimulatorControl }
   WaitForTraceStart
-  RunCasePlan $plan { TrackGames }
+  $tick={
+    TrackGames
+    if($InputMode -eq 'OpenXRSimulator') {
+      SampleOpenXRSimulatorMemory
+      if($script:simulatorControlProcess -and $script:simulatorControlProcess.HasExited -and $script:simulatorControlProcess.ExitCode -ne 0) {
+        throw "Simulator MCP controller exited with code $($script:simulatorControlProcess.ExitCode)."
+      }
+    }
+  }
+  RunCasePlan $plan $tick
+  if($InputMode -eq 'OpenXRSimulator') { WaitForOpenXRSimulatorControl }
   WaitForGameSession
 } finally {
   # Final exact-identity inventory before restoration; a launch this session
   # did not produce is excluded from ownership and pauses restoration instead.
-  CompleteTransaction
+  try { CompleteTransaction }
+  finally {
+    if($script:hmdMutex) { $script:hmdMutex.ReleaseMutex(); $script:hmdMutex.Dispose(); $script:hmdMutex=$null }
+  }
 }

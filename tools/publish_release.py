@@ -3,14 +3,24 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import re
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 
 _VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 _OPEN_TASK = re.compile(r"^\s*-\s*\[\s\]\s+[A-K]\d", re.MULTILINE)
 _EXPECTED_LANES = {f"{chr(code)}.md" for code in range(ord("A"), ord("K") + 1)}
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def open_gates(lane_dir: Path) -> list[str]:
@@ -73,7 +83,8 @@ def doctor_passed(path: Path) -> bool:
 
 
 
-def release_command(out_dir: Path, version: str) -> list[str]:
+def release_command(out_dir: Path, version: str,
+                    include_launcher: bool = False) -> list[str]:
     if not _VERSION.fullmatch(version) or version == "latest":
         raise ValueError("release version must be one safe, immutable label")
     stage = out_dir / f"DSVR-{version}"
@@ -82,6 +93,51 @@ def release_command(out_dir: Path, version: str) -> list[str]:
     missing = [str(path) for path in assets if not path.is_file()]
     if missing:
         raise FileNotFoundError("formal release assets missing: " + ", ".join(missing))
+    launcher = out_dir / "DSVR-Launcher-x64.zip"
+    launcher_hash = out_dir / "DSVR-Launcher-SHA256.txt"
+    if include_launcher and launcher.exists() != launcher_hash.exists():
+        raise ValueError("optional launcher ZIP and SHA-256 file must be built together")
+    if include_launcher:
+        if not launcher.is_file() or not launcher_hash.is_file():
+            raise FileNotFoundError("optional launcher ZIP and SHA-256 file are missing")
+        digest = sha256_file(launcher)
+        checksum_lines = launcher_hash.read_text(encoding="utf-8").splitlines()
+        if checksum_lines != [f"{digest}  {launcher.name}"]:
+            raise ValueError("optional launcher ZIP does not match its SHA-256 file")
+        package_manifest = {}
+        for line in (stage / "DSVR-SHA256.txt").read_text(encoding="utf-8").splitlines():
+            parts = line.split(None, 1)
+            if len(parts) == 2:
+                package_manifest[parts[1].strip()] = parts[0].lower()
+        engine_files = ("dinput8.dll", "DSVR.dll", "DSVR-Setup.exe")
+        missing = [name for name in engine_files if name not in package_manifest]
+        if missing:
+            raise ValueError(
+                "formal package manifest is missing launcher engine hashes: " +
+                ", ".join(missing)
+            )
+        try:
+            with zipfile.ZipFile(launcher) as archive:
+                engine_manifest = archive.read("resources/DSVR-SHA256.txt").decode("utf-8")
+                embedded_files = {
+                    name: archive.read(f"resources/{name}") for name in engine_files
+                }
+        except (KeyError, zipfile.BadZipFile) as error:
+            raise ValueError(
+                "optional launcher ZIP is missing verified Setup engine resources"
+            ) from error
+        launcher_manifest = {}
+        for line in engine_manifest.splitlines():
+            parts = line.split(None, 1)
+            if len(parts) == 2:
+                launcher_manifest[parts[1].strip()] = parts[0].lower()
+        for name, data in embedded_files.items():
+            digest = hashlib.sha256(data).hexdigest()
+            if digest != package_manifest[name] or launcher_manifest.get(name) != digest:
+                raise ValueError(
+                    f"optional launcher embeds {name} from a different package"
+                )
+        assets.extend([launcher, launcher_hash])
     return [
         "gh", "release", "create", f"v{version}",
         *(str(path) for path in assets),
@@ -102,6 +158,8 @@ def main() -> int:
     publish.add_argument("--version", required=True)
     publish.add_argument("--ctest-log", type=Path, required=True)
     publish.add_argument("--doctor-log", type=Path, required=True)
+    publish.add_argument("--include-launcher", action="store_true",
+                         help="publish the separately built portable launcher ZIP")
     args = parser.parse_args()
     try:
         gates = open_gates(args.lanes)
@@ -123,7 +181,8 @@ def main() -> int:
             if not ctest_passed(args.ctest_log):
                 print("Formal publication blocked: supplied CTest log is not a zero-failure run.")
                 return 1
-        command = release_command(args.out, args.version)
+        command = release_command(args.out, args.version,
+                                  getattr(args, "include_launcher", False))
         result = subprocess.run(command, check=False)
         return result.returncode
     except (OSError, ValueError) as error:

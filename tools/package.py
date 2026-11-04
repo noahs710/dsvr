@@ -141,13 +141,14 @@ def main() -> int:
         build / "_deps" / "minhook-src" / "LICENSE.txt": "licenses/MinHook-LICENSE.txt",
         build / "_deps" / "openxr-src" / "LICENSE": "licenses/OpenXR-LICENSE",
         build / "_deps" / "openxr-src" / "src" / "external" / "jsoncpp" / "LICENSE": "licenses/JsonCpp-LICENSE",
+        repo / "src" / "core" / "fidelityfx_cas_license.txt": "licenses/FidelityFX-CAS-LICENSE.txt",
         repo / "LICENSE": "LICENSE",
         repo / "third_party" / "README.md": "THIRD_PARTY.md",
         repo / "tools" / "vr_trace.py": "tools/vr_trace.py",
           build / "src" / "core" / cfg / "DSVR-TraceWriter.exe": "DSVR-TraceWriter.exe",
     }
-    for doc in ('README.md', 'MODDING_PLAN.md', 'MODLOG.md',
-                'docs/ENGINEERING.md', 'docs/TESTING.md', 'docs/ATTRIBUTION.md'):
+    for doc in ('README.md', 'docs/ENGINEERING.md', 'docs/TESTING.md',
+                'docs/ATTRIBUTION.md'):
         files[repo / doc] = doc
     if args.reshade_addon:
         files[build / "src" / "reshade" / cfg / "DSVR-ReShade.addon64"] = "DSVR-ReShade.addon64"

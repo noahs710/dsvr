@@ -2,7 +2,7 @@
 # DSVR offline verify; formal -Package -Version also publishes after the release gates.
 # Safe: never installs, never launches the game, never touches the game folder.
 # Formal publication requires closed A-J/K1-K4 gates, full CTest, Doctor, gh auth and a pre-pushed v<version> tag; the tool never pushes tags.
-param([switch]$Package, [string]$Version, [switch]$NoLatest,
+param([switch]$Package, [string]$Version, [switch]$IncludeLauncher, [switch]$NoLatest,
   [switch]$SkipDoctor, [switch]$SkipPackage)
 $ErrorActionPreference = "Stop"
 if (($Package -and [string]::IsNullOrWhiteSpace($Version)) -or
@@ -11,6 +11,9 @@ if (($Package -and [string]::IsNullOrWhiteSpace($Version)) -or
 }
 if ($Package -and $SkipDoctor) {
   throw "Formal releases require Doctor; do not use -SkipDoctor."
+}
+if ($IncludeLauncher -and !$Package) {
+  throw "-IncludeLauncher requires -Package and an explicit -Version."
 }
 $root = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
 Set-Location $root
@@ -60,6 +63,12 @@ if (!$NoLatest -and !$SkipPackage -and !$Package) {
 if ($Package) {
   python -B tools\package.py --build build --out dist --version $Version --reshade-addon
   if ($LASTEXITCODE -ne 0) { exit 1 }
-  python -B tools\publish_release.py publish --lanes .empryo\cockpit\lanes --out dist --version $Version --ctest-log build\latest-ctest.txt --doctor-log build\latest-doctor.txt
+  if ($IncludeLauncher) {
+    python -B tools\package_launcher.py --package-dir "dist\DSVR-$Version" --out dist\DSVR-Launcher-x64.zip
+    if ($LASTEXITCODE -ne 0) { exit 1 }
+  }
+  $publishArgs = @("publish", "--lanes", ".empryo\cockpit\lanes", "--out", "dist", "--version", $Version, "--ctest-log", "build\latest-ctest.txt", "--doctor-log", "build\latest-doctor.txt")
+  if ($IncludeLauncher) { $publishArgs += "--include-launcher" }
+  python -B tools\publish_release.py @publishArgs
   if ($LASTEXITCODE -ne 0) { exit 1 }
 }
