@@ -22,6 +22,10 @@ void Check(bool ok, const char* what) {
 int main() {
   using dsvr::ChooseEyeBufferSize;
   using dsvr::EyeBufferSize;
+  const auto odd = ChooseEyeBufferSize(2145, 2293, 8192, 8192, 640, 480, 100);
+  Check(odd.width == 2145 && odd.height == 2293, "100 percent preserves odd recommendations exactly");
+  const auto invalid = ChooseEyeBufferSize(2145, 2293, 2000, 8192, 640, 480, 100);
+  Check(invalid.width == 0 && invalid.height == 0, "invalid recommendation fails instead of silently shrinking 100 percent");
 
   // Immersive play: recommended rect, no max hint.
   const EyeBufferSize immersive = ChooseEyeBufferSize(2064, 2208, 2464, 2448, 1920, 1080, 100);

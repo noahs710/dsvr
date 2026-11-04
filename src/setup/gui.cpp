@@ -22,7 +22,9 @@
 #include <vector>
 
 #include "../common/config.h"
+#include "../common/ui_palette.h"
 #include "../common/version.h"
+#include "launch.h"
 #include "setup_internal.h"
 
 namespace {
@@ -173,18 +175,21 @@ int ContentHeight() {
   return 260;
 }
 
-// Ashen Void palette: near-black background, quiet neutral surfaces, and a
-// restrained cool accent. Controls remain owner-drawn for consistent dark UI.
-constexpr COLORREF kBackdrop = RGB(9, 9, 11);
-constexpr COLORREF kField = RGB(20, 20, 22);
-constexpr COLORREF kEdge = RGB(47, 47, 53);
-constexpr COLORREF kInk = RGB(237, 237, 240);
-constexpr COLORREF kMuted = RGB(146, 145, 153);
-constexpr COLORREF kGold = RGB(165, 161, 183);
-constexpr COLORREF kGoldDim = RGB(105, 102, 119);
-constexpr COLORREF kOnGold = RGB(23, 22, 27);
-constexpr COLORREF kEmber = RGB(200, 197, 212);
-constexpr COLORREF kEmberDeep = RGB(131, 128, 145);
+constexpr COLORREF ToColorRef(dsvr::palette::Rgb8 color) {
+  return RGB(color.r, color.g, color.b);
+}
+constexpr COLORREF kBackdrop = ToColorRef(dsvr::palette::background);
+constexpr COLORREF kField = ToColorRef(dsvr::palette::surface);
+constexpr COLORREF kRaised = ToColorRef(dsvr::palette::raised);
+constexpr COLORREF kEdge = ToColorRef(dsvr::palette::border);
+constexpr COLORREF kInk = ToColorRef(dsvr::palette::text);
+constexpr COLORREF kMuted = ToColorRef(dsvr::palette::muted);
+constexpr COLORREF kBone = ToColorRef(dsvr::palette::bone);
+constexpr COLORREF kMoss = ToColorRef(dsvr::palette::moss);
+constexpr COLORREF kMossDim = ToColorRef(dsvr::palette::moss_dark);
+constexpr COLORREF kOnAccent = ToColorRef(dsvr::palette::ink);
+constexpr COLORREF kEmber = ToColorRef(dsvr::palette::ember);
+constexpr COLORREF kEmberDeep = ToColorRef(dsvr::palette::ember_dark);
 // Statics created by AddHint get an id in this block: the colour handler reads
 // the id to tell a quiet explanation line from a field label.
 constexpr int kHintBase = 900;
@@ -316,13 +321,16 @@ std::wstring AdvancedSettingsIndex() {
     {L"Launcher and VR", L"Head-tracked view", L"headlook_enabled"},
     {L"Launcher and VR", L"Flat screen during gameplay", L"gameplay_theater"},
     {L"Launcher and VR", L"Mono virtual screen width", L"mono_screen_fov_deg"},
-    {L"Launcher and VR", L"Spatial menu override", L"sanctuary_override"},
+    {L"Launcher and VR", L"Spatial menu panel", L"theater_override"},
+    {L"Launcher and VR", L"Floor grid in theater", L"theater_floor_grid"},
     {L"Launcher and VR", L"Menu distance", L"menu_distance_m"},
     {L"Launcher and VR", L"Menu text viewing angle", L"menu_reading_fov_deg"},
     {L"Launcher and VR", L"Disable motion blur while installed", L"force_disable_motion_blur"},
     {L"Launcher and VR", L"Experimental stereo rendering (currently refused)", L"stereo_enabled"},
     {L"Launcher and VR", L"Experimental alternating-eye rendering", L"afr_enabled"},
-    {L"Launcher and VR", L"Anti-aliasing mode", L"aa_mode"},
+    {L"Launcher and VR", L"Spatial anti-aliasing (Off/FXAA)", L"aa_mode"},
+    {L"Launcher and VR", L"CAS sharpening", L"cas_enabled"},
+    {L"Launcher and VR", L"CAS strength", L"cas_strength"},
     {L"Controls and movement", L"Weapon hand", L"dominant_hand"},
     {L"Controls and movement", L"Movement direction reference", L"movement_orientation"},
     {L"Controls and movement", L"Controller used for movement direction", L"movement_controller"},
@@ -674,21 +682,6 @@ bool RefreshGame(bool log_it) {
   // Steam client (steam://rungameid/570940) so the client activates the app
   // and the game starts whether Steam is open or not. Falls back to the raw
   // exe only when no Steam client path is found.
-  std::wstring SteamClientExe() {
-  wchar_t pf86[32768]{};
-  if (GetEnvironmentVariableW(L"ProgramFiles(x86)", pf86, 32767) > 0) {
-    const std::wstring cand =
-          std::wstring(pf86) + L"\\Steam\\Steam.exe";
-    DWORD a = GetFileAttributesW(cand.c_str());
-      if (a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY))
-        return cand;
-    }
-    const std::wstring fallback = L"C:\\Program Files (x86)\\Steam\\Steam.exe";
-  DWORD a = GetFileAttributesW(fallback.c_str());
-  if (a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY))
-      return fallback;
-  return {};
-  }
   void LaunchGame(HWND parent) {
     if (!RefreshGame(false)) return;
     if (setup::IsGameRunning()) {
@@ -704,36 +697,14 @@ bool RefreshGame(bool log_it) {
   if (!install.installed() && MessageBoxW(parent,
       L"DSVR is not installed. Launch the native game without the mod?",
       L"Launch without DSVR", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES) return;
-  const std::wstring steam = SteamClientExe();
-  STARTUPINFOW start{};
-  start.cb = sizeof(start);
-  PROCESS_INFORMATION process{};
-  std::wstring command;
-  LPCWSTR app = nullptr;
-  if (!steam.empty()) {
-    // steam://rungameid/570940 activates Dark Souls: Remastered through the
-    // client, which is what Steam init requires when Steam is already open.
-    command = L"\"" + steam + L"\" steam://rungameid/570940";
-    app = steam.c_str();
-  } else {
-    command = L"\"" + g_exe + L"\"";
-    app = g_exe.c_str();
-  }
-  if (!CreateProcessW(app, command.data(), nullptr, nullptr, FALSE, 0,
-                      nullptr, setup::DirNameOf(g_exe).c_str(), &start, &process)) {
-    const auto error = GetLastError();
+  const auto launched = setup::LaunchGameProcess(g_exe, true);
+  if (!launched.started) {
     SetStatus(L"Launch failed -- see activity log.");
-    GuiLog(L"FAIL: the game did not start (Win32 error " + std::to_wstring(error) + L").");
+    GuiLog(L"FAIL: the game did not start (Win32 error " +
+           std::to_wstring(launched.win32_error) + L").");
     return;
   }
-  CloseHandle(process.hThread);
-  // Grant the game the right to take foreground once its window exists, so the
-  // player's keyboard/controller focus lands on the game instead of staying on
-  // this window. The game asks for foreground itself at startup; without this
-  // grant Windows refuses that request.
-  AllowSetForegroundWindow(process.dwProcessId);
-  CloseHandle(process.hProcess);
-  GuiLog(L"Started " + g_exe + L" (pid " + std::to_wstring(process.dwProcessId) +
+  GuiLog(L"Started " + g_exe + L" (pid " + std::to_wstring(launched.pid) +
          L"). Play offline while DSVR is installed.");
   SetStatus(L"Game process started; headset/runtime readiness has not been tested.");
 }
@@ -817,7 +788,7 @@ bool SaveSettings(bool silent) {
 
 // One control changed: save immediately and re-show the toml truth.
 // Programmatic repopulation suppresses its own echo via g_suppress.
-void ApplyControlNow(HWND hwnd) {
+void ApplyControlNow(HWND /*hwnd*/) {
   if (g_suppress || g_exe.empty()) return;
   SaveSettings(true);
   UpdateBrief();
@@ -957,7 +928,7 @@ void DrawFrames(HDC dc, const RECT& client) {
     const RECT label{x + S(10), y - S(3), x + S(10) + size.cx + S(8),
                      y - S(3) + size.cy + S(6)};
     FillRect(dc, &label, g_backdrop_brush);
-    SetTextColor(dc, kGold);
+    SetTextColor(dc, kBone);
     TextOutW(dc, x + S(14), y - S(3), f.title.c_str(), (int)f.title.size());
   }
   SelectObject(dc, old_font);
@@ -982,9 +953,9 @@ void DrawButton(LPDRAWITEMSTRUCT item) {
   const int saved_dc = SaveDC(dc);
   SelectObject(dc, g_font);
   const RECT box = item->rcItem;
-  const COLORREF hi = primary || selected ? kEmber : kGold;
-  const COLORREF lo = primary || selected ? kEmberDeep : kGoldDim;
-  const COLORREF fill = pressed ? lo : primary || selected ? RGB(39, 38, 45) : kField;
+  const COLORREF hi = primary || selected ? kEmber : kBone;
+  const COLORREF lo = primary || selected ? kEmberDeep : kMossDim;
+  const COLORREF fill = pressed ? lo : primary || selected ? kRaised : kField;
   HPEN pen = CreatePen(PS_SOLID, 1, disabled ? kEdge : (primary || selected || pressed) ? hi : kEdge);
   HBRUSH brush = CreateSolidBrush(fill);
   HPEN old_pen = (HPEN)SelectObject(dc, pen);
@@ -1000,8 +971,8 @@ void DrawButton(LPDRAWITEMSTRUCT item) {
     const int cy = (box.top + box.bottom) / 2;
     const RECT mark{box.left + S(9), cy - side / 2, box.left + S(9) + side,
                     cy + side / 2};
-    HBRUSH mark_fill = CreateSolidBrush(checked ? kGold : kBackdrop);
-    HPEN mark_pen = CreatePen(PS_SOLID, 1, checked ? kGold : kMuted);
+    HBRUSH mark_fill = CreateSolidBrush(checked ? kMoss : kBackdrop);
+    HPEN mark_pen = CreatePen(PS_SOLID, 1, checked ? kMoss : kMuted);
     old_pen = (HPEN)SelectObject(dc, mark_pen);
     old_fill = (HBRUSH)SelectObject(dc, mark_fill);
     Rectangle(dc, mark.left, mark.top, mark.right, mark.bottom);
@@ -1010,7 +981,7 @@ void DrawButton(LPDRAWITEMSTRUCT item) {
     DeleteObject(mark_fill);
     DeleteObject(mark_pen);
     if (checked) {
-      HPEN ink = CreatePen(PS_SOLID, MulDiv(2, (int)g_dpi, 96), kOnGold);
+      HPEN ink = CreatePen(PS_SOLID, MulDiv(2, (int)g_dpi, 96), kOnAccent);
       HPEN old = (HPEN)SelectObject(dc, ink);
       MoveToEx(dc, mark.left + S(3), cy, nullptr);
       LineTo(dc, mark.left + side / 2, mark.bottom - S(4));
@@ -1023,7 +994,7 @@ void DrawButton(LPDRAWITEMSTRUCT item) {
   wchar_t text[256]{};
   GetWindowTextW(item->hwndItem, text, 256);
   SetBkMode(dc, TRANSPARENT);
-  SetTextColor(dc, disabled ? kMuted : (pressed && !toggle) ? kOnGold : kInk);
+  SetTextColor(dc, disabled ? kMuted : kInk);
   RECT label{text_x, box.top, box.right - S(6), box.bottom};
   UINT flags = DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS;
   if (item->itemState & ODS_NOACCEL) flags |= DT_HIDEPREFIX;
@@ -1184,6 +1155,7 @@ void ApplyPreset(int id) {
     const dsvr::HardwareTier tier = dsvr::TierForHardware(spec);
     const dsvr::Preset preset = dsvr::PresetForTier(tier, id == CTL_PRESET_SMOOTH);
     cfg.render_scale_percent = preset.render_scale_percent;
+    cfg.aa_mode = static_cast<int>(preset.aa_mode);
     cfg.comfort_vignette = false;
     cfg.snap_turn = false;
     cfg.smooth_turn = true;
@@ -1628,7 +1600,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       HWND control = reinterpret_cast<HWND>(lp);
       const bool field = msg != WM_CTLCOLORSTATIC || control == g_log || InList(g_combos, control);
       const auto id = GetDlgCtrlID(control);
-      SetTextColor(dc, control == g_heading ? kGold : id >= kHintBase ? kMuted : kInk);
+      SetTextColor(dc, control == g_heading ? kBone : id >= kHintBase ? kMuted : kInk);
       SetBkColor(dc, field ? kField : kBackdrop);
       return reinterpret_cast<LRESULT>(field ? g_field_brush : g_backdrop_brush);
     }
@@ -1646,7 +1618,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         SelectObject(item->hDC, g_font);
         SetBkMode(item->hDC, TRANSPARENT);
         SetTextColor(item->hDC, (item->itemState & ODS_DISABLED) ? kMuted :
-            (item->itemState & ODS_SELECTED) ? kGold : kInk);
+            (item->itemState & ODS_SELECTED) ? kBone : kInk);
         if (item->itemID != (UINT)-1) {
           const auto len = SendMessageW(item->hwndItem, CB_GETLBTEXTLEN, item->itemID, 0);
           if (len >= 0) {

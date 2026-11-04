@@ -9,7 +9,7 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-DOCS = ('README.md', 'MODDING_PLAN.md', 'MODLOG.md',
+DOCS = ('README.md',
         'docs/ENGINEERING.md', 'docs/TESTING.md', 'docs/ATTRIBUTION.md')
 
 

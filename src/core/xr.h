@@ -12,11 +12,12 @@ namespace dsvr {
 void XrOnDeviceCaptured(void* d3d11_device);  // call once, render thread
 void XrOnPresentFrame();                      // cheap event poll per frame
 bool XrSessionRunning();
+bool XrSessionVisible();
 // True while the debounced menu snapshot wants the spatial canvas
 // (menu_state.h); stable across menu navigation flicker.
 bool XrMenuPresentationActive();
-void XrToggleSanctuary();
-void XrRecenterSanctuary();
+void XrToggleTheater();
+void XrRecenterTheater();
 
 // P2c: submit the game backbuffer (mono, both eyes) for this Present.
 // Call BEFORE the original Present, on the render thread. No-op unless
@@ -28,6 +29,7 @@ void XrSubmitMonoFrame(void* backbuffer_texture2d);
 // This API schedules XR, not native scene replay or rendered-view certification.
 struct NativeStereoEye {
   void* texture2d = nullptr;
+  unsigned width = 0, height = 0;
   float orientation[4] = {0, 0, 0, 1};
   float position[3]{};
   float fov[4]{};
@@ -35,7 +37,6 @@ struct NativeStereoEye {
 struct NativeStereoFrame {
   std::uint64_t token = 0, tracking_sequence = 0, space_epoch = 0;
   long long predicted_time_ns = 0;
-  unsigned width = 0, height = 0;
   long long color_format = 0;  // DXGI_FORMAT; use an explicit typed RTV
   NativeStereoEye eyes[2]{};
 };
@@ -93,6 +94,9 @@ struct RenderMetrics {
   unsigned source_copies = 0, eye_draws = 0;
   unsigned eye_age_frames[2] = {0, 0};  // afr_policy freshness; mono submits both eyes (age 0)
   unsigned source_width = 0, source_height = 0, eye_width = 0, eye_height = 0;
+  unsigned eye_widths[2]{}, eye_heights[2]{};
+  std::uint64_t source_generation = 0, source_age_ms = 0;
+  bool source_retained = false;
   bool submitted = false, theater = false, gpu_valid = false, tracking_published = false;
 };
 bool XrRenderMetricsSnapshot(RenderMetrics& out);

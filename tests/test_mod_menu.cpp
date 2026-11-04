@@ -214,8 +214,8 @@ bool WeaponGripPreview(const WeaponGripProfile&) {return true;}
 void WeaponGripClearPreview() {}
 bool WeaponGripSave(const WeaponGripProfile&) {return true;}
 bool WeaponGripReset(int,bool) {return true;}
-void XrRecenterSanctuary() {}
-void XrToggleSanctuary() {}
+void XrRecenterTheater() {}
+void XrToggleTheater() {}
 // Headless test: no frame-host install ran, so the startup baseline falls
 // back to the live config (see SeedStartupBaseline) and the reminder only
 // fires after a gated row actually changes.
@@ -624,7 +624,7 @@ int main(int argc,char** argv) {
     ImGui::SetCurrentContext(menu_context);
     // The ray is a hit-test only: no beam and no cursor may be painted into
     // the panel texture, because that texture is the game backbuffer and the
-      // theater rect / sanctuary quad magnifies whatever lands in it.
+      // theater rect / theater panel magnifies whatever lands in it.
       bool pointer_glyph_painted = false;
       for (const auto& vertex : ImGui::GetForegroundDrawList()->VtxBuffer) {
         if (vertex.col == IM_COL32(240, 206, 140, 120) ||
@@ -686,6 +686,11 @@ int main(int argc,char** argv) {
     }
     fclose(file);context->Unmap(staging.Get(),0);
   }
+  ModMenuCloseForTest();calibration=false;
+  CHECK(ModMenuRenderTexture(device.Get(),image.Get(),true,"Waiting for a fresh game view."));
+  ImGui::SetCurrentContext(menu_context);
+  CHECK(ImGui::GetDrawData() && ImGui::GetDrawData()->TotalVtxCount>0);
+  CHECK(!ModMenuVisible());
   ModMenuClose();CHECK(!ModMenuVisible() || calibration);ModMenuShutdown();DestroyWindow(window);
   std::puts("native menu render/state restoration: PASS");return 0;
 }

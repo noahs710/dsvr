@@ -25,6 +25,9 @@ struct OpenXrInputBindings {
 
 struct AcquiredHand {
   bool grip_valid = false;
+  bool grip_tracking_flags_available = false;
+  bool grip_position_tracked = false;
+  bool grip_orientation_tracked = false;
   float grip_position[3] = {0, 0, 0};
   float grip_orientation[4] = {0, 0, 0, 1};
   bool aim_valid = false;

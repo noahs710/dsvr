@@ -150,6 +150,32 @@ int main() {
         "IK: a dropped guard or finished parry releases LT again");
 
   ik.guard_block = true;
+  // Physical two-hand bridge: attach taps the game's own toggle (Y plus the
+  // weapon-side shoulder). Right-hand weapon: Y+RB; left-hand weapon: Y+LB.
+  dsvr::VrPadInput twohand{};
+  twohand.two_hand_toggle = true;
+  const dsvr::VirtualPadState toggled = dsvr::MapVrPad(twohand);
+  check((toggled.buttons & dsvr::kPadY) != 0 &&
+        (toggled.buttons & dsvr::kPadRightShoulder) != 0,
+        "two-hand toggle taps Y plus the weapon-side shoulder");
+  dsvr::VrPadInput lefty2h{};
+  lefty2h.dominant_left = true;
+  lefty2h.two_hand_toggle = true;
+  const dsvr::VirtualPadState toggled_left = dsvr::MapVrPad(lefty2h);
+  check((toggled_left.buttons & dsvr::kPadY) != 0 &&
+        (toggled_left.buttons & dsvr::kPadLeftShoulder) != 0,
+        "left-hand weapon two-hand toggle taps Y plus LB");
+  check((toggled_left.buttons & dsvr::kPadRightShoulder) == 0,
+        "left-hand toggle does not touch the off shoulder");
+  check((dsvr::MapVrPad(twohand, true).buttons & dsvr::kPadY) == 0,
+        "native menu navigation cannot consume a two-hand toggle");
+  dsvr::VrPadInput skill{};
+  skill.skill_tap = true;
+  check(dsvr::MapVrPad(skill).left_trigger == 255,
+        "a skill flourish taps the skill channel");
+  check(dsvr::MapVrPad(skill, true).left_trigger == 0,
+        "native menu navigation cannot consume a skill tap");
+
   const auto menu = dsvr::MapVrPad(ik, true);
     check((menu.buttons & dsvr::kPadRightShoulder) == 0 && menu.right_trigger == 0,
           "native menu navigation cannot consume a swing attack preview");

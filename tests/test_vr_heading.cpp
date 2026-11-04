@@ -249,6 +249,7 @@ int main() {
     CHECK(!bad.valid && bad.stick_x == 0 && bad.stick_y == 0);
   }
 
+
   std::printf("test_vr_heading: %d checks, %d failures\n", g_checks, g_failures);
   return g_failures ? 1 : 0;
 }

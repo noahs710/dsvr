@@ -226,26 +226,28 @@ int main() {
     check(tight.tan_half_v < got.tan_half_v);
   }
 
-  // The theater panel IS the game image: source aspect, tangent-mapped rows,
-  // centred on buffer mid-height. xr.cpp used to inline this with a dead y_top
-  // and derive the aspect from the eye frustum (0.925 on the live runtime),
-  // which produced a near-square panel with the 2.39:1 image letterboxed
-  // inside it -- "too wide and far away and blurry" (31 Oct 2026).
+  // The theater panel is fixed at 16:9 and centered on the buffer. Source
+  // content is contained inside it by the tested pixel-rect fit.
   {
     const float t = std::tan(50.0f * kDeg);
     const EyeFrustum eye{-t, t, t, -t};
-    const float source_aspect = 3440.0f / 1440.0f;  // live backbuffer
-    const auto screen = TheaterScreenExtents(80.0f * kDeg, source_aspect);
+    const auto screen = TheaterScreenExtents(80.0f * kDeg, kTheaterAspect);
     const PixelRect r = TheaterRectForEye(screen, eye, 2144.0f, 2292.0f);
-    // Angular aspect equals the source aspect, so the image is not stretched.
-    check(near((r.w / 2144.0f) / (r.h / 2292.0f),
-               screen.tan_half_h / screen.tan_half_v));
+    check(near(screen.tan_half_h / screen.tan_half_v, kTheaterAspect));
     check(r.w > r.h);  // a landscape panel, not the old near-square one
     // Centred on buffer mid-height (the user-tuned midpoint), and symmetric
     // horizontally about the frustum centre.
     check(near(r.y + r.h * 0.5f, 2292.0f * 0.5f));
     check(near(r.x + r.w * 0.5f, 2144.0f * 0.5f));
     check(r.w > 0.0f && r.w < 2144.0f && r.h > 0.0f && r.h < 2292.0f);
+    const PixelRect fitted = FitPixelRectToAspect(
+        r, kTheaterAspect, 1440.0f, 1440.0f);
+    check(fitted.w > 0.0f && near(fitted.w / fitted.h, kTheaterAspect));
+    check(fitted.x >= r.x && fitted.y >= r.y &&
+          fitted.x + fitted.w <= r.x + r.w &&
+          fitted.y + fitted.h <= r.y + r.h);
+    const PixelRect invalid = FitPixelRectToAspect(r, 0.0f, 1440.0f, 1440.0f);
+    check(invalid.w == 0.0f && invalid.h == 0.0f);
     // Degenerate inputs collapse to an empty rect rather than NaN or a divide.
     const EyeFrustum dead{0.0f, 0.0f, 0.0f, 0.0f};
     check(TheaterRectForEye(screen, dead, 2144.0f, 2292.0f).w == 0.0f);

@@ -7,22 +7,27 @@ struct ID3D11Texture2D;
 
 namespace dsvr {
 
-// Observation-only main-scene depth identification (reprojection stereo,
-// phase 1). Hooks the captured immediate context's OMSetRenderTargets /
-// Draw / DrawIndexed vtable entries and counts draws per bound
-// (colour, depth) pair. It never changes state, never blocks, and never
-// touches the depth contents: the only product is which native depth
-// texture the main scene pass uses, proven by draw counts at runtime.
-// A wrong guess costs nothing because nothing consumes the result yet.
+// Observation-only D3D11 scene-pass discovery. The probe tracks the captured
+// immediate context's render-target binds, draw families, clears, resource
+// copies/resolves, command-list use and frame boundary. It never changes
+// render state or reads resource contents. Reports distinguish hardware MSAA
+// format support from MSAA actually used by a scene pass.
 bool DepthProbeInstall(ID3D11Device* device);
 void DepthProbeUninstall();
 
-// The currently leading main-scene candidate: the pair with the most
-// draws among colour targets at least 1280x720. Returns false until a
-// pair has drawn. Pointers are borrowed (no AddRef): callers must only
-// compare identities or use them inside the same frame's submit.
-bool DepthProbeMainPair(ID3D11Texture2D*& colour, ID3D11Texture2D*& depth,
-                        std::uint32_t& colour_width, std::uint32_t& colour_height,
-                        std::uint64_t& draws);
+// Called once for each game image immediately before DSVR's own XR drawing.
+// Flushes a bounded per-frame summary and resets frame counters. This does not
+// imply the image was produced by the reported scene candidate.
+void DepthProbeFrameBoundary(ID3D11Texture2D* presented_image,
+                             std::uint64_t frame_ordinal);
+
+// Borrowed until the next frame boundary. Prefers the color input bound at
+// the final output, with observed-target ranking as discovery fallback.
+// Returns null across observation gaps; the compositor retains its own copy.
+ID3D11Texture2D* DepthProbeSceneSource();
+
+// Keep DSVR's own menu and XR draws out of the game-scene observations.
+void DepthProbeBeginInternalPass();
+void DepthProbeEndInternalPass();
 
 }  // namespace dsvr

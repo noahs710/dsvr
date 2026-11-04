@@ -5,22 +5,23 @@ namespace dsvr {
 // Pure, unit-tested menu-state debounce (P6). Detection (native probe,
 // title heuristic, manual F8) stays outside; this module only decides
 // when a raw reading is stable enough to change presentation (docs/ENGINEERING.md).
-// Short close/open gaps during navigation must not flash immersive mode.
+// Presentation surfaces open immediately; returning to gameplay is debounced
+// so short detection gaps cannot flash immersive mode.
 //
 // Feed raw readings with a monotonic millisecond clock. The published
-// snapshot changes only after the same raw state persists for the full
-// debounce window; generation increments on every accepted change so
+// snapshot returns to gameplay only after the same raw state persists for the
+// full debounce window; generation increments on every accepted change so
 // consumers can detect transitions without polling timestamps.
 
 enum class MenuState {
   Unknown,
   Gameplay,
   FrontEnd,     // title / main menu
+  Loading,      // game image remains in the 16:9 theater during transitions
   ReadingMenu,  // inventory, equipment, status, pause
   OtherMenu,    // shops, bonfire, dialogue, confirmations
-  // Our own calibration screen: a panel drawn into the game image. It needs
-  // the pointer/stick route but must never take the head-anchored canvas.
-  CalibrationPanel,
+  // Our own calibration room is rendered as an immersive projection scene.
+  CalibrationRoom,
 };
 
 struct MenuSnapshot {
@@ -35,6 +36,45 @@ class MenuDebouncer {
       : debounce_ms_(debounce_ms > 0 ? debounce_ms : 0) {}
 
   MenuSnapshot Feed(MenuState raw, long long now_ms) {
+    // The loading canvas is only needed until a gameplay camera is valid.
+    // Confirm that transition for three 90 Hz frames instead of applying the
+    // general menu debounce, which can leave a ready game behind its panel.
+    if (snapshot_.state == MenuState::Loading && raw == MenuState::Gameplay) {
+      if (candidate_ != raw) {
+        candidate_ = raw;
+        candidate_since_ = now_ms;
+      }
+      const long long held = now_ms - candidate_since_;
+      const long long loading_debounce =
+          debounce_ms_ < kLoadingExitDebounceMs
+              ? debounce_ms_ : kLoadingExitDebounceMs;
+      if (held >= loading_debounce) {
+        snapshot_.state = raw;
+        ++snapshot_.generation;
+        snapshot_.confidence = 1.0f;
+      } else {
+        snapshot_.confidence = static_cast<float>(held) /
+                               static_cast<float>(loading_debounce);
+      }
+      return snapshot_;
+    }
+    // A title, calibration, menu or loading surface takes ownership on its
+    // first reading. Calibration's exit also skips a stale room frame; only
+    // gameplay uses the full debounce window before replacing a surface.
+    const bool immediate =
+        (raw != MenuState::Unknown && raw != MenuState::Gameplay) ||
+        (snapshot_.state == MenuState::CalibrationRoom &&
+         raw != MenuState::CalibrationRoom);
+    if (immediate) {
+      candidate_ = raw;
+      candidate_since_ = now_ms;
+      if (snapshot_.state != raw) {
+        snapshot_.state = raw;
+        ++snapshot_.generation;
+      }
+      snapshot_.confidence = 1.0f;
+      return snapshot_;
+    }
     if (raw != candidate_) {
       candidate_ = raw;
       candidate_since_ = now_ms;
@@ -64,28 +104,23 @@ class MenuDebouncer {
   }
 
  private:
+  static constexpr long long kLoadingExitDebounceMs = 33;
   long long debounce_ms_;
   MenuSnapshot snapshot_;
   MenuState candidate_ = MenuState::Unknown;
   long long candidate_since_ = 0;
 };
 
-// Presentation policy: only these states take the spatial canvas (a
-// head-anchored quad that replaces the game image). Gameplay and Unknown never
-// do (Unknown = detector absent/unverified, which per spec stays disabled and
-// logs its limitation).
-inline bool MenuStateWantsSanctuary(MenuState s) {
-  return s == MenuState::FrontEnd || s == MenuState::ReadingMenu ||
-         s == MenuState::OtherMenu;
+// Presentation policy: only these states take the 16:9 world theater panel.
+inline bool MenuStateWantsCanvas(MenuState s) {
+  return s == MenuState::FrontEnd || s == MenuState::Loading ||
+         s == MenuState::ReadingMenu || s == MenuState::OtherMenu;
 }
 
-// Input policy: these states need the pointer/stick route aimed at a panel.
-// Wider than the canvas set: the calibration panel lives inside the flat
-// theater image, so it navigates without ever becoming a canvas. Conflating
-// the two questions is what put the calibration screen in the user's face and
-// hid the loading image behind it (live report 31 Oct 2026).
+// Input policy includes the world-space calibration dialogue even though it
+// has its own immersive projection renderer.
 inline bool MenuStateWantsPanel(MenuState s) {
-  return MenuStateWantsSanctuary(s) || s == MenuState::CalibrationPanel;
+  return MenuStateWantsCanvas(s) || s == MenuState::CalibrationRoom;
 }
 
 }  // namespace dsvr

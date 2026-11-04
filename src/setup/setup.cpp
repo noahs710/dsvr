@@ -27,6 +27,8 @@
 #include "../common/memory.h"
 #include "../common/version.h"
 #include "gui.h"
+#include "json.h"
+#include "launch.h"
 #include "setup_internal.h"
 
 namespace setup {
@@ -776,6 +778,14 @@ void PrintUsage() {
       L"  --firewall-block       Block the exe (run as Administrator)\n"
       L"  --firewall-unblock     Remove the block\n"
       L"  --firewall-status      Show block status\n"
+      L"  --json VERB            One UTF-8 JSON document on stdout:\n"
+      L"                         status | doctor | verify | settings-index |\n"
+      L"                         config-get | config-set KEY=VALUE ... |\n"
+      L"                         launch | launch-native | install | uninstall |\n"
+      L"                         fpsunlock-install | tpup-download |\n"
+      L"                         firewall-block/unblock/status |\n"
+      L"                         safe-defaults | preset-comfort/perf/veteran/\n"
+      L"                         preset-smooth/res\n"
       L"  --game PATH            Game folder or exe (auto-detected otherwise)\n"
       L"\n"
       L"Offline play ONLY while installed. Uninstall before going online.\n",
@@ -804,11 +814,201 @@ setup::ConfirmFn ConsoleConfirm(bool unattended) {
   };
 }
 
+// --json <verb>: one UTF-8 JSON document on stdout, human text untouched
+// (docs/ELECTRON_LAUNCHER_PLAN.md phase 1). Data comes from the same
+// UI-free calls the GUI and the human CLI already share, so the Electron
+// shell and the console can never disagree about install state.
+int RunJsonVerb(const std::wstring& verb, const std::wstring& game_override,
+                const std::vector<std::wstring>& payload,
+                bool remove_settings) {
+  auto out = [](const std::string& j) {
+    fputs(j.c_str(), stdout);
+    fputc('\n', stdout);
+  };
+  std::vector<std::wstring> action_log;
+  auto action = [&](int code) {
+    std::string json = "{\"ok\":" + std::string(code == 0 ? "true" : "false") +
+        ",\"exit_code\":" + std::to_string(code) + ",\"log\":[";
+    for (size_t i = 0; i < action_log.size(); ++i) {
+      if (i) json += ',';
+      json += setup::JsonString(action_log[i]);
+    }
+    out(json + "]}");
+    return code;
+  };
+  if (verb == L"settings-index") {
+    out(setup::SettingsIndexJson());
+    return 0;
+  }
+  std::wstring exe = setup::FindGameExe(game_override);
+  if (exe.empty()) {
+    out("{\"ok\":false,\"error\":\"game_not_found\"}");
+    return 1;
+  }
+  const std::wstring toml = setup::JoinPath(setup::DirNameOf(exe), L"DSVR.toml");
+  if (verb == L"install" || verb == L"install-vr" || verb == L"uninstall" ||
+      verb == L"fpsunlock-install" || verb == L"tpup-download" ||
+      verb == L"firewall-block" || verb == L"firewall-unblock" ||
+      verb == L"firewall-status") {
+    const setup::LogFn log = [&](const std::wstring& line) {
+      action_log.push_back(line);
+    };
+    const setup::ConfirmFn confirm = [](const wchar_t* title,
+        const std::wstring& text, bool default_yes, bool destructive) {
+      const UINT flags = MB_YESNO | MB_ICONWARNING |
+          (default_yes ? MB_DEFBUTTON1 : MB_DEFBUTTON2) |
+          (destructive ? MB_DEFBUTTON2 : 0);
+      return MessageBoxW(nullptr, text.c_str(), title, flags) == IDYES;
+    };
+    if (verb == L"install" || verb == L"install-vr") {
+      setup::InstallOptions options;
+      options.unattended = false;
+      options.enable_vr_after = verb == L"install-vr";
+      return action(setup::DoInstall(exe, options, log, confirm));
+    }
+    if (verb == L"uninstall")
+      return action(setup::DoUninstall(exe, remove_settings, false, log,
+                                       confirm));
+    if (verb == L"fpsunlock-install")
+      return action(setup::InstallFpsUnlock(exe, log, confirm));
+    if (verb == L"tpup-download") {
+      std::wstring folder;
+      return action(setup::DownloadTextureTools(log, confirm, folder));
+    }
+    if (verb == L"firewall-status") {
+      action_log.push_back(setup::FirewallBlocked()
+          ? L"Firewall block: active" : L"Firewall block: not active");
+      return action(0);
+    }
+    return action(setup::FirewallSupported(exe, log,
+        verb == L"firewall-block") ? 0 : 1);
+  }
+  if (verb == L"safe-defaults") {
+    const dsvr::Config safe = dsvr::FactorySafeDefaults();
+    if (!dsvr::ConfigSave(toml.c_str(), safe)) {
+      out("{\"ok\":false,\"error\":\"settings_save_failed\"}");
+      return 1;
+    }
+    out(setup::ConfigGetJson(safe));
+    return 0;
+  }
+  if (verb.rfind(L"preset-", 0) == 0) {
+    dsvr::Config cfg;
+    dsvr::ConfigLoad(toml.c_str(), cfg);
+    const std::wstring preset = verb.substr(7);
+    if (preset == L"smooth" || preset == L"res") {
+      const auto spec = setup::ProbeHardware();
+      const auto tier = dsvr::TierForHardware(spec);
+      const auto selected = dsvr::PresetForTier(tier, preset == L"smooth");
+      cfg.render_scale_percent = selected.render_scale_percent;
+      cfg.aa_mode = static_cast<int>(selected.aa_mode);
+      cfg.comfort_vignette = false;
+      cfg.snap_turn = false;
+      cfg.smooth_turn = true;
+      cfg.snap_turn_degrees = 45;
+    } else if (preset == L"comfort" || preset == L"perf" ||
+               preset == L"veteran") {
+      cfg.comfort_vignette = preset != L"veteran";
+      cfg.vignette_strength = preset == L"comfort" ? 0.8f : 0.65f;
+      cfg.snap_turn = preset != L"veteran";
+      cfg.smooth_turn = !cfg.snap_turn;
+      cfg.snap_turn_degrees = 45;
+      if (preset == L"veteran") cfg.smooth_turn_speed_dps = 150.0f;
+      cfg.render_scale_percent = preset == L"comfort" ? 90
+          : preset == L"perf" ? 80 : 130;
+    } else {
+      out("{\"ok\":false,\"error\":\"unknown_preset\"}");
+      return 1;
+    }
+    if (!dsvr::ConfigValid(cfg) || !dsvr::ConfigSave(toml.c_str(), cfg)) {
+      out("{\"ok\":false,\"error\":\"preset_save_failed\"}");
+      return 1;
+    }
+    out(setup::ConfigGetJson(cfg));
+    return 0;
+  }
+  if (verb == L"config-get") {
+    // Missing/unreadable file means factory defaults, exactly like the GUI.
+    dsvr::Config cfg;
+    dsvr::ConfigLoad(toml.c_str(), cfg);
+    out(setup::ConfigGetJson(cfg));
+    return 0;
+  }
+  if (verb == L"config-set") {
+    dsvr::Config cfg;
+    dsvr::ConfigLoad(toml.c_str(), cfg);
+    for (const auto& kv : payload) {
+      std::wstring error;
+      if (!setup::ConfigApplyKeyValue(cfg, kv, error)) {
+        out("{\"ok\":false,\"error\":" + setup::JsonString(error) + "}");
+        return 1;
+      }
+    }
+    // All-or-nothing: ConfigValid sees the whole batch, so an out-of-range
+    // combination (not just a malformed value) never reaches disk.
+    if (!dsvr::ConfigValid(cfg)) {
+      out("{\"ok\":false,\"error\":\"resulting settings are out of range\"}");
+      return 1;
+    }
+    if (!dsvr::ConfigSave(toml.c_str(), cfg)) {
+      out("{\"ok\":false,\"error\":\"settings_save_failed\"}");
+      return 1;
+    }
+    out(setup::ConfigGetJson(cfg));
+    return 0;
+  }
+  if (verb == L"launch" || verb == L"launch-native") {
+    if (setup::IsGameRunning()) {
+      out("{\"ok\":false,\"error\":\"game_already_running\"}");
+      return 1;
+    }
+    const bool prefer_steam = verb == L"launch";
+    const auto result = setup::LaunchGameProcess(exe, prefer_steam);
+    if (!result.started) {
+      out(setup::LaunchJson(false, 0, result.via_steam,
+                            L"create_process_failed"));
+      return 1;
+    }
+    out(setup::LaunchJson(true, result.pid, result.via_steam, nullptr));
+    return 0;
+  }
+  if (verb == L"status") {
+    std::wstring sidecar =
+        setup::JoinPath(setup::DirNameOf(exe), L"DSVR.toml.headset-hz");
+    out(setup::StatusJson(exe, setup::IsGameRunning(),
+                          setup::InstallStateOf(exe),
+                          setup::FpsUnlockStateOf(exe),
+                          dsvr::ReadLastHeadsetHz(sidecar.c_str()),
+                          dsvr::kModVersion));
+    return 0;
+  }
+  if (verb == L"doctor") {
+    auto silent = [](const std::wstring&) {};
+    out(setup::DoctorJson(setup::DoctorChecks(exe, silent)));
+    return 0;
+  }
+  if (verb == L"verify") {
+    std::string sha;
+    if (!dsvr::FileSha256(exe.c_str(), sha)) {
+      out(setup::VerifyJson(false, ""));
+      return 1;
+    }
+    bool supported = false;
+    for (unsigned i = 0; i < dsvr::kSupportedBuildCount; ++i)
+      if (sha == dsvr::kSupportedBuilds[i].sha256) supported = true;
+    out(setup::VerifyJson(supported, sha));
+    return supported ? 0 : 1;
+  }
+  out("{\"ok\":false,\"error\":\"unknown_verb\"}");
+  return 1;
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
   if (argc <= 1) return RunGui();
-  std::wstring cmd, game_override;
+  std::wstring cmd, game_override, json_verb;
+  std::vector<std::wstring> payload;  // --json config-set KEY=VALUE pairs
   bool remove_settings = false;
   bool unattended = false;
   for (int i = 1; i < argc; i++) {
@@ -818,8 +1018,13 @@ int wmain(int argc, wchar_t** argv) {
         a == L"--firewall-unblock" || a == L"--firewall-status" ||
         a == L"--help" || a == L"-h" || a == L"/?")
       cmd = a;
-    else if (a == L"--game" && i + 1 < argc)
+    else if (a == L"--json" && i + 1 < argc) {
+      cmd = a;
+      json_verb = argv[++i];
+    } else if (a == L"--game" && i + 1 < argc)
       game_override = argv[++i];
+    else if (a.find(L'=') != std::wstring::npos)
+      payload.push_back(a);
     else if (a == L"--remove-settings")
       remove_settings = true;
     else if (a == L"--yes" || a == L"-y")
@@ -831,6 +1036,8 @@ int wmain(int argc, wchar_t** argv) {
     }
   }
   if (cmd == L"--gui") return RunGui();
+  if (cmd == L"--json")
+    return RunJsonVerb(json_verb, game_override, payload, remove_settings);
   if (cmd.empty() || cmd == L"--help" || cmd == L"-h" || cmd == L"/?") {
     PrintUsage();
     return cmd.empty() ? 1 : 0;

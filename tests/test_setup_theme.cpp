@@ -22,6 +22,9 @@ static int WINAPI ThemeTestMessageBoxW(HWND, LPCWSTR, LPCWSTR, UINT) {
 }
 #define MessageBoxW ThemeTestMessageBoxW
 #include "../src/setup/gui.cpp"
+// gui.cpp now delegates process-start to launch.cpp; pull it into this TU too
+// so ThemeTestCreateProcessW (macro above) still intercepts every launch.
+#include "../src/setup/launch.cpp"
 #undef CreateProcessW
 #undef MessageBoxW
 
@@ -110,10 +113,10 @@ static bool HasVisibleStyle(HWND window) {
 }
 
 int main() {
-  CHECK(kBackdrop == RGB(9, 9, 11));
-  CHECK(kField == RGB(20, 20, 22));
-  CHECK(kInk == RGB(237, 237, 240));
-  CHECK(kEmber == RGB(200, 197, 212));
+  CHECK(kBackdrop == RGB(17, 19, 15));
+  CHECK(kField == RGB(27, 29, 24));
+  CHECK(kInk == RGB(230, 224, 208));
+  CHECK(kEmber == RGB(193, 126, 88));
   fixture.frame_limit_fps = 80;
   fixture.physical_attacks = true;
   fixture.motion_attacks = false;

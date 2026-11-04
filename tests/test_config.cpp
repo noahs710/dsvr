@@ -65,7 +65,7 @@ int main() {
   CHECK(c.embodiment_fit == "head");
   CHECK(c.motion_attacks);
   CHECK(!c.offline_only_ack);
-  CHECK(!c.sanctuary_override && c.menu_distance_m == 2.75f);
+  CHECK(!c.theater_override && c.menu_distance_m == 2.75f);
   CHECK(c.menu_reading_fov_deg == 52.0f);
   CHECK(c.frame_limit_fps == 0);
   CHECK(c.auto_frame_limit_fps);
@@ -78,8 +78,10 @@ int main() {
   // screen and cutscenes, or by hand (gameplay_theater / F8).
   CHECK(c.headlook_enabled);
   CHECK(!c.gameplay_theater);
+  CHECK(!c.desktop_present);
   CHECK(dsvr::FactorySafeDefaults().headlook_enabled);
   CHECK(!dsvr::FactorySafeDefaults().gameplay_theater);
+  CHECK(!dsvr::FactorySafeDefaults().desktop_present);
   // Every key the file writes must be a key the loader recognises: a written
   // key nobody reads is a promise the setup would break. ConfigSave and
   // ConfigLoad are checked against each other by round-tripping a config whose
@@ -96,6 +98,7 @@ int main() {
       fclose(f);
     }
     CHECK(text.find("gameplay_theater") != std::string::npos);
+  CHECK(text.find("desktop_present") != std::string::npos);
     CHECK(text.find("headlook_enabled = true") != std::string::npos);
         CHECK(text.find("frame_limit_fps") == std::string::npos);
         CHECK(text.find("auto_frame_limit_fps") == std::string::npos);
@@ -108,6 +111,7 @@ int main() {
     fputs("[vr]\nvr_enabled = true\nreshade_host = true\nrender_scale_percent = 150\n"
           "frame_limit_fps = 144\nauto_frame_limit_fps = false\n"
           "snap_turn_degrees = 30\nhead_directed_move = false\n"
+          "sanctuary_override = true\n"  // legacy name for theater_override
           "[camera]\neye_height = 1.8\nworld_scale = 1.2\n"
           "eye_clearance_m = 0.6\n"
           "embodiment_fit = \"arm\"\n"
@@ -127,6 +131,7 @@ int main() {
   CHECK(c.snap_turn_degrees == 30);
   CHECK(c.movement_orientation == dsvr::MovementOrientation::Head);
   CHECK(!c.head_directed_move);
+  CHECK(c.theater_override);  // legacy sanctuary_override key still parses
   CHECK(c.eye_height == 1.8f && !c.eye_height_override); // legacy value is not opt-in
   c.eye_height_override=true;
   c.seated_height_offset_m=.73f;
@@ -341,7 +346,7 @@ int main() {
     want.play_style = "roomscale";
     want.vignette_strength = 0.25f;
     want.offline_only_ack = true;
-    want.sanctuary_override = true;
+    want.theater_override = true;
     want.menu_distance_m = 2.5f;
     want.menu_reading_fov_deg = 70.0f;
     want.forward_offset_m = 0.15f;
@@ -356,6 +361,11 @@ int main() {
     // parse or save line shows up as a round-trip failure.
     want.hide_torso_and_legs = true;
     want.arm_ik_block_animation = false;
+    want.desktop_present = true;
+    want.physical_two_hand = true;
+    want.physical_skills = true;
+    want.cast_aim = true;
+    want.cast_aim_seconds = 2.0f;
     want.stereo_enabled = true;
     want.afr_enabled = true;
     want.aa_mode = 1;
@@ -397,13 +407,17 @@ int main() {
     CHECK(got.movement_orientation == dsvr::MovementOrientation::Controller);
     CHECK(got.movement_controller == dsvr::MovementController::Right);
     CHECK(got.vignette_strength == 0.25f && got.offline_only_ack);
-    CHECK(got.sanctuary_override && got.menu_distance_m == 2.5f);
+    CHECK(got.theater_override && got.menu_distance_m == 2.5f);
     CHECK(got.menu_reading_fov_deg == 70.0f);
     CHECK(got.forward_offset_m == 0.15f && !got.hide_player_model);
     CHECK(got.eye_clearance_m == 0.3f);
     CHECK(got.hide_second_model);
     CHECK(got.arm_ik_enabled && !got.arm_ik_log_only);
     CHECK(got.hide_torso_and_legs && !got.arm_ik_block_animation);
+    CHECK(got.desktop_present);
+    CHECK(got.physical_two_hand);
+    CHECK(got.physical_skills);
+    CHECK(got.cast_aim && got.cast_aim_seconds == 2.0f);
     CHECK(got.forearm_only && got.hide_ui_in_vr);
     CHECK(got.contact_speed_min == 1.2f && got.rehit_window_ms == 350);
     CHECK(got.combat_test_bench && got.combat_test_target_m == 1.25f);

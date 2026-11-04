@@ -20,6 +20,17 @@ inline float MenuWidth(float distance, float degrees) {
   return 2.0f * distance * std::tan(degrees * 0.00872664626f);
 }
 
+// Horizon-locked anchor: the panel sits at the wearer's eye level straight
+// ahead, in the reference space, and does not tilt with the head. y must come
+// from the judged floor plus the calibrated eye height (the caller decides);
+// MakeMenuAnchor's 5-degree down-tilt is the head-mounted reading pose and is
+// not used by the merged theater panel.
+inline MenuAnchor MakeHorizonAnchor(float x, float y, float z, float yaw,
+                                    float distance) {
+  return {x - std::sin(yaw) * distance, y,
+          z - std::cos(yaw) * distance, yaw};
+}
+
 struct MenuRayProjection {
   bool hit;
   bool inside;
@@ -45,6 +56,69 @@ struct MenuPointerState {
 inline bool MenuFiniteVec3(Vec3 value) {
   return std::isfinite(value.x) && std::isfinite(value.y) &&
          std::isfinite(value.z);
+}
+
+// Map a point on a fixed-aspect presentation surface into the centered image
+// contained on it. The unused part of the surface is a letterbox and cannot
+// activate controls. This keeps ray input aligned with 16:9 theater panels
+// when the desktop backbuffer has a different aspect ratio.
+inline bool FitSurfaceUvToContent(float surface_u, float surface_v,
+                                  float surface_aspect, float content_aspect,
+                                  float& content_u, float& content_v) {
+  if (!std::isfinite(surface_u) || !std::isfinite(surface_v) ||
+      !std::isfinite(surface_aspect) || !std::isfinite(content_aspect) ||
+      surface_u < 0.0f || surface_u > 1.0f || surface_v < 0.0f ||
+      surface_v > 1.0f || surface_aspect <= 0.0f || content_aspect <= 0.0f)
+    return false;
+  content_u = surface_u;
+  content_v = surface_v;
+  if (content_aspect > surface_aspect) {
+    const float visible = surface_aspect / content_aspect;
+    const float top = (1.0f - visible) * 0.5f;
+    if (surface_v < top || surface_v > top + visible) return false;
+    content_v = (surface_v - top) / visible;
+  } else if (content_aspect < surface_aspect) {
+    const float visible = content_aspect / surface_aspect;
+    const float left = (1.0f - visible) * 0.5f;
+    if (surface_u < left || surface_u > left + visible) return false;
+    content_u = (surface_u - left) / visible;
+  }
+  content_u = std::clamp(content_u, 0.0f, 1.0f);
+  content_v = std::clamp(content_v, 0.0f, 1.0f);
+  return true;
+}
+
+inline bool MapSurfacePointToContent(float& x, float& y,
+                                     unsigned content_width,
+                                     unsigned content_height,
+                                     float surface_aspect) {
+  if (!content_width || !content_height ||
+      !std::isfinite(x) || !std::isfinite(y))
+    return false;
+  float u = 0.0f, v = 0.0f;
+  if (!FitSurfaceUvToContent(x / static_cast<float>(content_width),
+                             y / static_cast<float>(content_height),
+                             surface_aspect,
+                             static_cast<float>(content_width) / content_height,
+                             u, v))
+    return false;
+  x = u * static_cast<float>(content_width);
+  y = v * static_cast<float>(content_height);
+  return true;
+}
+
+inline void MapSurfacePointerToContent(MenuPointerState& pointer,
+                                       unsigned content_width,
+                                       unsigned content_height,
+                                       float surface_aspect) {
+  if (!pointer.valid || !MapSurfacePointToContent(pointer.x, pointer.y,
+          content_width, content_height, surface_aspect)) {
+    pointer.valid = false;
+    pointer.select = false;
+  }
+  if (pointer.beam_valid && !MapSurfacePointToContent(pointer.beam_x,
+          pointer.beam_y, content_width, content_height, surface_aspect))
+    pointer.beam_valid = false;
 }
 
 // Projects a ray onto the front-facing menu quad. source_aspect_ratio is

@@ -133,6 +133,7 @@ target_link_libraries(test_diagnostics_mode PRIVATE dsvr_common)
 add_test(NAME diagnostics_observer COMMAND test_diagnostics_mode observer)
 add_test(NAME diagnostics_observer_refused COMMAND test_diagnostics_mode observer-refused)
 add_test(NAME diagnostics_vr COMMAND test_diagnostics_mode vr)
+add_test(NAME diagnostics_trace_go COMMAND test_diagnostics_mode go)
 add_test(NAME diagnostics_disabled COMMAND test_diagnostics_mode disabled)
 add_test(NAME diagnostics_combat COMMAND test_diagnostics_mode combat)
 add_test(NAME diagnostics_autonomous_session COMMAND test_diagnostics_mode session)
@@ -141,7 +142,7 @@ add_test(NAME diagnostics_autonomous_operator_stop COMMAND test_diagnostics_mode
 # 40 ms worker pump, several times per test. Not trimmable without changing
 # production timing, so they are labeled out of the quick loop instead.
 set_tests_properties(diagnostics_observer diagnostics_observer_refused
-  diagnostics_vr diagnostics_disabled diagnostics_combat PROPERTIES LABELS slow)
+  diagnostics_vr diagnostics_disabled diagnostics_combat diagnostics_trace_go PROPERTIES LABELS slow)
 
 add_executable(test_memory test_memory.cpp)
 target_link_libraries(test_memory PRIVATE dsvr_common)
@@ -174,7 +175,17 @@ add_test(NAME combat_math COMMAND test_combat_math)
 add_executable(test_swing_attack test_swing_attack.cpp)
 add_test(NAME swing_attack COMMAND test_swing_attack)
 add_executable(test_shield_guard test_shield_guard.cpp)
+add_executable(test_skill_flick test_skill_flick.cpp)
+add_executable(test_cast_aim test_cast_aim.cpp)
+add_test(NAME cast_aim COMMAND test_cast_aim)
+add_executable(test_equip_wheel test_equip_wheel.cpp)
+add_test(NAME equip_wheel COMMAND test_equip_wheel)
+add_executable(test_blade_rearm test_blade_rearm.cpp)
+add_test(NAME blade_rearm COMMAND test_blade_rearm)
+add_executable(test_weapon_inertia test_weapon_inertia.cpp)
+add_test(NAME weapon_inertia COMMAND test_weapon_inertia)
 add_test(NAME shield_guard COMMAND test_shield_guard)
+add_test(NAME skill_flick COMMAND test_skill_flick)
 add_executable(test_arm_swing test_arm_swing.cpp)
 add_test(NAME arm_swing COMMAND test_arm_swing)
 add_executable(test_setup_theme test_setup_theme.cpp)
@@ -183,6 +194,12 @@ add_executable(test_setup_theme test_setup_theme.cpp)
 # the real common lib would collide with those stubs (LNK2005).
 target_link_libraries(test_setup_theme PRIVATE user32 gdi32 shell32 comdlg32)
 add_test(NAME setup_theme COMMAND test_setup_theme)
+add_executable(test_setup_json test_setup_json.cpp ../src/setup/json.cpp)
+# json.cpp is pure string building over setup_internal.h structs; linking the
+# real dsvr_common gives it config.cpp (WideFromUtf8/ReadLastHeadsetHz) with
+# no stubs, unlike the gui.cpp-based theme test.
+target_link_libraries(test_setup_json PRIVATE dsvr_common)
+add_test(NAME setup_json COMMAND test_setup_json)
 add_executable(test_perf_fit test_perf_fit.cpp)
 target_link_libraries(test_perf_fit PRIVATE dsvr_common)
 add_test(NAME perf_fit COMMAND test_perf_fit)
@@ -211,14 +228,15 @@ target_link_libraries(test_xr_mono_recovery PRIVATE OpenXR::openxr_loader d3d11 
 add_test(NAME xr_mono_recovery COMMAND test_xr_mono_recovery)
 add_executable(test_comfort_vignette test_comfort_vignette.cpp)
 add_test(NAME comfort_vignette COMMAND test_comfort_vignette)
-set_tests_properties(xr_mono_recovery PROPERTIES TIMEOUT 20)
+set_tests_properties(xr_mono_recovery PROPERTIES TIMEOUT 20 RUN_SERIAL TRUE)
 add_executable(test_frame_queue test_frame_queue.cpp)
 add_test(NAME frame_queue COMMAND test_frame_queue)
 add_executable(test_roomscale_math test_roomscale_math.cpp)
 add_test(NAME roomscale_math COMMAND test_roomscale_math)
 add_executable(test_pad_math test_pad_math.cpp)
 add_test(NAME pad_math COMMAND test_pad_math)
-add_executable(test_input test_input.cpp ../src/core/input.cpp ../src/core/input_frame_acquisition.cpp)
+add_executable(test_input test_input.cpp ../src/core/input.cpp ../src/core/input_frame_acquisition.cpp
+  ../src/core/weapon_grip.cpp)
 target_include_directories(test_input PRIVATE
   $<TARGET_PROPERTY:openxr_loader,INTERFACE_INCLUDE_DIRECTORIES>)
 add_test(NAME input COMMAND test_input)
@@ -303,6 +321,15 @@ add_executable(test_camera_writes test_camera_writes.cpp
   ../src/core/camera.cpp)
 add_test(NAME camera_writes COMMAND test_camera_writes)
 if(Python3_FOUND)
+  add_test(NAME hmd_report COMMAND ${Python3_EXECUTABLE} -B
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_hmd_report.py)
+  add_test(NAME hmd_game_report COMMAND ${Python3_EXECUTABLE} -B
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_hmd_game_report.py)
+  if(WIN32)
+    add_test(NAME hmd_runner COMMAND ${DSVR_PWSH_EXECUTABLE} -NoProfile -File
+      ${CMAKE_SOURCE_DIR}/tools/run_hmd_tests.ps1 -SelfTest)
+    set_tests_properties(hmd_runner PROPERTIES TIMEOUT 15 LABELS slow)
+  endif()
   add_test(NAME package COMMAND ${Python3_EXECUTABLE} -B
     ${CMAKE_CURRENT_SOURCE_DIR}/test_package.py)
   set_tests_properties(package PROPERTIES TIMEOUT 60 LABELS slow)
@@ -317,6 +344,8 @@ if(Python3_FOUND)
   add_test(NAME autonomous_session_report COMMAND ${Python3_EXECUTABLE} -B
     ${CMAKE_CURRENT_SOURCE_DIR}/test_autonomous_session_report.py
     ${CMAKE_SOURCE_DIR}/tools/vr_trace.py)
+  add_test(NAME autopilot_analyze COMMAND ${Python3_EXECUTABLE} -B
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_autopilot_analyze.py)
     add_test(NAME trace_sink_killed_producer COMMAND ${Python3_EXECUTABLE} -B
     ${CMAKE_CURRENT_SOURCE_DIR}/test_trace_sink.py $<TARGET_FILE:dsvr_trace_writer>)
     set_tests_properties(trace_sink_killed_producer PROPERTIES TIMEOUT 60)

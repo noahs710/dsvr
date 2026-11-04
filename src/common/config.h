@@ -26,10 +26,10 @@ struct Config {
   // Config I/O ignores them; DSR-FPS-Unlock owns the HMD/monitor cap.
   int frame_limit_fps = 0;
   bool auto_frame_limit_fps = true;
-  // When false, the desktop swapchain Present is skipped entirely: the
+  // When false, the desktop swapchain Present is skipped; the game window is minimized from startup, then hidden while the headset session is visible: the
   // game still renders its backbuffer (which XR copies), but no desktop
-  // composition or vsync wait is paid. DSR-FPS-Unlock owns game pacing.
-  bool desktop_present = true;
+  // composition, vsync wait, mirror image or window is paid or shown. DSR-FPS-Unlock owns game pacing. True keeps the spectator mirror.
+  bool desktop_present = false;
   bool comfort_vignette = true;
   float vignette_strength = 0.65f;  // 0..1
   // In-game FOV comfort scaler: multiplies the headset's vertical FOV
@@ -52,7 +52,10 @@ struct Config {
   // the live override without editing this file.
   bool gameplay_theater = false;
   float mono_screen_fov_deg = 60.0f;     // virtual screen width (mono mode)
-  bool sanctuary_override = false;     // spatial canvas for any menu (F8)
+  bool theater_override = false;       // spatial menu panel in theater (F8)
+  // Subtle procedural grid on the judged floor in the theater void, so the
+  // flat screen sits in a furnished space and the floor plane is visible.
+  bool theater_floor_grid = true;
   float menu_distance_m = 2.75f;        // 1..4 metres, independent of world scale
   float menu_reading_fov_deg = 52.0f;   // 45..80 degrees, inventory/pause
   // Installer-enforced game motion-blur off (T1). The core DLL never
@@ -64,10 +67,11 @@ struct Config {
   // Alternating-eye mode (T4, experimental). Refused unless stereo is
   // active; see afr_policy.h.
   bool afr_enabled = false;
-  // Eye-buffer anti-aliasing: 0 = off, 1 = FXAA post pass, 2 = MSAA 2x,
-  // 3 = MSAA 4x (default). MSAA counts fall back to 1 sample + FXAA pass
-  // when the runtime lacks support. Restart required (swapchain shape).
-  int aa_mode = 3;
+  // Full-eye spatial AA. The game frame currently reaches DSVR resolved at
+  // 1x, so native MSAA/TAA are not selectable without a scene render hook.
+  int aa_mode = 0;  // 0 = off, 1 = FXAA
+  bool cas_enabled = false;
+  float cas_strength = 0.35f;  // 0..1; FidelityFX CAS sharpening strength
 
   // [controls]
   bool dominant_hand_left = false;       // true = left hand holds the weapon
@@ -244,6 +248,19 @@ struct Config {
   float guard_flick_speed_min = 2.2f;    // m/s hand speed that reads as a flick
   int guard_parry_press_ms = 90;         // ms the parry tap is held
   int guard_parry_cooldown_ms = 700;     // ms before the same hand may parry again
+  // Physical two-hand bridge: support-grip attach taps the game's own
+  // two-hand toggle (Y + weapon-side shoulder). Default off like the other
+  // physical bridges; the game owns the stance and its rules.
+  bool physical_two_hand = false;
+  // Skill flourish bridge: a short weapon-hand impulse that returns to rest
+  // taps the skill channel (LT). Default off like the other physical bridges.
+  bool physical_skills = false;
+  // Cast-aim bridge (lane C input side): a press of the game's own attack or
+  // skill button makes the pressing hand the aim hand for cast_aim_seconds;
+  // a hand passively holding a ranged weapon aims otherwise. Default off.
+  // No native aim is written: this only decides which hand aims.
+  bool cast_aim = false;
+  float cast_aim_seconds = 1.0f;
   // Combat proving ground (offline/headset, no native writes): when true,
   // the pose thread classifies live blade contact against a fixed
   // sparring target in front of the player and logs hit/block/parry +
@@ -301,7 +318,7 @@ inline bool ConfigAutonomousSessionCaptureAllowed(const Config& c,
 inline Config FactorySafeDefaults() {
   Config c{};
   c.vr_enabled = true;
-  c.render_scale_percent = 100;  c.desktop_present = true;
+  c.render_scale_percent = 100;  c.desktop_present = false;
   c.comfort_vignette = false;
   c.vignette_strength = 0.65f;
   c.fov_scale = 1.0f;
@@ -338,7 +355,7 @@ inline void ConfigRestrictObserver(Config& c) {
   c.haptics = false;
   c.hide_player_model = false;
   c.hide_second_model = false;
-  c.sanctuary_override = false;
+  c.theater_override = false;
 }
 
 // Last-known headset sidecar (DSVR.toml.headset-hz next to the toml). The

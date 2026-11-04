@@ -5,6 +5,7 @@
 #include <cstdint>
 
 #include "swing_attack_math.h"
+#include "weapon_grip.h"
 
 namespace dsvr {
 
@@ -107,6 +108,21 @@ inline float TorqueGatedSpeed(float measured_speed, float response) {
   const float gated = measured_speed * response;
   if (!std::isfinite(gated) || gated < 0.0f) return 0.0f;
   return gated;
+}
+
+// Live-path response resolution: the equipped weapon torque response
+// from the offline mass table, falling back to the configured default when
+// no equipment is bound or the table has no entry. Fail-closed: unknown
+// equipment behaves as the transparent response, never as an arbitrary
+// weapon. The caller passes plain IDs so this header stays independent of
+// the native equipment snapshot.
+inline float SwingWeaponResponse(int weapon_id, bool equipment_bound,
+                                    float fallback_response) {
+  if (equipment_bound) {
+    WeaponMassEntry entry{};
+    if (WeaponMassGet(weapon_id, entry)) return entry.response;
+  }
+  return fallback_response;
 }
 
 }  // namespace dsvr

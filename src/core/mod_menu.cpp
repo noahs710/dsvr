@@ -28,6 +28,7 @@
 #include "combat_native.h"
 #include "native_ui.h"
 #include "motion_blur.h"
+#include "../common/ui_palette.h"
 namespace dsvr {
 // Test seam (declared in tests/test_mod_menu.cpp): the fixture arms
 // probe_disabled_item, SettingsPanel runs one probe item inside the gated
@@ -36,8 +37,13 @@ namespace dsvr {
 bool probe_disabled_item = false, item_was_disabled = false;
 namespace {
 using Microsoft::WRL::ComPtr;
-// Ochre gold : the one accent the whole menu shares ( titles , rules , selection ) .
-constexpr ImVec4 kGold{.85f, .68f, .33f, 1};
+constexpr float Channel(unsigned char value) { return value / 255.0f; }
+constexpr ImVec4 PaletteColor(palette::Rgb8 color, float alpha = 1.0f) {
+  return {Channel(color.r), Channel(color.g), Channel(color.b), alpha};
+}
+constexpr ImVec4 kBone = PaletteColor(palette::bone);
+constexpr ImVec4 kMoss = PaletteColor(palette::moss);
+constexpr ImVec4 kEmber = PaletteColor(palette::ember);
 std::atomic<bool> g_open{false};
 std::atomic<bool> g_reset_imgui_input{false};
 std::mutex g_input_mutex, g_panel_mutex;
@@ -171,8 +177,7 @@ bool Initialize(ID3D11Device *device) {
   style.FramePadding = {12, 8};
   style.ItemSpacing = {12, 12};
   style.ItemInnerSpacing = {8, 6};
-  // Ash - black panels , hairline ochre rules , parchment ink : the menu should read
-  // as part of the game rather than as a debug overlay floating over it .
+  // Charcoal iron, worn bone, moss and ember carry the same palette as Setup.
   style.WindowRounding = 2;
   style.FrameRounding = 2;
   style.GrabRounding = 2;
@@ -181,37 +186,37 @@ bool Initialize(ID3D11Device *device) {
   style.FrameBorderSize = 1;
   style.ChildBorderSize = 0;
   style.ScrollbarSize = 16;
-  style.Colors[ImGuiCol_WindowBg] = {.043f, .041f, .039f, .98f};
+  style.Colors[ImGuiCol_WindowBg] = PaletteColor(palette::background, .98f);
   style.Colors[ImGuiCol_ChildBg] = {0, 0, 0, 0};
-  style.Colors[ImGuiCol_PopupBg] = {.065f, .061f, .055f, 1};
-  style.Colors[ImGuiCol_TitleBg] = {.065f, .061f, .055f, 1};
-  style.Colors[ImGuiCol_TitleBgActive] = {.10f, .088f, .065f, 1};
-  style.Colors[ImGuiCol_TitleBgCollapsed] = {.065f, .061f, .055f, 1};
-  style.Colors[ImGuiCol_Border] = {.30f, .25f, .16f, .75f};
+  style.Colors[ImGuiCol_PopupBg] = PaletteColor(palette::surface);
+  style.Colors[ImGuiCol_TitleBg] = PaletteColor(palette::surface);
+  style.Colors[ImGuiCol_TitleBgActive] = PaletteColor(palette::raised);
+  style.Colors[ImGuiCol_TitleBgCollapsed] = PaletteColor(palette::surface);
+  style.Colors[ImGuiCol_Border] = PaletteColor(palette::border, .85f);
   style.Colors[ImGuiCol_BorderShadow] = {0, 0, 0, 0};
-  style.Colors[ImGuiCol_Text] = {.87f, .84f, .76f, 1};
-  style.Colors[ImGuiCol_TextDisabled] = {.55f, .53f, .47f, 1};
-  style.Colors[ImGuiCol_TextSelectedBg] = {.30f, .24f, .14f, .5f};
-  style.Colors[ImGuiCol_FrameBg] = {.098f, .094f, .088f, 1};
-  style.Colors[ImGuiCol_FrameBgHovered] = {.15f, .14f, .12f, 1};
-  style.Colors[ImGuiCol_FrameBgActive] = {.19f, .17f, .14f, 1};
-  style.Colors[ImGuiCol_Button] = {.12f, .115f, .108f, 1};
-  style.Colors[ImGuiCol_ButtonHovered] = {.23f, .19f, .12f, 1};
-  style.Colors[ImGuiCol_ButtonActive] = {.34f, .27f, .15f, 1};
-  style.Colors[ImGuiCol_Header] = {.20f, .17f, .11f, 1};
-  style.Colors[ImGuiCol_HeaderHovered] = {.30f, .24f, .14f, 1};
-  style.Colors[ImGuiCol_HeaderActive] = {.38f, .30f, .16f, 1};
-  style.Colors[ImGuiCol_Separator] = {.28f, .23f, .15f, .85f};
-  style.Colors[ImGuiCol_CheckMark] = {.87f, .68f, .33f, 1};
-  style.Colors[ImGuiCol_SliderGrab] = {.78f, .60f, .28f, 1};
-  style.Colors[ImGuiCol_SliderGrabActive] = {1, .80f, .43f, 1};
-  style.Colors[ImGuiCol_PlotHistogram] = {.78f, .60f, .28f, 1};
-  style.Colors[ImGuiCol_ScrollbarBg] = {.05f, .048f, .045f, 1};
-  style.Colors[ImGuiCol_ScrollbarGrab] = {.16f, .15f, .13f, 1};
-  style.Colors[ImGuiCol_ScrollbarGrabHovered] = {.26f, .22f, .15f, 1};
-  style.Colors[ImGuiCol_ScrollbarGrabActive] = {.36f, .29f, .17f, 1};
-  style.Colors[ImGuiCol_NavCursor] = {1, .80f, .43f, 1};
-  style.Colors[ImGuiCol_NavHighlight] = {1, .80f, .43f, 1};
+  style.Colors[ImGuiCol_Text] = PaletteColor(palette::text);
+  style.Colors[ImGuiCol_TextDisabled] = PaletteColor(palette::muted);
+  style.Colors[ImGuiCol_TextSelectedBg] = PaletteColor(palette::ember, .48f);
+  style.Colors[ImGuiCol_FrameBg] = PaletteColor(palette::surface);
+  style.Colors[ImGuiCol_FrameBgHovered] = PaletteColor(palette::raised);
+  style.Colors[ImGuiCol_FrameBgActive] = PaletteColor(palette::ember_dark);
+  style.Colors[ImGuiCol_Button] = PaletteColor(palette::surface);
+  style.Colors[ImGuiCol_ButtonHovered] = PaletteColor(palette::ember_dark);
+  style.Colors[ImGuiCol_ButtonActive] = PaletteColor(palette::ember, .92f);
+  style.Colors[ImGuiCol_Header] = PaletteColor(palette::raised);
+  style.Colors[ImGuiCol_HeaderHovered] = PaletteColor(palette::ember_dark);
+  style.Colors[ImGuiCol_HeaderActive] = PaletteColor(palette::ember, .92f);
+  style.Colors[ImGuiCol_Separator] = PaletteColor(palette::border_bright, .85f);
+  style.Colors[ImGuiCol_CheckMark] = kEmber;
+  style.Colors[ImGuiCol_SliderGrab] = kMoss;
+  style.Colors[ImGuiCol_SliderGrabActive] = kEmber;
+  style.Colors[ImGuiCol_PlotHistogram] = kMoss;
+  style.Colors[ImGuiCol_ScrollbarBg] = PaletteColor(palette::background);
+  style.Colors[ImGuiCol_ScrollbarGrab] = PaletteColor(palette::border_bright);
+  style.Colors[ImGuiCol_ScrollbarGrabHovered] = PaletteColor(palette::moss_dark);
+  style.Colors[ImGuiCol_ScrollbarGrabActive] = kEmber;
+  style.Colors[ImGuiCol_NavCursor] = kEmber;
+  style.Colors[ImGuiCol_NavHighlight] = kEmber;
   g_device = device;
   device->GetImmediateContext(&g_context);
   if (!ImGui_ImplDX11_Init(device, g_context.Get())) {
@@ -404,7 +409,7 @@ void FeedInput(unsigned width, unsigned height, const MenuPointerState& pointer)
   io.AddKeyEvent(ImGuiKey_GamepadDpadDown, controller.y < -.6f);
   // The tracked ray is a hit-test only. Anything ImGui paints into the panel
   // texture is baked into the game backbuffer, and the theater rect or the
-  // sanctuary quad then magnifies it across the view (live report 31 Oct 2026:
+  // theater panel then magnifies it across the view (live report 31 Oct 2026:
   // the pointer ray "painting itself all over the screen").
   io.MouseDrawCursor = false;
 }
@@ -413,7 +418,7 @@ void FeedInput(unsigned width, unsigned height, const MenuPointerState& pointer)
 void Title(const char *text) {
   if (g_title_font)
     ImGui::PushFont(g_title_font);
-  ImGui::PushStyleColor(ImGuiCol_Text, kGold);
+  ImGui::PushStyleColor(ImGuiCol_Text, kBone);
   ImGui::TextUnformatted(text);
   ImGui::PopStyleColor();
   if (g_title_font)
@@ -423,75 +428,117 @@ void CalibrationScreen(const CalibrationStatus &status) {
   const auto size = ImGui::GetIO().DisplaySize;
   ImGui::SetNextWindowPos({0, 0});
   ImGui::SetNextWindowSize(size);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0, 0});
+  ImGui::PushStyleColor(ImGuiCol_WindowBg, {0, 0, 0, 0});
+  ImGui::PushStyleColor(ImGuiCol_FrameBg, {.035f, .055f, .041f, .78f});
+  ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, {.075f, .10f, .065f, .88f});
+  ImGui::PushStyleColor(ImGuiCol_FrameBgActive, {.10f, .13f, .08f, .94f});
+  ImGui::PushStyleColor(ImGuiCol_TextDisabled, kBone);
+  ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {10, 8});
   ImGui::Begin("DSVR calibration", nullptr,
                ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
-                   ImGuiWindowFlags_NoSavedSettings);
-  const float content = std::min(860.f, std::max(320.f, size.x - 64));
-  ImGui::SetCursorPos(
-      {std::max(24.f, (size.x - content) * .5f), std::max(20.f, (size.y - 600) * .5f)});
+                   ImGuiWindowFlags_NoSavedSettings |
+                   ImGuiWindowFlags_NoBackground);
+  ImGui::SetWindowFontScale(1.7f);
+  const float poster_w = std::max(1.f, std::min(1680.f, size.x - 72.f));
+  const float poster_h = std::max(1.f, std::min(980.f, size.y - 64.f));
+  const ImVec2 poster_min{(size.x - poster_w) * .5f,
+                          (size.y - poster_h) * .5f};
+  const ImVec2 poster_max{poster_min.x + poster_w, poster_min.y + poster_h};
+  auto *draw = ImGui::GetWindowDrawList();
+  draw->AddRectFilled(poster_min, poster_max, IM_COL32(7, 13, 9, 104), 4.f);
+  draw->AddRect(poster_min, poster_max, IM_COL32(145, 158, 113, 190), 4.f, 0, 1.8f);
+  draw->AddRectFilled({poster_min.x + 1, poster_min.y + 1},
+                      {poster_max.x - 1, poster_min.y + 3},
+                      IM_COL32(190, 159, 94, 235));
+  const float content = poster_w - 68.f;
+  ImGui::SetCursorPos({poster_min.x + 34.f, poster_min.y + 22.f});
   ImGui::BeginGroup();
   ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + content);
-  Title("Set up your body");
-  ImGui::TextWrapped(
-      "Three quick steps: pick how you play below, hold your arms out, then squeeze the trigger for one second. That is all.");
+  ImGui::TextDisabled("DSVR  /  BODY CALIBRATION");
+  Title("Set your natural reach");
+  ImGui::TextWrapped("Choose how you play. Keep both controllers visible in any relaxed pose; hold both triggers for one second to save.");
   auto cfg = DiagnosticsCurrentConfig();
   int play_position = cfg.play_style == "seated" ? 1 : cfg.play_style == "roomscale" ? 2 : 0;
-  ImGui::SetNextItemWidth(std::max(160.f, content - 160.f));
+  ImGui::SetNextItemWidth(std::min(360.f, content));
   if (ImGui::Combo("How you play", &play_position, "Standing\0Seated\0Walking around\0")) {
     cfg.play_style = play_position == 1 ? "seated" : play_position == 2 ? "roomscale" : "standing";
     DiagnosticsRequestConfig(cfg, true);
   }
   if (play_position == 1)
-    ImGui::TextWrapped("Seated: sit how you normally sit. The game keeps your normal height.");
+    ImGui::TextWrapped("Recommended pose: rest your hands comfortably on your lap. Keep your wrists natural.");
   else if (play_position == 2)
-    ImGui::TextWrapped("Walking around: you can walk in your room. Stay inside your play area.");
+    ImGui::TextWrapped("Recommended pose: stand naturally with your hands relaxed a little away from your sides.");
   else
-    ImGui::TextWrapped("Standing: stand still in one spot and turn with the stick.");
+    ImGui::TextWrapped("Recommended pose: a relaxed A shape. No exact angle or height is required.");
   ImGui::Spacing();
   const auto origin = ImGui::GetCursorScreenPos();
-  auto *draw = ImGui::GetWindowDrawList();
-  const ImU32 ink = IM_COL32(238, 238, 232, 255), accent = IM_COL32(242, 186, 90, 255);
+  const ImU32 ink = IM_COL32(223, 211, 184, 235);
+  const ImU32 hand = status.pose_ready ? IM_COL32(165, 173, 140, 255)
+                                       : IM_COL32(193, 126, 88, 255);
   const float cx = origin.x + content * .5f;
-  draw->AddCircle({cx, origin.y + 28}, 20, ink, 32, 3);
-  draw->AddLine({cx, origin.y + 52}, {cx, origin.y + 148}, ink, 3);
-  draw->AddLine({cx - content * .25f, origin.y + 74}, {cx + content * .25f, origin.y + 74}, accent,
-                4);
-  draw->AddCircleFilled({cx - content * .25f, origin.y + 74}, 6, accent);
-  draw->AddCircleFilled({cx + content * .25f, origin.y + 74}, 6, accent);
-  ImGui::Dummy({content, 168});
-  ImGui::TextWrapped(
-      "Look straight ahead. Pick one pose and hold it: arms straight out like a T, or relaxed down and out like an A. Keep your wrists straight and stay still. First let go of the trigger, then squeeze and hold it for one second.");
+  auto draw_wrist = [&](int side, ImVec2 guide) {
+    ImVec2 wrist=guide;
+    if(status.hand_preview_valid[side]) {
+      wrist.x=cx+status.hand_preview_position[side][0]*content*.24f;
+      wrist.y=origin.y+30.f+status.hand_preview_position[side][1]*92.f;
+    }
+    draw->AddCircleFilled(wrist,9,hand);
+    if(status.hand_preview_valid[side]) {
+      const float a=status.hand_preview_angle[side];
+      const ImVec2 tip{wrist.x+std::sin(a)*19.f,wrist.y-std::cos(a)*19.f};
+      draw->AddLine(wrist,tip,IM_COL32(232,211,160,245),3.2f);
+      draw->AddCircleFilled(tip,3.4f,IM_COL32(232,211,160,255));
+    }
+  };
+  draw->AddCircle({cx, origin.y + 24}, 19, ink, 32, 3.2f);
+  draw->AddLine({cx, origin.y + 46}, {cx, origin.y + 124}, ink, 3.2f);
+  if (play_position == 1) {
+    draw->AddLine({cx - 62, origin.y + 132}, {cx + 62, origin.y + 132}, ink, 3.2f);
+    draw->AddLine({cx - 5, origin.y + 65}, {cx - 70, origin.y + 103}, ink, 3.2f);
+    draw->AddLine({cx + 5, origin.y + 65}, {cx + 70, origin.y + 103}, ink, 3.2f);
+    draw_wrist(0,{cx-70,origin.y+103});
+    draw_wrist(1,{cx+70,origin.y+103});
+  } else {
+    draw->AddLine({cx - 5, origin.y + 66}, {cx - content * .14f, origin.y + 84}, ink, 3.2f);
+    draw->AddLine({cx - content * .14f, origin.y + 84}, {cx - content * .21f, origin.y + 112}, ink, 3.2f);
+    draw->AddLine({cx + 5, origin.y + 66}, {cx + content * .14f, origin.y + 84}, ink, 3.2f);
+    draw->AddLine({cx + content * .14f, origin.y + 84}, {cx + content * .21f, origin.y + 112}, ink, 3.2f);
+    draw_wrist(0,{cx-content*.21f,origin.y+112});
+    draw_wrist(1,{cx+content*.21f,origin.y+112});
+  }
+  ImGui::Dummy({content, 148});
+  ImGui::TextDisabled(status.pose_ready
+      ? "L   BOTH CONTROLLERS TRACKED   R"
+      : "L   WAITING FOR TRACKING   R");
   ImGui::Spacing();
+  ImGui::PushStyleColor(ImGuiCol_Text, status.save_failed
+      ? PaletteColor(palette::ember_light) : PaletteColor(palette::text));
   ImGui::TextWrapped("%s", status.instruction);
+  ImGui::PopStyleColor();
   if (status.pose_hint && *status.pose_hint) {
-    ImGui::PushStyleColor(ImGuiCol_Text, {1.f, .82f, .45f, 1});
+    ImGui::PushStyleColor(ImGuiCol_Text, kMoss);
     ImGui::TextWrapped("%s", status.pose_hint);
     ImGui::PopStyleColor();
   }
-  ImGui::ProgressBar(status.hold_progress, {content, 12}, "");
-  ImGui::TextWrapped(
-      "You only do this once each time you start. Dying or loading will not erase it.");
-  if (!CalibrationCurrent().floor_height_measured)
-    ImGui::TextWrapped(
-        "A floor reference will be used when available. Without one, the previous calibration is retained; manual height is available under Calibration in the mod menu.");
-  if (status.save_failed)
-    ImGui::TextWrapped("Could not save your measurements. Try again, or keep the old ones.");
+  ImGui::ProgressBar(status.hold_progress, {content, 14}, "");
+  ImGui::TextDisabled("Wrist marks follow tracked grip position and rotation. Respawns and loads keep the saved fit; calm play refines this session only. This hold saves it.");
   if (status.can_cancel && ImGui::Button("Skip - keep my old measurements")) {
     CalibrationCancel();
     CancelMenuInput();
   }
-  ImGui::TextWrapped(
-      "Your controller buttons do nothing in the game while this screen is up. The game keeps running, so stand somewhere safe.");
   ImGui::PopTextWrapPos();
   ImGui::EndGroup();
   ImGui::End();
+  ImGui::PopStyleColor(5);
+  ImGui::PopStyleVar(2);
 }
 void CalibrationPanel() {
   Title("Calibration");
   const auto profile = CalibrationCurrent();
   const auto status = CalibrationGetStatus();
   ImGui::TextWrapped(
-      "Setup opens once each launch, after gameplay loads. Deaths and loads keep the same measurements. "
+      "Startup calibration runs before the game menu. Deaths and loads keep the saved measurements. "
       "Use Recalibrate to replace them during this session.");
   if (profile.valid) {
     ImGui::Text("Eye height  %.2f m%s", profile.eye_height_m,
@@ -500,6 +547,11 @@ void CalibrationPanel() {
     ImGui::Text("Estimated left / right reach  %.2f / %.2f m", profile.arm_reach_m[0],
                 profile.arm_reach_m[1]);
     ImGui::Text("Saved profile revision  %llu", static_cast<unsigned long long>(profile.revision));
+    ImGui::Text("Wrist alignment  %s%s",
+        status.hand_alignment_valid ? "available" : "needs calibration",
+        status.hand_alignment_valid && !status.hand_alignment_saved ? " (session fit)" : "");
+    if(status.refinement_review_needed)
+      ImGui::TextWrapped("Live wrist fit differs too much for a quiet update. Recalibrate to save a fresh one-second hold.");
   }
   if (ImGui::Button("Recalibrate...")) {
     CalibrationRequest();
@@ -508,7 +560,7 @@ void CalibrationPanel() {
   ImGui::SameLine();
   if (ImGui::Button("Recenter view")) {
     CalibrationRecenter();
-    XrRecenterSanctuary();
+    XrRecenterTheater();
   }
   ImGui::TextWrapped(
       "Recenter aligns the view and tracking origin. It keeps your reach and wrist calibration.");
@@ -558,7 +610,7 @@ void RenderingPanel() {
       "Active path: centered mono. Native stereo and alternating-eye AFR stay unavailable until a real per-eye scene-render hook is verified. Duplicating one finished image is not stereo.");
   ImGui::TextDisabled("True stereo: safely refused     AFR: safely refused");
   ImGui::TextWrapped(
-      "Gameplay is immersive first person by default. Theater opens automatically for the title screen, loading, non-3D cutscenes, DSVR menu and calibration, and stays closed during play. Native game menus are not reliably detected yet; use F8 to toggle theater for those. Hold the right trigger and push the right stick up/down to resize the theater window live.");
+      "Gameplay is immersive first person by default. The 16:9 theater opens for the title screen, loading and DSVR menu. Startup calibration runs in a separate immersive room. Native game menus are not reliably detected yet; use F8 to toggle theater for those. Hold the right trigger and push the right stick up/down to resize the theater window live.");
   ImGui::TextWrapped(
       "DSR HUD and native menus are still baked into the mono game image; no separate native UI pass is verified. Theater screen bounds are fitted inside both eye views to avoid cropping; separate HUD/menu layers remain blocked on locating that pass.");
   RenderMetrics metrics{};
@@ -602,6 +654,15 @@ void RenderingPanel() {
       "Eye-buffer resolution (restart required): the eye swapchains are sized once when the session creates them, so this applies after restarting the game. The native game resolution also affects rendering cost. Choose the scale that remains smooth at the automatic headset or monitor refresh.");
   ImGui::SliderInt("Eye resolution (%) (restart required)", &g_edit.render_scale_percent, 50, 200, "%d",
                               ImGuiSliderFlags_AlwaysClamp);
+  ImGui::TextWrapped("100%% uses each eye's exact runtime recommendation. Game image resolution is reported separately.");
+  RenderMetrics render_metrics{};
+  if (XrRenderMetricsSnapshot(render_metrics)) {
+    ImGui::Text("Headset: L %ux%u / R %ux%u", render_metrics.eye_widths[0],
+        render_metrics.eye_heights[0], render_metrics.eye_widths[1], render_metrics.eye_heights[1]);
+    ImGui::Text("Game image: %ux%u", render_metrics.source_width, render_metrics.source_height);
+    if (render_metrics.source_retained)
+      ImGui::Text("Waiting for a fresh image (%llu ms)", render_metrics.source_age_ms);
+  }
   if (ImGui::Button("Performance (70%)")) {
     g_edit.render_scale_percent = 70;
   }
@@ -613,13 +674,20 @@ void RenderingPanel() {
   if (ImGui::Button("Quality (100%)")) {
     g_edit.render_scale_percent = 100;
   }
-  static const char* aa_labels[] = {"Off", "FXAA", "MSAA 2x", "MSAA 4x"};
-  int aa_index = std::clamp(g_edit.aa_mode, 0, 3);
-  if (ImGui::Combo("Anti-aliasing (restart required)", &aa_index, aa_labels, 4)) {
+  static const char* aa_labels[] = {"Off", "FXAA"};
+  int aa_index = std::clamp(g_edit.aa_mode, 0, 1);
+  if (ImGui::Combo("Anti-aliasing", &aa_index, aa_labels, 2)) {
     g_edit.aa_mode = aa_index;
   }
   ImGui::TextWrapped(
-      "MSAA 4x is the default: real multisampling on the eye buffers. FXAA is a cheap post pass. Mono ships 100%% scale, stereo 85%%.");
+      "FXAA smooths the complete image. Native MSAA 2x/4x and TAA are unavailable because the game supplies a completed 1x frame without scene motion data.");
+  ImGui::Checkbox("Contrast adaptive sharpening (CAS)", &g_edit.cas_enabled);
+  ImGui::BeginDisabled(!g_edit.cas_enabled);
+  ImGui::SliderFloat("CAS strength", &g_edit.cas_strength, 0.0f, 1.0f, "%.2f",
+                     ImGuiSliderFlags_AlwaysClamp);
+  ImGui::EndDisabled();
+  ImGui::TextWrapped(
+      "Sharpening runs after the game image and VR menu are composed, so it also affects text and room details. Keep the strength low to avoid halos.");
   
     ImGui::Checkbox("Comfort vignette", &g_edit.comfort_vignette);
   ImGui::BeginDisabled(!g_edit.comfort_vignette);
@@ -637,10 +705,15 @@ void RenderingPanel() {
   ImGui::SliderFloat("Theater distance (m)", &g_edit.menu_distance_m, 1, 4, "%.2f",
                                 ImGuiSliderFlags_AlwaysClamp);
   ImGui::Checkbox("Keep theater during gameplay", &g_edit.gameplay_theater);
+  ImGui::Checkbox("Desktop mirror (spectator window)", &g_edit.desktop_present);
+  ImGui::TextWrapped(
+      "Off is the default: play is headset-only with no desktop window at all. "
+      "On keeps the game window mirroring play for spectators and capture; "
+      "the headset image is unaffected either way.");
   ImGui::TextWrapped(
       "Off is the default: play is immersive and the flat screen appears only for menus, the title screen and cutscenes. Turn this on to keep the flat screen while playing.");
   if (ImGui::Button("Toggle theater"))
-    XrToggleSanctuary();
+    XrToggleTheater();
 }
 void SettingsPanel() {
   Title("Comfort & body");
@@ -851,7 +924,7 @@ void CombatPanel() {
         ImGui::Text("Damage scale  %.2f (target %d)", (double)bench.last_scale, bench.last_target);
       ImGui::Text("Hand separation  %.3f m", (double)bench.hand_separation_m);
       if (bench.hands_too_close) {
-        ImGui::PushStyleColor(ImGuiCol_Text, {1.f, .45f, .4f, 1});
+        ImGui::PushStyleColor(ImGuiCol_Text, PaletteColor(palette::ember_light));
         ImGui::TextWrapped("Hands too close — weapons would clip. Widen your guard.");
         ImGui::PopStyleColor();
       }
@@ -955,9 +1028,9 @@ void LogsPanel() {
   for (const auto &entry : LogRecent())
     if (filter.PassFilter(entry.text.c_str())) {
       if (entry.level == LogLevel::Error)
-        ImGui::PushStyleColor(ImGuiCol_Text, {1, .6f, .53f, 1});
+        ImGui::PushStyleColor(ImGuiCol_Text, PaletteColor(palette::ember_light));
       else if (entry.level == LogLevel::Warn)
-        ImGui::PushStyleColor(ImGuiCol_Text, {1, .79f, .4f, 1});
+        ImGui::PushStyleColor(ImGuiCol_Text, PaletteColor(palette::bone));
       ImGui::TextUnformatted(entry.text.c_str());
       if (entry.level != LogLevel::Info)
         ImGui::PopStyleColor();
@@ -1082,7 +1155,7 @@ void DrawMenu() {
     const float content_w = ImGui::GetContentRegionAvail().x;
     if (g_title_font)
       ImGui::PushFont(g_title_font);
-    ImGui::PushStyleColor(ImGuiCol_Text, kGold);
+    ImGui::PushStyleColor(ImGuiCol_Text, kBone);
     ImGui::TextUnformatted("DSVR");
     ImGui::PopStyleColor();
     if (g_title_font)
@@ -1250,6 +1323,7 @@ void ModMenuCloseForTest() {
   CancelMenuInput();
 }
 bool ModMenuVisible() { return g_open.load() || CalibrationGetStatus().screen_visible; }
+bool ModMenuSettingsOpen() { return g_open.load(); }
 bool ModMenuCapturesInput() { return g_open.load() || CalibrationCapturesInput(); }
 void ModMenuControllerInput(float x, float y, bool select, bool back,
                             bool prev_panel, bool next_panel) {
@@ -1270,28 +1344,27 @@ bool ModMenuRegisterPanel(const char *id, const char *name, ModMenuPanel draw) {
   g_panels.push_back({id, name, draw});
   return true;
 }
-void ModMenuRenderTexture(ID3D11Device *device, ID3D11Texture2D *image) {
-  if (!device || !image) return;
+bool ModMenuRenderTexture(ID3D11Device *device, ID3D11Texture2D *image,
+                          bool clear_transparent, const char* render_status) {
+  if (!device || !image) return false;
   ComPtr<ID3D11Device> owner;
   image->GetDevice(&owner);
   if (owner.Get() != device)
-    return;
+    return false;
   D3D11_TEXTURE2D_DESC desc{};
   image->GetDesc(&desc);
-  const bool menu_visible = ModMenuVisible();
+  const bool menu_visible = ModMenuVisible() || render_status;
   const MenuPointerState pointer = XrMenuPointerInput(desc.Width, desc.Height);
-  // Nothing is composited into the game image unless the menu or the calibration
-  // screen is actually up. The old spatial-ray branch kept feeding the pointer
-  // overlay while the menu was closed, so the ray appeared inside gameplay and
-  // the calibration panel stayed baked into the immersive image.
+  // The XR owner passes a separate transparent target; desktop presentation
+  // passes the game's backbuffer. Never leave a stale pointer or panel in either.
   if (!menu_visible) {
     g_pointer_smooth.Reset();
-    return;
+    return false;
   }
   ImGuiContext *previous = ImGui::GetCurrentContext();
   if (!Initialize(device)) {
     ImGui::SetCurrentContext(previous);
-    return;
+    return false;
   }
   ImGui::SetCurrentContext(g_gui);
   D3D11_RENDER_TARGET_VIEW_DESC view{};
@@ -1305,20 +1378,31 @@ void ModMenuRenderTexture(ID3D11Device *device, ID3D11Texture2D *image) {
   ComPtr<ID3D11RenderTargetView> target;
   if (FAILED(device->CreateRenderTargetView(image, &view, &target))) {
     ImGui::SetCurrentContext(previous);
-    return;
+    return false;
   }
   FeedInput(desc.Width, desc.Height, pointer);
   ImGui_ImplDX11_NewFrame();
   ImGui::NewFrame();
   const auto status = CalibrationGetStatus();
-  if (menu_visible) {
+  if (render_status) {
+    ImGui::SetNextWindowPos(ImVec2(desc.Width*.12f, desc.Height*.30f));
+    ImGui::SetNextWindowSize(ImVec2(desc.Width*.76f, desc.Height*.40f));
+    ImGui::Begin("Restoring the view", nullptr, ImGuiWindowFlags_NoDecoration |
+        ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoInputs |
+        ImGuiWindowFlags_NoSavedSettings);
+    ImGui::SetWindowFontScale(2.0f);
+    ImGui::TextUnformatted("Restoring the view");
+    ImGui::Spacing();
+    ImGui::TextWrapped("%s", render_status);
+    ImGui::End();
+  } else if (menu_visible) {
     if (status.screen_visible) CalibrationScreen(status);
     else DrawMenu();
   }
   // Popups live inside the menu window: close intent must wait for the
   // operator's choice, otherwise one frame can both request the popup and
   // observe the menu as closed.
-  if (menu_visible && ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight) && !ImGui::GetIO().WantTextInput) {
+  if (!render_status && menu_visible && ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight) && !ImGui::GetIO().WantTextInput) {
 
     if (!status.screen_visible) {
       const auto pending = RestartPendingText();
@@ -1334,7 +1418,7 @@ void ModMenuRenderTexture(ID3D11Device *device, ID3D11Texture2D *image) {
   }
   // Deferred close: the toggle/B-button paths set this when the operator has
   // acknowledged the reminder but the modal frame was still open.
-  if (menu_visible && g_close_requested && !g_restart_modal) {
+  if (!render_status && menu_visible && g_close_requested && !g_restart_modal) {
     g_close_requested = false;
     if (g_open.load()) ModMenuClose();
   }
@@ -1346,8 +1430,8 @@ void ModMenuRenderTexture(ID3D11Device *device, ID3D11Texture2D *image) {
   g_context->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, saved, &depth);
   g_context->GetPredication(&predicate, &predicate_value);
   g_context->SetPredication(nullptr, FALSE);
-  if (status.screen_visible) {
-    const float color[] = {.055f, .065f, .075f, 1};
+  if (clear_transparent || status.screen_visible) {
+    const float color[] = {0, 0, 0, 0};
     g_context->ClearRenderTargetView(target.Get(), color);
   }
   ID3D11RenderTargetView *current = target.Get();
@@ -1363,6 +1447,7 @@ void ModMenuRenderTexture(ID3D11Device *device, ID3D11Texture2D *image) {
   if (predicate)
     predicate->Release();
   ImGui::SetCurrentContext(previous);
+  return true;
 }
 void ModMenuShutdown() {
   if (!g_gui || g_thread != GetCurrentThreadId())

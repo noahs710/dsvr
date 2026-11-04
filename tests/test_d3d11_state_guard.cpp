@@ -75,6 +75,17 @@ int main() {
   D3D11_QUERY_DESC qd{D3D11_QUERY_OCCLUSION_PREDICATE,0};ComPtr<ID3D11Predicate> predicate;
   CHECK(SUCCEEDED(device->CreatePredicate(&qd,&predicate)));
   context->SetPredication(predicate.Get(),TRUE);
+  D3D11_BUFFER_DESC constants_desc{};
+  constants_desc.ByteWidth=1024; constants_desc.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+  ComPtr<ID3D11Buffer> constants[2];
+  CHECK(SUCCEEDED(device->CreateBuffer(&constants_desc,nullptr,&constants[0])));
+  CHECK(SUCCEEDED(device->CreateBuffer(&constants_desc,nullptr,&constants[1])));
+  ID3D11Buffer* bindings[2]{constants[0].Get(),constants[1].Get()};
+  context->PSSetConstantBuffers(0,2,bindings);
+  ComPtr<ID3D11DeviceContext1> context1;
+  CHECK(SUCCEEDED(context.As(&context1)));
+  UINT first[2]{16,32}, counts[2]{16,16};
+  context1->PSSetConstantBuffers1(0,2,bindings,first,counts);
   {
     dsvr::D3D11StateGuard guard(context.Get());
     ComPtr<ID3D11Predicate> now;BOOL condition=TRUE;context->GetPredication(&now,&condition);
@@ -84,8 +95,22 @@ int main() {
     context->VSSetShader(nullptr,nullptr,0);context->PSSetShader(nullptr,nullptr,0);context->CSSetShader(nullptr,nullptr,0);
     ID3D11ShaderResourceView* no_sr=nullptr;ID3D11SamplerState* no_sp=nullptr;
     context->PSSetShaderResources(0,1,&no_sr);context->PSSetSamplers(0,1,&no_sp);
+    ID3D11Buffer* no_constants[2]{};
+    context->PSSetConstantBuffers(0,2,no_constants);
     context->IASetInputLayout(nullptr);context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     guard.Restore();guard.Restore();
+  }
+  ComPtr<ID3D11Buffer> restored_constants[2];
+  context->PSGetConstantBuffers(0,1,&restored_constants[0]);
+  context->PSGetConstantBuffers(1,1,&restored_constants[1]);
+  CHECK(restored_constants[0].Get()==bindings[0]);
+  CHECK(restored_constants[1].Get()==bindings[1]);
+  ID3D11Buffer* ranged[2]{};UINT restored_first[2]{}, restored_counts[2]{};
+  context1->PSGetConstantBuffers1(0,2,ranged,restored_first,restored_counts);
+  for (unsigned slot=0;slot<2;++slot) {
+    CHECK(ranged[slot]==bindings[slot]);
+    CHECK(restored_first[slot]==first[slot] && restored_counts[slot]==counts[slot]);
+    ranged[slot]->Release();
   }
   ComPtr<ID3D11RenderTargetView> got_rt;ComPtr<ID3D11DepthStencilView> got_dv;
   context->OMGetRenderTargets(1,&got_rt,&got_dv);CHECK(got_rt.Get()==rt && got_dv.Get()==depth_view.Get());

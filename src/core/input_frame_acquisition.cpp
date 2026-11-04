@@ -108,6 +108,11 @@ void ReadGripPose(const OpenXrInputBindings& bindings, int side,
   if (XR_FAILED(result) || (location.locationFlags & required) != required)
     return;
   sample.grip_valid = true;
+  sample.grip_tracking_flags_available = true;
+  sample.grip_position_tracked =
+      (location.locationFlags & XR_SPACE_LOCATION_POSITION_TRACKED_BIT) != 0;
+  sample.grip_orientation_tracked =
+      (location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT) != 0;
   sample.grip_position[0] = location.pose.position.x;
   sample.grip_position[1] = location.pose.position.y;
   sample.grip_position[2] = location.pose.position.z;

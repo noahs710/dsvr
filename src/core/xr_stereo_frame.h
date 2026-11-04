@@ -100,9 +100,16 @@ class XrStereoFrame {
   }
 
   bool Submit(uint32_t width, uint32_t height) {
+    const uint32_t widths[2]{width, width}, heights[2]{height, height};
+    return Submit(widths, heights);
+  }
+
+  bool Submit(const uint32_t (&widths)[2], const uint32_t (&heights)[2]) {
     if (!active_ || !OnOwner()) return false;
     const bool complete = acquired_ && leases_[0].ready && leases_[1].ready &&
-                          width && height && width <= INT32_MAX && height <= INT32_MAX;
+                          widths[0] && heights[0] && widths[1] && heights[1] &&
+                          widths[0] <= INT32_MAX && widths[1] <= INT32_MAX &&
+                          heights[0] <= INT32_MAX && heights[1] <= INT32_MAX;
     const bool released = Drain();
     XrCompositionLayerProjectionView images[2]{};
     for (unsigned eye = 0; eye < 2; ++eye) {
@@ -111,7 +118,7 @@ class XrStereoFrame {
       images[eye].fov = views_[eye].fov;
       images[eye].subImage.swapchain = chains_[eye];
       images[eye].subImage.imageRect.extent = {
-          static_cast<int32_t>(width), static_cast<int32_t>(height)};
+          static_cast<int32_t>(widths[eye]), static_cast<int32_t>(heights[eye])};
     }
     XrCompositionLayerProjection layer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
     layer.space = space_;
@@ -198,6 +205,7 @@ class XrStereoFrame {
     if (!ended) faulted_ = true;
     return ended;
   }
+ public:
   static bool ValidPose(const XrPosef& pose) {
     const auto& p = pose.position;
     const auto& q = pose.orientation;
@@ -216,6 +224,7 @@ class XrStereoFrame {
            f.angleRight < 1.5707963f && f.angleDown > -1.5707963f &&
            f.angleUp < 1.5707963f;
   }
+ private:
   struct Lease { XrSwapchain chain = XR_NULL_HANDLE; bool ready = false; } leases_[2];
   XrSession session_ = XR_NULL_HANDLE;
   XrSpace space_ = XR_NULL_HANDLE;

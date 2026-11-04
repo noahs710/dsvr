@@ -81,7 +81,7 @@ float left_quat[4] = {0, 0, 0, 1};
 float right_quat[4] = {0, 0, 0, 1};
 int calibration_requests = 0;
 int recenter_calls = 0;
-bool sanctuary = false;
+bool theater = false;
 bool trace_active = false;
 std::uint64_t trace_capture_id = 1;
 std::vector<dsvr::VrTraceEvent> trace_events;
@@ -314,7 +314,7 @@ void ResetRoomscaleTestControls() {
     menu_held = false;
     menu_capture = false;
     calibration_capture = false;
-    sanctuary = false;
+    theater = false;
     left_stick_x = 0;
     left_stick_y = 0;
     left_stick_click = right_stick_click = false;
@@ -452,7 +452,7 @@ void HeadDirectedLocomotion() {
     const XrSpace base = reinterpret_cast<XrSpace>(100);
     dsvr::VirtualPadState pad{};
     config.movement_orientation = dsvr::MovementOrientation::Head;
-    sanctuary = false;
+    theater = false;
     left_stick_x = 0;
     left_stick_y = 1;
     right_stick_value = 0;
@@ -482,13 +482,13 @@ void HeadDirectedLocomotion() {
            "a locomotion basis from another tracking epoch keeps the raw stick");
 
     dsvr::InputPublishHeadDirectedLocomotion({1, 0, 0}, {0, 0, 1}, 1);
-    sanctuary = true;
+    theater = true;
     dsvr::InputPollFrame(base, kHead, 1, 1830000000);
     Expect(dsvr::InputLatestPad(pad) && (pad.buttons & dsvr::kPadDpadUp) &&
            !(pad.buttons & dsvr::kPadDpadRight),
-           "sanctuary navigation keeps raw stick direction");
+           "theater navigation keeps raw stick direction");
 
-    sanctuary = false;
+    theater = false;
     dsvr::InputInvalidateHeadDirectedLocomotion();
     dsvr::InputPollFrame(base, kHead, 1, 1840000000);
     Expect(dsvr::InputLatestPad(pad) && pad.thumb_ly > 32000 && pad.thumb_lx > -2000 &&
@@ -554,7 +554,7 @@ void MovementReferenceFrames() {
            "head is the default movement orientation");
     config.movement_orientation = dsvr::MovementOrientation::Controller;
     config.movement_controller = dsvr::MovementController::Left;
-    sanctuary = false;
+    theater = false;
     left_stick_x = left_stick_y = 0;
     right_stick_value = 0;
     head_quat[0] = head_quat[1] = head_quat[2] = 0;
@@ -732,6 +732,83 @@ void MovementAlwaysOriented() {
     config = saved;
 }
 
+// E1 revalidation: the near-vertical planar hysteresis band. Straight up
+// (planar <= 0.2) enters vertical and keeps the last stable heading; hovering
+// inside the 0.2-0.3 dead band with the planar direction turned away refreshes
+// neither the heading nor the vertical flag; returning past 0.3 follows the NEW
+// heading with no neutral stick in between, which is what separates a vertical
+// round trip from a tracking loss (that one latches a rearm). Pins the band at
+// src/core/input.cpp:1546-1560.
+void MovementVerticalHysteresis() {
+    const auto saved = config;
+    const XrSpace base = reinterpret_cast<XrSpace>(100);
+    dsvr::VirtualPadState pad{};
+    ResetRoomscaleTestControls();
+    head_quat[0] = head_quat[1] = head_quat[2] = 0;
+    head_quat[3] = 1;
+    left_quat[0] = left_quat[1] = left_quat[2] = 0;
+    left_quat[3] = 1;
+    left_pose_valid = true;
+    right_pose_valid = false;
+    dsvr::InputInvalidateFrame();
+    dsvr::RoomscaleBasis basis{};
+    basis.tracking_right = {1, 0, 0};
+    basis.tracking_up = {0, 1, 0};
+    basis.tracking_forward = {0, 0, 1};
+    basis.movement_basis = {0, 0, 1};
+    basis.space_epoch = 7;
+    basis.valid = true;
+    dsvr::InputPublishRoomscaleBasis(basis);
+    dsvr::InputPublishHeadDirectedLocomotion({0, 0, 1}, {0, 0, 1}, 7);
+    config.movement_orientation = dsvr::MovementOrientation::Controller;
+    config.movement_controller = dsvr::MovementController::Left;
+    config.dominant_hand_left = false;
+    // Neutral frame: settings latch only while the stick is neutral.
+    dsvr::InputPollFrame(base, kHead, 7, 2600000000LL);
+    // Blade along world -X, planar 1.0: the hand heading is live.
+    left_quat[1] = 0.70710678f;
+    left_quat[3] = 0.70710678f;
+    left_stick_y = 1;
+    dsvr::InputPollFrame(base, kHead, 7, 2601000000LL);
+    Expect(dsvr::InputLatestPad(pad) && pad.thumb_lx < -32000 && std::abs(pad.thumb_ly) < 2,
+           "hysteresis: a horizontal hand heading steers before any tilt");
+    // Straight up: planar 0.0 enters vertical, heading retained.
+    left_quat[0] = 0.70710678f;
+    left_quat[1] = left_quat[2] = 0.0f;
+    left_quat[3] = 0.70710678f;
+    dsvr::InputPollFrame(base, kHead, 7, 2602000000LL);
+    Expect(dsvr::InputLatestPad(pad) && pad.thumb_lx < -32000 && std::abs(pad.thumb_ly) < 2,
+           "hysteresis: a straight-up hand keeps the last stable planar heading");
+    // Hover inside the dead band (planar 0.25) with the planar direction turned
+    // 180 degrees: no heading refresh, no exit from vertical, no chatter.
+    left_quat[0] = 0.0f;
+    left_quat[1] = 0.790690f;
+    left_quat[2] = -0.612217f;
+    left_quat[3] = 0.0f;
+    dsvr::InputPollFrame(base, kHead, 7, 2603000000LL);
+    Expect(dsvr::InputLatestPad(pad) && pad.thumb_lx < -32000 && std::abs(pad.thumb_ly) < 2,
+           "hysteresis: the 0.2-0.3 dead band refreshes no heading mid-turn");
+    // Past 0.3 again at the opposite yaw: steering follows the new heading with
+    // the stick still held forward.
+    left_quat[0] = left_quat[2] = 0.0f;
+    left_quat[1] = -0.70710678f;
+    left_quat[3] = 0.70710678f;
+    dsvr::InputPollFrame(base, kHead, 7, 2604000000LL);
+    Expect(dsvr::InputLatestPad(pad) && pad.thumb_lx > 32000 && std::abs(pad.thumb_ly) < 2,
+           "hysteresis: returning past 0.3 follows the new heading with no neutral rearm");
+    Expect(dsvr::InputTakeTurnYaw() == 0,
+           "hysteresis: the round trip changes locomotion only, not turn yaw");
+    left_stick_x = left_stick_y = 0;
+    left_quat[0] = left_quat[1] = left_quat[2] = 0;
+    left_quat[3] = 1;
+    right_quat[0] = right_quat[1] = right_quat[2] = 0;
+    right_quat[3] = 1;
+    left_pose_valid = right_pose_valid = true;
+    dsvr::InputPollFrame(base, kHead, 7, 2605000000LL);
+    dsvr::InputInvalidateFrame();
+    config = saved;
+}
+
 void ReferenceChords() {
     const XrSpace base = reinterpret_cast<XrSpace>(100);
     dsvr::VirtualPadState pad{};
@@ -848,7 +925,7 @@ void CalibratedRoomscale() {
     const auto saved=config;
     config.vr_enabled=config.headlook_enabled=true;
     config.play_style="roomscale";config.world_scale=1.7f;
-    menu_capture=calibration_capture=sanctuary=false;
+    menu_capture=calibration_capture=theater=false;
     right_stick_value=left_stick_x=left_stick_y=right_trigger=right_squeeze=0;
     const XrSpace base=reinterpret_cast<XrSpace>(100);
     dsvr::InputInvalidateFrame();
@@ -1046,13 +1123,13 @@ void PhysicalDefence() {
         applied_hands_valid = gate != 3;
         g_camera_gameplay_ready = gate != 4;
         applied_hands_epoch = gate == 5 ? 2 : 1;
-        sanctuary = gate == 6;
+        theater = gate == 6;
         menu_capture = gate == 7;
         calibration_capture = gate == 8;
         reset(); hold(0, 40); hold(5, 5); hold(0, 40);
         Expect(presses == 0 && !lt,
                "disabled, uncommitted, menu or calibration IK cannot guard physically");
-        sanctuary = menu_capture = calibration_capture = false;
+        theater = menu_capture = calibration_capture = false;
         config.physical_defence = config.physical_attacks = config.motion_attacks = true;
         config.arm_ik_log_only = false;
         config.arm_ik_block_animation = applied_hands_valid = true;
@@ -1094,7 +1171,7 @@ void BridgeReadinessLog() {
     applied_hands_valid = false;
     applied_hands_epoch = 1;
     g_camera_gameplay_ready = true;
-    sanctuary = menu_capture = calibration_capture = false;
+    theater = menu_capture = calibration_capture = false;
     InputPollFrame(base, kHead, 1, 3000000000LL);
     const std::string uncommitted = latest_bridges();
     Expect(uncommitted.find("attack=no-committed-hands") != std::string::npos &&
@@ -1125,7 +1202,7 @@ void BridgeReadinessLog() {
     right_pose_valid = saved_right_pose;
     applied_hands_valid = false;
     applied_hands_epoch = 1;
-    sanctuary = false;
+    theater = false;
     InputInvalidateFrame();
 }
 
@@ -1253,7 +1330,7 @@ void PhysicalAttacks() {
     config.swing_attack_heavy_min = 4.5f;
     for (int gate = 0; gate < 5; ++gate) {
         reset(); move(1, 0, 40);
-        sanctuary = gate == 0;
+        theater = gate == 0;
         menu_capture = gate == 1;
         calibration_capture = gate == 2;
         config.physical_attacks = gate != 3;
@@ -1261,7 +1338,7 @@ void PhysicalAttacks() {
         move(1, 6, 30);
         Expect(light_edges == 0 && heavy_edges == 0,
                "menu, calibration and disabled modes cannot emit physical attacks");
-        sanctuary = menu_capture = calibration_capture = false;
+        theater = menu_capture = calibration_capture = false;
         config.physical_attacks = true;
         config.arm_ik_log_only = false;
         move(1, 6, 30);
@@ -1658,7 +1735,7 @@ void CapturedInput() {
     dsvr::InputPollFrame(base, kHead, 1, 2056000000);
     for (int mode = 0; mode < 2; ++mode) {
       const long long time = 2057000000LL + mode * 1000000LL;
-      sanctuary = mode == 0;
+      theater = mode == 0;
       dsvr::g_camera_gameplay_ready = mode == 0;
       calibration_capture = mode == 1;
       menu_capture = mode == 0;
@@ -1677,7 +1754,7 @@ void CapturedInput() {
       left_stick_y = right_squeeze = 0;
       dsvr::InputPollFrame(base, kHead, 1, time + 200000);
     }
-    sanctuary = false;
+    theater = false;
     dsvr::g_camera_gameplay_ready = true;
     menu_held = true;
     right_squeeze = 1;
@@ -1702,6 +1779,8 @@ bool VrTraceSessionActive() { return trace_active; }
 std::uint64_t VrTraceCaptureId() { return trace_capture_id; }
 void VrTraceRecord(VrTraceEvent event) { trace_events.push_back(event); }
 CombatNativeStatus CombatNativeGetStatus() { return g_combat_status; }
+bool g_native_cutscene = false;  // ladder closure: camera.cpp is not linked here
+bool CameraNativeCutscene() { return g_native_cutscene; }
 bool ArmIkLatestHands(ArmIkHands& out) {
     out = {};
     out.sequence = 1;
@@ -1712,9 +1791,9 @@ bool ArmIkLatestHands(ArmIkHands& out) {
 void ArmIkDrainBenchHaptics() {}  // iteration 2: no bench in input tests
 bool DiagnosticsReloadConfig() { return true; }
 void DiagnosticsLogMarker() {}
-void XrToggleSanctuary() { ++theater_toggles; }
-void XrRecenterSanctuary() { ++recenter_calls; }
-bool XrMenuPresentationActive() { return sanctuary; }
+void XrToggleTheater() { ++theater_toggles; }
+void XrRecenterTheater() { ++recenter_calls; }
+bool XrMenuPresentationActive() { return theater; }
 bool CalibrationCapturesInput() { return calibration_capture; }
 void CalibrationRequest() { ++calibration_requests; calibration_capture = true; }
 bool ModMenuCapturesInput() { return menu_capture; }
@@ -2054,13 +2133,13 @@ int main() {
     FailedTurnQuery(true);
     FailedFirstTurnQuery(false);
     FailedFirstTurnQuery(true);
-    sanctuary=true;left_stick_y=-.9f;
+    theater=true;left_stick_y=-.9f;
     dsvr::InputInvalidateFrame();
     dsvr::InputPollFrame(reinterpret_cast<XrSpace>(100), kHead, 1,1900000000);
     dsvr::VirtualPadState menu_pad{};
     Expect(dsvr::InputLatestPad(menu_pad) && (menu_pad.buttons&dsvr::kPadDpadDown) &&
            menu_pad.thumb_ly==0,"native theater menus receive D-pad navigation from the left stick");
-    sanctuary=false;left_stick_y=0;
+    theater=false;left_stick_y=0;
     left_stick_x=-.4f;left_stick_y=-.9f;
     dsvr::InputInvalidateFrame();
     dsvr::InputPublishHeadDirectedLocomotion({0, 0, 1}, {0, 0, 1}, 1);
@@ -2075,6 +2154,7 @@ int main() {
     HeadDirectedLocomotion();
       MovementReferenceFrames();
       MovementAlwaysOriented();
+      MovementVerticalHysteresis();
     ReferenceChords();
     CalibratedRoomscale();
     PhysicalAttacks();

@@ -32,7 +32,9 @@
 #include "vr_trace.h"
 #include "arm_ik.h"
 #include "swing_attack_math.h"
+#include "weapon_weight_math.h"
 #include "shield_guard_math.h"
+#include "skill_flick_math.h"
 #include "arm_swing_math.h"
 #include "reach_intent_math.h"
 #include "interaction_target_math.h"
@@ -82,12 +84,18 @@ bool g_binding_attached_valid = false;
 BladeKinematics g_blade[2];  // per hand, continuous (combat_math.h)
 SwingAttackTrigger g_swing_attack[2];  // physical attack bridge, polling thread
 ShieldGuardTrigger g_shield_guard[2];  // physical defence bridge, polling thread
+SkillFlickTrigger g_skill_flick[2];  // skill flourish bridge, polling thread
 ArmSwingSprint g_arm_swing;  // arm-swing gait bridge, polling thread
 ReachIntentTrigger g_reach[2];  // reach-to-interact bridge, polling thread
 // Like the guard line, the reach tap is a window the caller owns: the trigger
 // fires once and the button stays down for reach_press_ms. Measured on the same
 // predicted-display clock the trigger itself runs on.
 long long g_reach_hold_until_ms[2] = {0, 0};
+// Physical two-hand toggle: Y + weapon-side shoulder held for a 90 ms tap
+// (same window as the parry press) on attach/detach edges. Closed-loop on the
+// native stance while equipment is bound, edge-servoed otherwise.
+long long g_two_hand_hold_until_ms = 0;
+bool g_two_hand_assumed_2h = false;
 // Latest native selection published by the interaction observer (game thread).
 // No producer binds it yet, so the store stays empty and the reach gate keeps
 // refusing; when a producer exists it publishes here and the gate reads the
@@ -120,6 +128,7 @@ void ResetPhysicalBridges() {
   for (int side = 0; side < 2; ++side) {
     g_blade[side].Reset();
     g_swing_attack[side].Reset();
+    g_skill_flick[side].Reset();
     g_shield_guard[side].Reset();
     g_reach[side].Reset();
     g_reach_hold_until_ms[side] = 0;
@@ -140,6 +149,7 @@ ComfortMotion g_comfort_motion;
 TurnParams g_turn_params;
 bool g_turn_params_init = false;
 HandSample g_hand[2];
+std::atomic<bool> g_calibration_refinement_safe{false};
 bool g_hand_logged[2] = {false, false};
 std::atomic<float> g_pending_turn_yaw{0.0f};
 // Latest VirtualPadState published to the XInput hook (mutex: one writer
@@ -205,13 +215,13 @@ constexpr long long kDoubleAClickWindowNs = 700000000LL;
 constexpr long long kDoubleAClickMinSpacingNs = 90000000LL;
 // Hold both secondary buttons for half a second as a theater shortcut that
 // remains available when the runtime reserves the controller's Menu button.
-constexpr long long kSanctuaryChordNs = 500000000LL;
+constexpr long long kTheaterChordNs = 500000000LL;
 // Lead-in: the moment either constituent goes down, both are withheld. A chord
 // must never leak its individual press into the game (no accidental dodge or
 // heal on the way to theater mode). If the partner never arrives, the lone
 // press is released once this window closes.
 constexpr long long kChordLeadInNs = 250000000LL;
-ButtonPairChord g_sanctuary_chord(kSanctuaryChordNs, kChordLeadInNs);
+ButtonPairChord g_theater_chord(kTheaterChordNs, kChordLeadInNs);
 
 bool OkInput(XrResult r, const char* what) {
   if (XR_SUCCEEDED(r)) return true;
@@ -665,9 +675,9 @@ void ResetRoomscaleState() {
 
 bool UpdateRoomscaleInput(VrPadInput& pad, Vec3 head, std::uint64_t epoch,
                           long long predicted_time_ns, const Config& cfg,
-                          bool sanctuary) {
+                          bool theater) {
   const bool allowed = cfg.vr_enabled && cfg.headlook_enabled &&
-      cfg.play_style == "roomscale" && !sanctuary && !ModMenuCapturesInput() &&
+      cfg.play_style == "roomscale" && !theater && !ModMenuCapturesInput() &&
       !CalibrationCapturesInput() && !g_capture_rearm && epoch &&
       predicted_time_ns > 0 && FiniteVec(head);
   const auto now = GetTickCount64();
@@ -851,8 +861,12 @@ void InputAttachSession(void* xr_instance, void* xr_session) {
 }
 
 bool InputAvailable() { return g_attached && !g_failed; }
+bool InputCalibrationRefinementSafe() {
+  return g_calibration_refinement_safe.load(std::memory_order_acquire);
+}
 
 static void InvalidateInputFrame(std::uint64_t space_epoch, long long predicted_ns) {
+  g_calibration_refinement_safe.store(false, std::memory_order_release);
   g_comfort_motion = {};
   const ArmTarget targets[2]{};
   const HandSample hands[2]{};
@@ -862,7 +876,7 @@ static void InvalidateInputFrame(std::uint64_t space_epoch, long long predicted_
   InputInvalidateHeadDirectedLocomotion();
   g_pending_turn_yaw.store(0.0f, std::memory_order_relaxed);
   g_combos.Reset();
-  g_sanctuary_chord.Reset();
+  g_theater_chord.Reset();
   g_turn.Reset();
   g_stick_dpad.Reset();
   g_blade[0].Reset();
@@ -880,6 +894,8 @@ static void InvalidateInputFrame(std::uint64_t space_epoch, long long predicted_
   ResetRoomscaleState();
     g_swing_attack[0].Reset();
     g_swing_attack[1].Reset();
+    g_skill_flick[0].Reset();
+    g_skill_flick[1].Reset();
   g_shield_guard[0].Reset();
   g_shield_guard[1].Reset();
   g_arm_swing.Reset();
@@ -1046,7 +1062,7 @@ void LogBridgeReadiness(const Config& cfg, bool motion_bridge_armed,
 }
 
 static void ApplyInputFramePolicy(const Config& cfg, Vec3 head,
-    std::uint64_t space_epoch, long long predicted_display_time, bool sanctuary,
+    std::uint64_t space_epoch, long long predicted_display_time, bool theater,
     const OpenXrInputFrame& acquired) {
   float dt = 0.0f;
   if (g_last_time_ns > 0)
@@ -1090,12 +1106,13 @@ static void ApplyInputFramePolicy(const Config& cfg, Vec3 head,
     bool reach_ready[2] = {false, false};
     const int weapon_side = cfg.dominant_hand_left ? 0 : 1;
     const int shield_side = weapon_side == 0 ? 1 : 0;
+    const CombatNativeStatus combat_status = CombatNativeGetStatus();
     ArmIkHands committed_hands{};
     const bool ik_hands_available = ArmIkLatestHands(committed_hands);
-    motion_bridge_armed = !sanctuary && cfg.motion_attacks &&
+    motion_bridge_armed = !theater && cfg.motion_attacks &&
         !ModMenuCapturesInput() && !CalibrationCapturesInput() && !g_capture_rearm;
     const char* bridge_gate = nullptr;
-    if (sanctuary) bridge_gate = "theater-menu-active";
+    if (theater) bridge_gate = "theater-menu-active";
     else if (!CameraGameplayReady()) bridge_gate = "camera-not-gameplay";
     else if (cfg.observer_only) bridge_gate = "observer-only";
     else if (!cfg.arm_ik_enabled) bridge_gate = "arm_ik-off";
@@ -1120,6 +1137,9 @@ static void ApplyInputFramePolicy(const Config& cfg, Vec3 head,
     const AcquiredHand& raw_hand = acquired.hands[side];
     HandSample& sample = hand_samples[side];
     sample.valid = raw_hand.grip_valid;
+    sample.tracking_flags_available = raw_hand.grip_tracking_flags_available;
+    sample.position_tracked = raw_hand.grip_position_tracked;
+    sample.orientation_tracked = raw_hand.grip_orientation_tracked;
     for (int axis = 0; axis < 3; ++axis) {
       sample.pos[axis] = raw_hand.grip_position[axis];
       sample.aim_pos[axis] = raw_hand.aim_position[axis];
@@ -1132,6 +1152,8 @@ static void ApplyInputFramePolicy(const Config& cfg, Vec3 head,
     }
     sample.aim_valid = raw_hand.aim_valid;
     sample.velocity_flags = raw_hand.velocity_flags;
+    sample.linear_velocity_valid = raw_hand.linear_velocity_valid;
+    sample.angular_velocity_valid = raw_hand.angular_velocity_valid;
     sample.space_epoch = space_epoch;
     sample.predicted_ns = predicted_display_time;
     const float squeeze_raw = pad_hand.squeeze;
@@ -1142,6 +1164,7 @@ static void ApplyInputFramePolicy(const Config& cfg, Vec3 head,
     if (!sample.valid) {
       g_blade[side].Reset();
       g_swing_attack[side].Reset();
+      g_skill_flick[side].Reset();
       g_shield_guard[side].Reset();
       continue;
     }
@@ -1165,12 +1188,13 @@ static void ApplyInputFramePolicy(const Config& cfg, Vec3 head,
     // histories; disable the bridges only when all motion paths are off.
     // Velocities are head-relative: roomscale walking moves head and
     // hands together and must not read as a swing.
-    if (sanctuary || ModMenuCapturesInput() || CalibrationCapturesInput() ||
+    if (theater || ModMenuCapturesInput() || CalibrationCapturesInput() ||
         g_capture_rearm ||
         (!cfg.motion_attacks && !cfg.arm_swing_sprint &&
-           !cfg.physical_defence)) {
+           !cfg.physical_defence && !cfg.physical_skills)) {
       g_blade[side].Reset();
       g_swing_attack[side].Reset();
+      g_skill_flick[side].Reset();
       g_shield_guard[side].Reset();
       g_reach[side].Reset();
       g_reach_hold_until_ms[side] = 0;
@@ -1191,6 +1215,7 @@ static void ApplyInputFramePolicy(const Config& cfg, Vec3 head,
           (!previous.valid || previous.space_epoch_ != space_epoch ||
            !(dt > 0.0f) || dt > 0.25f)) {
         g_swing_attack[side].Reset();
+        g_skill_flick[side].Reset();
         g_shield_guard[side].Reset();
         g_reach[side].Reset();
         g_reach_hold_until_ms[side] = 0;
@@ -1207,8 +1232,14 @@ static void ApplyInputFramePolicy(const Config& cfg, Vec3 head,
       } else {
         const bool thrust =
             cfg.thrust_enabled && g_blade[side].FrameKind(blade) == GestureKind::Thrust;
+        // Torque-gated tip speed: daggers track the hand, great weapons need a
+        // committed swing to reach the same bars. Heavy selection (and the
+        // damage/poise behind it) stays with the game.
         swing_attack = g_swing_attack[side].Feed(
-            g_blade[side].tip_speed, thrust, predicted_display_time / 1000000LL,
+            TorqueGatedSpeed(g_blade[side].tip_speed,
+                SwingWeaponResponse(combat_status.equipment.weapon_id[side],
+                    combat_status.equipment_bound, cfg.torque_response)),
+            thrust, predicted_display_time / 1000000LL,
             SwingParamsFromConfig(cfg));
         if (swing_attack.fired)
           DSVR_LOG("Combat: physical %s at %.2f m/s -> %s attack",
@@ -1234,6 +1265,24 @@ static void ApplyInputFramePolicy(const Config& cfg, Vec3 head,
           DSVR_LOG("Combat: shield flick at %.2f m/s -> parry tap",
                    shield_guard.peak_speed);
       }
+      // Skill flourish: a short weapon-hand impulse that returns to rest
+      // taps the skill channel (LT); the game picks skill vs parry by
+      // equipment. A firing swing or a thrust shape suppresses the flourish
+      // instead of double-firing.
+      const bool skill_ready = side == weapon_side && cfg.physical_skills &&
+          physical_attack_ready && !g_swing_attack[side].Holding() &&
+          g_blade[side].FrameKind(blade) != GestureKind::Thrust;
+      if (!skill_ready) {
+        g_skill_flick[side].Reset();
+      } else {
+        const auto skill = g_skill_flick[side].Feed(
+            g_blade[side].grip_speed, predicted_display_time / 1000000LL,
+            SkillParamsFromGuard(GuardParamsFromConfig(cfg)));
+        if (skill.tapped)
+          DSVR_LOG("Combat: weapon flourish at %.2f m/s -> skill tap",
+                   skill.peak_speed);
+      }
+      if (side == weapon_side) pad_input.skill_tap = g_skill_flick[side].Tapping();
       // Reach geometry for this hand. Speeds are already head-relative, so
       // walking the room or riding a lift moves head and hand together and
       // cannot push a hand into the envelope.
@@ -1255,6 +1304,9 @@ static void ApplyInputFramePolicy(const Config& cfg, Vec3 head,
 
     ArmTarget& target = arm_targets[side];
     target.valid = sample.valid;
+    target.tracking_flags_available = sample.tracking_flags_available;
+    target.position_tracked = sample.position_tracked;
+    target.orientation_tracked = sample.orientation_tracked;
     target.pos[0] = sample.pos[0];
     target.pos[1] = sample.pos[1];
     target.pos[2] = sample.pos[2];
@@ -1297,7 +1349,7 @@ static void ApplyInputFramePolicy(const Config& cfg, Vec3 head,
       ModMenuToggle();
       g_stick_menu_chord_fired = true;
     }
-  } else if (g_stick_menu_chord_started_ns) { if (!g_stick_menu_chord_fired) XrRecenterSanctuary(); g_stick_menu_chord_started_ns = 0; g_capture_rearm = true; stick_menu_consumed = true; }
+  } else if (g_stick_menu_chord_started_ns) { if (!g_stick_menu_chord_fired) XrRecenterTheater(); g_stick_menu_chord_started_ns = 0; g_capture_rearm = true; stick_menu_consumed = true; }
 
   const bool a_pressed = pad_input.right.primary && !g_recalibration_a_was_down;
   g_recalibration_a_was_down = pad_input.right.primary;
@@ -1379,12 +1431,14 @@ static void ApplyInputFramePolicy(const Config& cfg, Vec3 head,
     g_stick_dpad.Reset();
     g_turn.Reset();
     g_combos.Reset();
-    g_sanctuary_chord.Reset();
+    g_theater_chord.Reset();
     g_pending_turn_yaw.store(0.0f, std::memory_order_relaxed);
     g_blade[0].Reset();
     g_blade[1].Reset();
     g_swing_attack[0].Reset();
     g_swing_attack[1].Reset();
+    g_skill_flick[0].Reset();
+    g_skill_flick[1].Reset();
     g_shield_guard[0].Reset();
     g_shield_guard[1].Reset();
     return;
@@ -1404,20 +1458,20 @@ static void ApplyInputFramePolicy(const Config& cfg, Vec3 head,
     const unsigned combos = g_combos.Update(buttons);
     // Alternate theater shortcut when Menu belongs to system UI. The same
     // state owns deferred lone taps and suppresses the entire consumed chord.
-    const auto secondary = g_sanctuary_chord.Update(
+    const auto secondary = g_theater_chord.Update(
         pad_input.left.secondary, pad_input.right.secondary, predicted_display_time);
     pad_input.left.secondary = secondary.first;
     pad_input.right.secondary = secondary.second;
     if (secondary.triggered) {
-      XrToggleSanctuary();
+      XrToggleTheater();
       DSVR_LOG("Input: chord Y+B held -> theater toggle (F8)");
     }
     if (combos & kComboTheater) {
-      XrToggleSanctuary();
+      XrToggleTheater();
       DSVR_LOG("Input: combo Menu+Y -> theater toggle (F8)");
     }
     if (combos & kComboRecenter) {
-      XrRecenterSanctuary();
+      XrRecenterTheater();
       DSVR_LOG("Input: combo both stick clicks -> recenter (F6)");
     }
     if (combos & kComboMarker) {
@@ -1429,7 +1483,7 @@ static void ApplyInputFramePolicy(const Config& cfg, Vec3 head,
       DSVR_LOG("Input: combo Menu+B -> reload config (F7)");
     }
     if (buttons.menu) {
-      g_sanctuary_chord.Reset();
+      g_theater_chord.Reset();
       pad_input.left.primary = false;
       pad_input.left.secondary = false;
       pad_input.right.secondary = false;
@@ -1469,8 +1523,8 @@ static void ApplyInputFramePolicy(const Config& cfg, Vec3 head,
   else suppress_reason = "suppressed";
   // Menu navigation is a d-pad mapping and needs no orientation reference at
     // all, so it must never be fed a stick the locomotion gate already cleared.
-    // Sanctuary and every non-gameplay state are menu navigation.
-    const bool menu_navigation = sanctuary || !CameraGameplayReady();
+    // Theater and every non-gameplay state are menu navigation.
+    const bool menu_navigation = theater || !CameraGameplayReady();
     bool stick_dpad_consumed = false;
     if (menu_navigation) g_stick_dpad.Reset();
     else stick_dpad_consumed = g_stick_dpad.Apply(pad_input.left, predicted_display_time / 1000000LL);
@@ -1652,22 +1706,75 @@ static void ApplyInputFramePolicy(const Config& cfg, Vec3 head,
   // set for every frame of the guard and clears the frame the hand drops.
   pad_input.guard_block = shield_guard.block;
   pad_input.guard_parry = shield_guard.parry;
+  // Physical two-hand bridge: support-grip attach taps the game's own
+  // two-hand toggle. A tap only fires while the player's own Y, triggers
+  // and squeezes are quiet so the toggle never fights manual input.
+  {
+    const long long now_ms = predicted_display_time / 1000000LL;
+    const bool attached = !bridge_gate && cfg.physical_two_hand &&
+        committed_hands.epoch == space_epoch && committed_hands.two_hand_attached;
+    const bool have_2h = committed_hands.equipment_bound
+        ? committed_hands.native_stance == 3 : g_two_hand_assumed_2h;
+    const bool player_quiet = !pad_input.left.secondary &&
+        pad_input.left.trigger <= 0.1f && pad_input.right.trigger <= 0.1f &&
+        pad_input.left.squeeze <= 0.5f && pad_input.right.squeeze <= 0.5f;
+    if (!bridge_gate && attached != have_2h && player_quiet &&
+        now_ms >= g_two_hand_hold_until_ms) {
+      g_two_hand_hold_until_ms = now_ms + 90;
+      if (!committed_hands.equipment_bound) g_two_hand_assumed_2h = attached;
+    }
+    pad_input.two_hand_toggle = now_ms < g_two_hand_hold_until_ms;
+  }
+  bool calibration_safe = !theater && !ModMenuCapturesInput() &&
+      !CalibrationCapturesInput() && CameraGameplayReady() &&
+      !CameraNativeCutscene() && !g_capture_rearm &&
+      std::fabs(pad_input.left.stick_x) < 0.08f &&
+      std::fabs(pad_input.left.stick_y) < 0.08f &&
+      std::fabs(pad_input.right.stick_x) < 0.08f &&
+      std::fabs(pad_input.right.stick_y) < 0.08f &&
+      !swing_attack.light && !swing_attack.heavy &&
+      !shield_guard.block && !shield_guard.parry &&
+      !pad_input.reach_interact && !pad_input.two_hand_toggle &&
+      !pad_input.skill_tap;
+  for (int side = 0; side < 2 && calibration_safe; ++side) {
+    const auto& hand = hand_samples[side];
+    const auto& buttons = side == 0 ? pad_input.left : pad_input.right;
+    calibration_safe = hand.valid && hand.tracking_flags_available &&
+        hand.position_tracked && hand.orientation_tracked &&
+        !hand.trigger_held && !hand.squeeze_held && !hand.primary_held &&
+        !buttons.secondary && !buttons.menu && !buttons.stick_click &&
+        hand.speed <= 0.08f;
+    if (calibration_safe && hand.linear_velocity_valid) {
+      const float vx = hand.linear_velocity[0], vy = hand.linear_velocity[1],
+                  vz = hand.linear_velocity[2];
+      calibration_safe = std::isfinite(vx) && std::isfinite(vy) &&
+          std::isfinite(vz) && std::sqrt(vx * vx + vy * vy + vz * vz) <= 0.08f;
+    }
+    if (calibration_safe && hand.angular_velocity_valid) {
+      const float wx = hand.angular_velocity[0], wy = hand.angular_velocity[1],
+                  wz = hand.angular_velocity[2];
+      calibration_safe = std::isfinite(wx) && std::isfinite(wy) &&
+          std::isfinite(wz) && std::sqrt(wx * wx + wy * wy + wz * wz) <= 0.20f;
+    }
+  }
+  g_calibration_refinement_safe.store(calibration_safe, std::memory_order_release);
   {
     const bool roomscale_active = UpdateRoomscaleInput(
-        pad_input, head, space_epoch, predicted_display_time, cfg, sanctuary);
+        pad_input, head, space_epoch, predicted_display_time, cfg, theater);
     PublishPad(MapVrPad(pad_input, menu_navigation),
         pad_active || roomscale_active || swing_attack.light ||
             swing_attack.heavy || shield_guard.block || shield_guard.parry ||
-            pad_input.reach_interact,
+            pad_input.reach_interact || pad_input.two_hand_toggle ||
+            pad_input.skill_tap,
         predicted_display_time, space_epoch);
   }
   LogBridgeReadiness(cfg, motion_bridge_armed, attack_gate, defence_gate,
                      suppress_reason, swing_attack, shield_guard,
                      committed_hands, space_epoch);
 
-  // Stick turn: sanctuary freezes the world; otherwise the tracker owns
+  // Stick turn: theater freezes the world; otherwise the tracker owns
   // snap/smooth and only the accumulated delta crosses to the game thread.
-  if (sanctuary) {
+  if (theater) {
     g_turn.Reset();
     g_pending_turn_yaw.store(0.0f, std::memory_order_relaxed);
     return;
@@ -1722,7 +1829,7 @@ void InputPollFrame(void* base_space, const float head_pos[3],
                    cfg.bind_profile_wmr, cfg.bind_profile_simple};
   g_binding_seen_valid = true;
 
-  const bool sanctuary = XrMenuPresentationActive();
+  const bool theater = XrMenuPresentationActive();
   OpenXrInputBindings bindings{};
   bindings.session = g_session;
   bindings.action_set = g_action_set;
@@ -1743,7 +1850,7 @@ void InputPollFrame(void* base_space, const float head_pos[3],
   OpenXrInputFrame acquired{};
   const auto acquisition = AcquireOpenXrInputFrame(bindings,
       (XrSpace)base_space, space_epoch, (XrTime)predicted_display_time,
-      !sanctuary && cfg.reach_interact, acquired);
+      !theater && cfg.reach_interact, acquired);
   if (acquisition.status == OpenXrInputFrameStatus::NotFocused) {
     InvalidateInputFrame(space_epoch, predicted_display_time);
     return;
@@ -1756,7 +1863,7 @@ void InputPollFrame(void* base_space, const float head_pos[3],
   }
 
   ApplyInputFramePolicy(cfg, head, space_epoch, predicted_display_time,
-                         sanctuary, acquired);
+                         theater, acquired);
 }
 
 ComfortMotion InputLatestComfortMotion() { return g_comfort_motion; }

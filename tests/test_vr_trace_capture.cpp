@@ -105,6 +105,21 @@ int wmain(int argc, wchar_t* argv[]) {
   dsvr::VrTracePump();
   CHECK(std::filesystem::file_size(path) > 0);
   CHECK(dsvr::VrTraceState() == dsvr::TraceCaptureState::Recording);
+  {
+    // The observer runner tails the capture while this process still owns it;
+    // a deny-all CRT open would block the header read until the capture closes.
+    HANDLE tail = CreateFileW(path.c_str(), GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    CHECK(tail != INVALID_HANDLE_VALUE);
+    if (tail != INVALID_HANDLE_VALUE) {
+      char first[512]{};
+      DWORD got = 0;
+      CHECK(ReadFile(tail, first, sizeof(first) - 1, &got, nullptr) && got > 0);
+      CHECK(std::string(first).find("\"event\":\"header\"") != std::string::npos);
+      CloseHandle(tail);
+    }
+  }
   const auto stop_request=directory/(name+L"-stop.request");
   CHECK(!dsvr::VrTraceConsumeStopRequest(stop_request.c_str()));
   {

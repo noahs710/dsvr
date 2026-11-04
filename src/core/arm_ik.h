@@ -42,13 +42,24 @@ struct ArmIkHand {
 };
 struct ArmIkHands {
   std::uint64_t sequence=0,epoch=0,captured_ms=0;
+  std::int64_t predicted_time_ns=0;
   std::uint64_t calibration_revision=0;
+  std::uint64_t rig_revision=0;
+  // DSVR-assigned identity for the natural PlayerIns pose-update invocation
+  // whose verified destination palette produced this receipt.
+  std::uint64_t native_update_id=0;
+  bool equipment_bound=false;
+  int weapon_id[2]{-1,-1};
+  int native_stance=-1;
   ArmPoseMatrix root{};
-  ArmIkHand side[2];  // physical left/right, native model-space poses
+  ArmIkHand side[2];  // physical left/right, final verified destination poses
+  bool two_hand_attached = false;  // support grip solved on this commit
 };
-// Published only after a guarded native pose commit. Root transforms model
-// points to world. Tracking, calibration, mode and capture changes invalidate
-// the receipt until a fresh natural copy; getters never write native poses.
+// Published only after a guarded native pose commit. Side matrices are read
+// from the verified destination palette after native remap/proportions; root
+// transforms model points to world. Tracking, calibration, mode and capture
+// changes invalidate the receipt until a fresh natural copy; getters never
+// write native poses.
 bool ArmIkLatestHands(ArmIkHands& out);
 
 
@@ -61,6 +72,8 @@ bool ArmIkLatestHands(ArmIkHands& out);
   struct CombatBenchSnapshot {
     bool bench_on = false;
     bool fresh = false;
+    std::uint64_t sequence = 0;
+    std::uint64_t native_update_id = 0;
     Vec3 grip[2]{};
     Vec3 tip[2]{};
     float tip_speed[2]{};

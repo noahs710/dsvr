@@ -9,6 +9,10 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <fcntl.h>
+#include <share.h>
+#include <sys/stat.h>
+#include <io.h>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -956,7 +960,19 @@ static bool BeginTrace(const wchar_t* explicit_path, unsigned duration_ms,
     g_sink_active = g_file != nullptr;
   } else {
     g_sink_active = false;
-    if (_wfopen_s(&g_file, path.c_str(), L"wx") != 0 || !g_file) g_file = nullptr;
+    // _wsopen_s with _SH_DENYNO, not _wfopen_s: the CRT default denies all
+    // sharing, and an observer tailing the live capture then fails to open
+    // the file while this process still writes it. _O_CREAT|_O_EXCL keeps
+    // the "wx" exclusive-create rule.
+    int fd = -1;
+    if (_wsopen_s(&fd, path.c_str(), _O_WRONLY | _O_CREAT | _O_EXCL,
+                  _SH_DENYNO, _S_IREAD | _S_IWRITE) != 0 || fd < 0) {
+      g_file = nullptr;
+    } else {
+      g_file = _fdopen(fd, "w");
+      if (!g_file) _close(fd);
+    }
+    if (!g_file) g_file = nullptr;
   }
   if (!g_file) {
     g_file = nullptr;

@@ -39,6 +39,8 @@ using PoseUpdate=void(__fastcall*)(void*);
 PoseUpdate g_original=nullptr, g_source_original=nullptr;
 thread_local void* g_source_scope=nullptr;
 thread_local bool g_source_seen=false;
+thread_local std::uint64_t g_native_update_id=0;
+std::atomic<std::uint64_t> g_native_update_serial{0};
 std::atomic<bool> g_copy_verified{false};
 std::uint64_t g_copy_commits=0,g_copy_refusals=0;
 std::atomic<bool> g_enabled{false};
@@ -65,6 +67,7 @@ struct BenchState {
   bool hands_too_close = false;
   float hand_separation_m = 0.0f;
   std::uint64_t sequence = 0, epoch = 0, captured_ms = 0;
+  std::uint64_t native_update_id = 0, rig_revision = 0;
   BladeKinematics motion[2];
   std::uintptr_t player=0, model=0;
   int weapon_id[2]{-1,-1}, stance=0;
@@ -129,7 +132,7 @@ struct Targets {
   ArmPoseMatrix neutral_controller[2]{},neutral_hand[2]{};
   bool neutral_hand_mirrored[2]{};
   Vec3 head{},lean{},pole[2]{};
-  Vec3 physical_head{}, physical_grip[2]{}, physical_tip[2]{}, blade_direction[2]{};
+  Vec3 physical_head{}, physical_grip[2]{}, physical_tip[2]{};
   long long predicted_time_ns=0;
   Vec3 heading_right{},heading_up{},heading_forward{};
   Vec3 head_right{},head_up{},head_forward{};
@@ -199,6 +202,7 @@ float g_native_head_height=0, g_native_shoulder_width=0;
 // quiet across duplicate callbacks.
 std::array<ArmPoseMatrix,kBones> g_source_reference{};
 bool g_source_reference_valid=false;
+NeutralHandBasisCache g_neutral_hand_basis;
 std::uintptr_t g_geometry_player=0;
 std::uintptr_t LocalPlayer() {
   std::uintptr_t world=0,player=0;
@@ -334,7 +338,11 @@ bool ReadRig(std::uintptr_t model,std::uintptr_t data) {
   own_subtree(rig.head);
   rig.revision=++g_rig_revision;
   g_native_arm_reach=0;g_native_head_height=0;g_native_shoulder_width=0;
-  g_source_reference_valid=false;  // a new rig needs its own animation-free source
+  // A respawn rebind relocates identical records to a new address: keep the
+  // frozen animation-free source so the calibrated neutral survives the
+  // lifecycle rebind. Only a genuinely new skeleton clears it.
+  if (g_rig.records != records)
+    g_source_reference_valid=false;  // a new rig needs its own animation-free source
   g_geometry_player=0;
   g_rig=rig; g_two_hand.Reset();InvalidateHands();
   // Rebinding may reuse the model address while resources/topology change.
@@ -357,6 +365,7 @@ struct PendingNativeCopy {
   NativeCopyState transfer;
   ArmPoseMatrix root{};
   std::array<ArmPoseMatrix,kBones> source{};
+  ArmIkHands hands{};
 } g_pending_copy;
 
 // This reads the contract observed at 357A2E/357A7F. It never invokes the
@@ -672,7 +681,14 @@ void RetargetSourcePose(void* self) {
   ArmIkHands published;
   published.sequence=g_targets.sequence;published.epoch=g_targets.epoch;
   published.captured_ms=g_targets.captured_ms;published.root=root_before;
+  published.predicted_time_ns=g_targets.predicted_time_ns;
   published.calibration_revision=g_targets.calibration.revision;
+  published.rig_revision=g_rig.revision;
+  published.native_update_id=g_native_update_id;
+  published.equipment_bound=have_equipment;
+  published.weapon_id[0]=have_equipment?equipment.weapon_id[0]:-1;
+  published.weapon_id[1]=have_equipment?equipment.weapon_id[1]:-1;
+  published.native_stance=have_equipment?equipment.native_stance:-1;
   bool solved=false;
   const unsigned primary=cfg.dominant_hand_left?0u:1u,offhand=1u-primary;
   bool support_attached=false;
@@ -785,6 +801,7 @@ void RetargetSourcePose(void* self) {
     solved=true;
   }
   if (!solved) g_two_hand.Reset();
+  published.two_hand_attached = solved && support_attached;
   // Visibility belongs to the native mesh filter, independently of whether
   // this pose solves. Skinning bones must remain anatomical and nonsingular.
   // A head-only packet commits its torso correction alone: the palette
@@ -870,290 +887,7 @@ void RetargetSourcePose(void* self) {
     g_pending_copy.source=animated;
     for(int bone=0;bone<kBones;++bone)
       if(written[bone])g_pending_copy.source[bone]=corrected[bone];
-    {
-      std::lock_guard<std::mutex> lock(g_hands_mutex);
-      g_hands = published;
-      // Combat proving ground: blade segments from the committed pose,
-      // classified against a fixed sparring target. Geometry only —
-      // native damage is never written. Off while the bench is off.
-      if (cfg.combat_test_bench && cfg.motion_attacks && !cfg.observer_only) {
-        if (g_bench.sequence!=g_targets.sequence) {
-          unsigned bench_flags=0; // current classifications, never confirmed outcomes
-          // Motion energy comes from the bound physical packet, never native
-          // root motion, stick turning, torso smoothing or IK corrections.
-          if (g_bench.epoch!=g_targets.epoch || g_bench.player!=player ||
-              g_bench.model!=model || g_bench.equipment_bound!=have_equipment ||
-              g_bench.weapon_id[0]!=equipment.weapon_id[0] ||
-              g_bench.weapon_id[1]!=equipment.weapon_id[1] ||
-              g_bench.stance!=equipment.native_stance ||
-              g_bench.calibration_revision!=g_targets.calibration.revision ||
-              g_bench.world_scale!=g_targets.world_scale ||
-              g_bench.dominant_left!=cfg.dominant_hand_left ||
-              g_targets.sequence<g_bench.sequence ||
-              g_targets.predicted_time_ns<=g_bench.predicted_time_ns ||
-              g_targets.predicted_time_ns-g_bench.predicted_time_ns>100000000)
-            g_bench={};
-          const float sample_dt=g_bench.predicted_time_ns>0
-              ? float(g_targets.predicted_time_ns-g_bench.predicted_time_ns)*1e-9f
-              : .011111111f;
-          g_bench.player=player;g_bench.model=model;
-          g_bench.equipment_bound=have_equipment;
-          g_bench.weapon_id[0]=equipment.weapon_id[0];
-          g_bench.weapon_id[1]=equipment.weapon_id[1];
-          g_bench.stance=equipment.native_stance;
-          g_bench.calibration_revision=g_targets.calibration.revision;
-          g_bench.world_scale=g_targets.world_scale;
-          g_bench.dominant_left=cfg.dominant_hand_left;
-          const unsigned weapon_side = cfg.dominant_hand_left ? 0u : 1u;
-          const unsigned shield_side = 1u - weapon_side;
-          const Vec3 anchor_w{root_before.m[3], root_before.m[7], root_before.m[11]};
-          const Vec3 head_w = VAdd(g_targets.head, anchor_w);
-          // Sparring target: fixed point ahead of the player at chest height.
-          const Vec3 target_c = VAdd(head_w, VScale(g_targets.heading_forward,
-                                                    cfg.combat_test_target_m));
-          BladeContactTarget spar;
-          spar.id = 7;
-          spar.centre = target_c;
-          spar.radius = 0.25f;
-          const std::span<const BladeContactTarget> targets{&spar, 1};
-          for (unsigned side = 0; side < 2; ++side) {
-            if (!published.side[side].valid) {
-              g_bench.blade_valid[side] = false;
-              g_bench.motion[side].Reset();
-              if (side==shield_side) g_bench.shield_was_raised=false;
-              continue;
-            }
-            const Vec3 grip_w = ArmPoseTransformPoint(
-                root_before, ArmPoseOrigin(published.side[side].weapon));
-            // Grip-local -Z is transformed into world once in ArmIkTick.
-            // Native blade axis and the temporary .9m length remain unqualified.
-            const Vec3 dir=VNorm(g_targets.blade_direction[side]);
-            if (!FiniteVec(dir) || VLen(dir)<.99f) {
-              g_bench.blade_valid[side]=false;
-              g_bench.motion[side].Reset();
-              continue;
-            }
-            const Vec3 tip_w=VAdd(grip_w,VScale(dir,.9f));
-            auto& motion=g_bench.motion[side];
-            motion.FeedRelative(g_targets.physical_grip[side],
-                g_targets.physical_tip[side],g_targets.physical_head,
-                sample_dt,g_targets.epoch);
-            // Slice 1 two-hand: the free hand grabs the committed blade
-            // segment while its squeeze is held. The grab point gets its own
-            // head-relative feed; the effective contact segment shortens to
-            // grip->grab and the scale is measured at the grab, not the tip.
-            // Iteration 2: state lives in g_bench.support[side], never a
-            // fresh local, or hysteresis can never hold across frames.
-            SupportGrip& support = g_bench.support[side];
-            ContactParams support_params;
-            support_params.support_attach_m = cfg.halfsword_envelope_m;
-            support_params.support_release_m = cfg.halfsword_envelope_m + 0.05f;
-            const unsigned free_side = 1u - side;
-            const bool free_squeeze =
-                free_side < 2 ? g_targets.squeeze[free_side] : false;
-            Vec3 free_grip_w{};
-            bool have_free = false;
-            if (published.side[free_side].valid) {
-              free_grip_w = ArmPoseTransformPoint(
-                  root_before, ArmPoseOrigin(published.side[free_side].hand));
-              have_free = FiniteVec(free_grip_w);
-            }
-            const bool grabbed = have_free &&
-                support.Update(free_squeeze, free_grip_w, grip_w, tip_w,
-                               support_params, g_targets.world_scale);
-            if (grabbed) {
-              const float f = support.grab_fraction;
-              const Vec3 tracked_grip{g_targets.physical_grip[side]};
-              const Vec3 tracked_tip{g_targets.physical_tip[side]};
-              const Vec3 grab_tracking = VAdd(
-                  tracked_grip, VScale(VAdd(tracked_tip,
-                      VScale(tracked_grip, -1.0f)), f));
-              motion.FeedGrabRelative(grab_tracking, g_targets.physical_head,
-                                      sample_dt, g_targets.epoch);
-            }
-            BladeKinematics blade=motion;
-            blade.grip=grip_w;blade.tip=tip_w;
-            if (grabbed && motion.grab_valid) {
-              // Halfsword: contact segment shortens to grip->grab point.
-              const float f = support.grab_fraction;
-              blade.tip = VAdd(grip_w, VScale(VAdd(tip_w, VScale(grip_w, -1)), f));
-              blade.tip_speed = motion.grab_speed;
-            }
-            blade.prev_tip=g_bench.blade_valid[side] ? g_bench.tip[side] : tip_w;
-            // The arc sweep needs the previous frame's native grip too, and
-            // g_bench.grip still holds it until the store two lines below.
-            blade.prev_grip=g_bench.blade_valid[side] ? g_bench.grip[side] : grip_w;
-            blade.valid=motion.valid && FiniteVec(grip_w) && FiniteVec(tip_w);
-            g_bench.grip[side] = grip_w;
-            g_bench.tip[side] = tip_w;
-            g_bench.prev_tip[side] = blade.prev_tip;
-            g_bench.tip_speed[side] = blade.tip_speed;
-            g_bench.blade_valid[side] = blade.valid;
-            if (side == weapon_side && blade.valid) {
-              ContactResult contact;
-              const long long now_ms = (long long)commit_now;
-              // Slice 3: per-weapon response from the offline mass table;
-                // unknown weapon falls back to the torque_response config.
-                // Slice 4: a support hand riding the blade steadies the swing
-                // (two-hand torque), so the same motion commits more energy.
-                float response = cfg.torque_response;
-                if (have_equipment) {
-                  WeaponMassEntry mass;
-                  if (WeaponMassGet(equipment.weapon_id[side], mass))
-                    response = mass.response;
-                }
-                if (grabbed)
-                  response *= TwoHandTorque(true, support.grab_fraction);
-                if (ClassifyWeaponContact(blade, motion.FrameKind(VAdd(
-                                        g_targets.physical_tip[side],VScale(g_targets.physical_grip[side],-1))), targets,
-                                        cfg.contact_speed_min, cfg.swing_damage_gain,
-                                        cfg.rehit_window_ms, now_ms, cfg.haptics,
-                                        g_bench.gate, contact, {},
-                                        response)) {
-                g_bench.last_event = 1;
-                g_bench.last_target = contact.hit.target_id;
-                g_bench.last_scale = contact.hit.damage_scale;
-                bench_flags|=1;
-                  // Slice 6: queue the hit pulse; the poll thread fires it.
-                if (cfg.haptics && contact.hit.haptic.duration_ms > 0) {
-                  auto& q = g_bench.pulse[side];
-                  q.pending = true;
-                  q.left = (side == 0);
-                  q.amplitude = contact.hit.haptic.amplitude;
-                  q.duration_ms = contact.hit.haptic.duration_ms;
-                }
-              }
-              // Slice 6: attach/detach tick on support-grip transitions.
-              // Iteration 3: config-shaped like the deflect pulse, not
-                // constants — same caller-supplied shape contract.
-                if (grabbed != g_bench.support_attached[side]) {
-                  g_bench.support_attached[side] = grabbed;
-                  if (cfg.haptics) {
-                    const HapticPulse tick = GripTick(cfg.deflect_amplitude,
-                      cfg.deflect_duration_ms, cfg.haptics);
-                  if (tick.duration_ms > 0) {
-                    auto& q = g_bench.pulse[1u - side];
-                    q.pending = true;
-                    q.left = ((1u - side) == 0);
-                    q.amplitude = tick.amplitude;
-                    q.duration_ms = tick.duration_ms;
-                  }
-                }
-              }
-            }
-          }
-          // Both sides must be current before defence, independent of handedness.
-          const unsigned side=shield_side;
-          if (g_bench.blade_valid[side]) {
-            // Shield guard: off-hand held slow in front of the chest.
-            const Vec3 off_w = ArmPoseTransformPoint(
-                root_before, ArmPoseOrigin(published.side[side].hand));
-            const bool raised = IsBlocking(
-                off_w, g_bench.motion[side].grip_speed, head_w,
-                g_targets.heading_forward);
-            if (raised && !g_bench.shield_was_raised)
-              g_bench.shield_raised_ms = (long long)commit_now;
-            g_bench.shield_was_raised = raised;
-            // Incoming threat vs the committed shield plane: the weapon
-            // blade segment must cross the shield disc. Plane and blade both
-              // come from the committed pose; no hand-sphere proxy.
-              ShieldPlane shield_plane;
-              const bool plane_ok = ShieldPlaneFromCommittedPose(
-                  root_before, published.side[side].hand,
-                  g_targets.blade_direction[side], 0.25f, shield_plane,
-                  g_targets.world_scale);
-              const bool overlaps = plane_ok &&
-                  g_bench.blade_valid[weapon_side] &&
-                  ThreatBlockedByShield(g_bench.grip[weapon_side],
-                                      g_bench.tip[weapon_side],
-                                      shield_plane, 0.05f,
-                                      g_targets.world_scale);
-            // Iteration 3: parry requires the flick shape, not just a raised
-              // guard inside the window. The trigger consumes the head-relative
-              // shield-hand speed; a held block never flicks, so it can only
-            // classify as a block. Params follow the defence config.
-              g_bench.shield_params.guard_settle_ms = cfg.guard_settle_ms;
-              g_bench.shield_params.flick_speed_min =
-                  cfg.guard_flick_speed_min;
-              g_bench.shield_params.parry_press_ms =
-                  cfg.guard_parry_press_ms;
-              g_bench.shield_params.parry_cooldown_ms =
-                  cfg.guard_parry_cooldown_ms;
-              const ShieldGuardOutput guard_out = g_bench.shield_trigger.Feed(
-                  g_bench.motion[side].grip_speed, raised,
-                  (long long)commit_now, g_bench.shield_params);
-              ContactEvent defence = ClassifyDefence(
-                  raised, g_bench.shield_raised_ms, (long long)commit_now,
-                  overlaps);
-              // A parry window hit without the flick shape is a block.
-              if (defence == ContactEvent::Parry && !guard_out.parry &&
-                  !guard_out.flicked)
-                defence = ContactEvent::ShieldBlock;
-              if (defence != ContactEvent::None) {
-                g_bench.last_event =
-                  defence == ContactEvent::Parry ? 3 : 2;
-              g_bench.last_target = -2;
-              g_bench.last_scale = 0.0f;
-              bench_flags|=defence==ContactEvent::Parry ? 4u : 2u;
-                // Slice 6: deflect pulse on classified block/parry geometry.
-              if (cfg.haptics) {
-                const HapticPulse deflect = DeflectHaptic(
-                    cfg.deflect_amplitude, cfg.deflect_duration_ms, true);
-                if (deflect.duration_ms > 0) {
-                  auto& q = g_bench.pulse[side];
-                  q.pending = true;
-                  q.left = (side == 0);
-                  q.amplitude = deflect.amplitude;
-                  q.duration_ms = deflect.duration_ms;
-                }
-              }
-            }
-          }
-          // Report separation only; this diagnostic does not enforce collisions.
-          if (published.side[0].valid && published.side[1].valid) {
-            const Vec3 a = ArmPoseTransformPoint(
-                root_before, ArmPoseOrigin(published.side[0].hand));
-            const Vec3 b = ArmPoseTransformPoint(
-                root_before, ArmPoseOrigin(published.side[1].hand));
-            g_bench.hand_separation_m = VLen(arm_pose_detail::Sub(a, b));
-            g_bench.hands_too_close =
-                cfg.weapon_separation_min_m > 0.0f &&
-                g_bench.hand_separation_m < cfg.weapon_separation_min_m;
-            if (g_bench.hands_too_close) bench_flags|=8;
-          } else {
-            g_bench.hands_too_close = false;
-          }
-          g_bench.predicted_time_ns=g_targets.predicted_time_ns;
-          g_bench.sequence = g_targets.sequence;
-          g_bench.epoch = g_targets.epoch;
-          g_bench.captured_ms = g_targets.captured_ms;
-          // The native copy has not returned yet: this is provisional bench
-          // geometry, not committed weapon/contact or damage evidence. Avoid
-          // synchronous text logging while holding the pose-publication mutex.
-          if(VrTraceActive()) {
-            VrTraceEvent event{};
-            event.event="combat_bench_provisional";
-            event.seq=g_targets.sequence;event.epoch=g_targets.epoch;
-            event.object=player;event.flags=bench_flags;
-            event.values[0]=g_bench.tip_speed[0];event.values[1]=g_bench.tip_speed[1];
-            event.values[2]=cfg.contact_speed_min;
-            event.values[3]=static_cast<float>(cfg.rehit_window_ms);
-            event.values[4]=g_bench.hand_separation_m;
-            event.values[5]=g_bench.last_scale;
-            event.values[6]=static_cast<float>(g_bench.last_target);
-            for(unsigned hand=0;hand<2;++hand) {
-              event.values[7+hand*3]=g_bench.tip[hand].x;
-              event.values[8+hand*3]=g_bench.tip[hand].y;
-              event.values[9+hand*3]=g_bench.tip[hand].z;
-            }
-            event.values[13]=g_targets.world_scale;
-            event.values[14]=cfg.weapon_separation_min_m;
-            event.values[15]=static_cast<float>(g_bench.last_event);
-            VrTraceRecord(event);
-          }
-        }
-      } else { g_bench={}; }
-    }
+    g_pending_copy.hands=published;
     // Publication is provisional until the outer hook verifies native copy.
     // Every public hand/bench getter checks g_copy_verified. No solved-vs-
     // native head displacement is published: the only consumer that ever
@@ -1162,7 +896,348 @@ void RetargetSourcePose(void* self) {
   }
 }
 
-bool VerifyNaturalCopy() {
+void UpdateCombatBenchForVerifiedPose(const Config& cfg,
+                                      const ArmIkHands& published,
+                                      const ArmPoseMatrix& root_before,
+                                      std::uintptr_t player,
+                                      std::uintptr_t model,
+                                      bool have_equipment,
+                                      const CombatEquipment& equipment,
+                                      std::uint64_t commit_now) {
+  std::lock_guard<std::mutex> lock(g_hands_mutex);
+  Vec3 committed_grip[2]{}, committed_tip[2]{}, committed_dir[2]{};
+  bool committed_blade_valid[2]{};
+  for (unsigned side=0;side<2;++side) {
+    if (!published.side[side].valid) continue;
+    const auto& weapon=published.side[side].weapon;
+    committed_grip[side]=ArmPoseTransformPoint(root_before,ArmPoseOrigin(weapon));
+    const Vec3 one_unit_model=ArmPoseTransformPoint(weapon,{0,0,-1});
+    const Vec3 one_unit_world=ArmPoseTransformPoint(root_before,one_unit_model);
+    committed_dir[side]=VNorm(VAdd(one_unit_world,VScale(committed_grip[side],-1.f)));
+    committed_tip[side]=VAdd(committed_grip[side],VScale(committed_dir[side],.9f));
+    committed_blade_valid[side]=FiniteVec(committed_grip[side]) &&
+        FiniteVec(committed_tip[side]) && FiniteVec(committed_dir[side]) &&
+        VLen(committed_dir[side])>.99f;
+  }
+  if (cfg.combat_test_bench && cfg.motion_attacks && !cfg.observer_only) {
+    const bool identity_changed=g_bench.sequence &&
+        (g_bench.epoch!=g_targets.epoch || g_bench.player!=player ||
+         g_bench.model!=model || g_bench.equipment_bound!=have_equipment ||
+         g_bench.weapon_id[0]!=equipment.weapon_id[0] ||
+         g_bench.weapon_id[1]!=equipment.weapon_id[1] ||
+         g_bench.stance!=equipment.native_stance ||
+         g_bench.rig_revision!=published.rig_revision ||
+         g_bench.calibration_revision!=g_targets.calibration.revision ||
+         g_bench.world_scale!=g_targets.world_scale ||
+         g_bench.dominant_left!=cfg.dominant_hand_left);
+    if (identity_changed) g_bench={};
+    if (g_bench.sequence!=g_targets.sequence) {
+      unsigned bench_flags=0; // current classifications, never confirmed outcomes
+      // Motion energy comes from the bound physical packet, never native
+      // root motion, stick turning, torso smoothing or IK corrections.
+      if (g_bench.epoch!=g_targets.epoch || g_bench.player!=player ||
+          g_bench.model!=model || g_bench.equipment_bound!=have_equipment ||
+          g_bench.weapon_id[0]!=equipment.weapon_id[0] ||
+          g_bench.weapon_id[1]!=equipment.weapon_id[1] ||
+          g_bench.stance!=equipment.native_stance ||
+          g_bench.rig_revision!=published.rig_revision ||
+          g_bench.calibration_revision!=g_targets.calibration.revision ||
+          g_bench.world_scale!=g_targets.world_scale ||
+          g_bench.dominant_left!=cfg.dominant_hand_left ||
+          g_targets.sequence<g_bench.sequence ||
+          g_targets.predicted_time_ns<=g_bench.predicted_time_ns ||
+          g_targets.predicted_time_ns-g_bench.predicted_time_ns>100000000)
+        g_bench={};
+      const float sample_dt=g_bench.predicted_time_ns>0
+          ? float(g_targets.predicted_time_ns-g_bench.predicted_time_ns)*1e-9f
+          : .011111111f;
+      g_bench.player=player;g_bench.model=model;
+      g_bench.equipment_bound=have_equipment;
+      g_bench.weapon_id[0]=equipment.weapon_id[0];
+      g_bench.weapon_id[1]=equipment.weapon_id[1];
+      g_bench.stance=equipment.native_stance;
+      g_bench.calibration_revision=g_targets.calibration.revision;
+      g_bench.rig_revision=published.rig_revision;
+      g_bench.world_scale=g_targets.world_scale;
+      g_bench.dominant_left=cfg.dominant_hand_left;
+      const unsigned weapon_side = cfg.dominant_hand_left ? 0u : 1u;
+      const unsigned shield_side = 1u - weapon_side;
+      const Vec3 anchor_w{root_before.m[3], root_before.m[7], root_before.m[11]};
+      const Vec3 head_w = VAdd(g_targets.head, anchor_w);
+      // Sparring target: fixed point ahead of the player at chest height.
+      const Vec3 target_c = VAdd(head_w, VScale(g_targets.heading_forward,
+                                                cfg.combat_test_target_m));
+      BladeContactTarget spar;
+      spar.id = 7;
+      spar.centre = target_c;
+      spar.radius = 0.25f;
+      const std::span<const BladeContactTarget> targets{&spar, 1};
+      for (unsigned side = 0; side < 2; ++side) {
+        if (!published.side[side].valid) {
+          g_bench.blade_valid[side] = false;
+          g_bench.motion[side].Reset();
+          if (side==shield_side) g_bench.shield_was_raised=false;
+          continue;
+        }
+        const Vec3 grip_w=committed_grip[side];
+        // Contact geometry follows the verified destination weapon matrix.
+        // The local -Z axis and temporary .9m length remain unqualified by C1.
+        const Vec3 dir=committed_dir[side];
+        if (!committed_blade_valid[side]) {
+          g_bench.blade_valid[side]=false;
+          g_bench.motion[side].Reset();
+          continue;
+        }
+        const Vec3 tip_w=committed_tip[side];
+        auto& motion=g_bench.motion[side];
+        motion.FeedRelative(g_targets.physical_grip[side],
+            g_targets.physical_tip[side],g_targets.physical_head,
+            sample_dt,g_targets.epoch);
+        // Slice 1 two-hand: the free hand grabs the committed blade
+        // segment while its squeeze is held. The grab point gets its own
+        // head-relative feed; the effective contact segment shortens to
+        // grip->grab and the scale is measured at the grab, not the tip.
+        // Iteration 2: state lives in g_bench.support[side], never a
+        // fresh local, or hysteresis can never hold across frames.
+        SupportGrip& support = g_bench.support[side];
+        ContactParams support_params;
+        support_params.support_attach_m = cfg.halfsword_envelope_m;
+        support_params.support_release_m = cfg.halfsword_envelope_m + 0.05f;
+        const unsigned free_side = 1u - side;
+        const bool free_squeeze =
+            free_side < 2 ? g_targets.squeeze[free_side] : false;
+        Vec3 free_grip_w{};
+        bool have_free = false;
+        if (published.side[free_side].valid) {
+          free_grip_w = ArmPoseTransformPoint(
+              root_before, ArmPoseOrigin(published.side[free_side].hand));
+          have_free = FiniteVec(free_grip_w);
+        }
+        const bool grabbed = have_free &&
+            support.Update(free_squeeze, free_grip_w, grip_w, tip_w,
+                           support_params, g_targets.world_scale);
+        if (grabbed) {
+          const float f = support.grab_fraction;
+          const Vec3 tracked_grip{g_targets.physical_grip[side]};
+          const Vec3 tracked_tip{g_targets.physical_tip[side]};
+          const Vec3 grab_tracking = VAdd(
+              tracked_grip, VScale(VAdd(tracked_tip,
+                  VScale(tracked_grip, -1.0f)), f));
+          motion.FeedGrabRelative(grab_tracking, g_targets.physical_head,
+                                  sample_dt, g_targets.epoch);
+        }
+        BladeKinematics blade=motion;
+        blade.grip=grip_w;blade.tip=tip_w;
+        if (grabbed && motion.grab_valid) {
+          // Halfsword: contact segment shortens to grip->grab point.
+          const float f = support.grab_fraction;
+          blade.tip = VAdd(grip_w, VScale(VAdd(tip_w, VScale(grip_w, -1)), f));
+          blade.tip_speed = motion.grab_speed;
+        }
+        blade.prev_tip=g_bench.blade_valid[side] ? g_bench.tip[side] : tip_w;
+        // The arc sweep needs the previous frame's native grip too, and
+        // g_bench.grip still holds it until the store two lines below.
+        blade.prev_grip=g_bench.blade_valid[side] ? g_bench.grip[side] : grip_w;
+        blade.valid=motion.valid && FiniteVec(grip_w) && FiniteVec(tip_w);
+        g_bench.grip[side] = grip_w;
+        g_bench.tip[side] = tip_w;
+        g_bench.prev_tip[side] = blade.prev_tip;
+        g_bench.tip_speed[side] = blade.tip_speed;
+        g_bench.blade_valid[side] = blade.valid;
+        if (side == weapon_side && blade.valid) {
+          ContactResult contact;
+          const long long now_ms = (long long)commit_now;
+          // Slice 3: per-weapon response from the offline mass table;
+            // unknown weapon falls back to the torque_response config.
+            // Slice 4: a support hand riding the blade steadies the swing
+            // (two-hand torque), so the same motion commits more energy.
+            float response = cfg.torque_response;
+            if (have_equipment) {
+              WeaponMassEntry mass;
+              if (WeaponMassGet(equipment.weapon_id[side], mass))
+                response = mass.response;
+            }
+            if (grabbed)
+              response *= TwoHandTorque(true, support.grab_fraction);
+            if (ClassifyWeaponContact(blade, motion.FrameKind(VAdd(
+                                    g_targets.physical_tip[side],VScale(g_targets.physical_grip[side],-1))), targets,
+                                    cfg.contact_speed_min, cfg.swing_damage_gain,
+                                    cfg.rehit_window_ms, now_ms, cfg.haptics,
+                                    g_bench.gate, contact, {},
+                                    response)) {
+            g_bench.last_event = 1;
+            g_bench.last_target = contact.hit.target_id;
+            g_bench.last_scale = contact.hit.damage_scale;
+            bench_flags|=1;
+              // Slice 6: queue the hit pulse; the poll thread fires it.
+            if (cfg.haptics && contact.hit.haptic.duration_ms > 0) {
+              auto& q = g_bench.pulse[side];
+              q.pending = true;
+              q.left = (side == 0);
+              q.amplitude = contact.hit.haptic.amplitude;
+              q.duration_ms = contact.hit.haptic.duration_ms;
+            }
+          }
+          // Slice 6: attach/detach tick on support-grip transitions.
+          // Iteration 3: config-shaped like the deflect pulse, not
+            // constants — same caller-supplied shape contract.
+            if (grabbed != g_bench.support_attached[side]) {
+              g_bench.support_attached[side] = grabbed;
+              if (cfg.haptics) {
+                const HapticPulse tick = GripTick(cfg.deflect_amplitude,
+                  cfg.deflect_duration_ms, cfg.haptics);
+              if (tick.duration_ms > 0) {
+                auto& q = g_bench.pulse[1u - side];
+                q.pending = true;
+                q.left = ((1u - side) == 0);
+                q.amplitude = tick.amplitude;
+                q.duration_ms = tick.duration_ms;
+              }
+            }
+          }
+        }
+      }
+      // Both sides must be current before defence, independent of handedness.
+      const unsigned side=shield_side;
+      if (g_bench.blade_valid[side]) {
+        // Shield guard: off-hand held slow in front of the chest.
+        const Vec3 off_w = ArmPoseTransformPoint(
+            root_before, ArmPoseOrigin(published.side[side].hand));
+        const bool raised = IsBlocking(
+            off_w, g_bench.motion[side].grip_speed, head_w,
+            g_targets.heading_forward);
+        if (raised && !g_bench.shield_was_raised)
+          g_bench.shield_raised_ms = (long long)commit_now;
+        g_bench.shield_was_raised = raised;
+        // Incoming threat vs the committed shield plane: the weapon
+        // blade segment must cross the shield disc. Plane and blade both
+          // come from the committed pose; no hand-sphere proxy.
+          ShieldPlane shield_plane;
+          const bool plane_ok = ShieldPlaneFromCommittedPose(
+              root_before, published.side[side].hand,
+              committed_dir[side], 0.25f, shield_plane,
+              g_targets.world_scale);
+          const bool overlaps = plane_ok &&
+              g_bench.blade_valid[weapon_side] &&
+              ThreatBlockedByShield(g_bench.grip[weapon_side],
+                                  g_bench.tip[weapon_side],
+                                  shield_plane, 0.05f,
+                                  g_targets.world_scale);
+        // Iteration 3: parry requires the flick shape, not just a raised
+          // guard inside the window. The trigger consumes the head-relative
+          // shield-hand speed; a held block never flicks, so it can only
+        // classify as a block. Params follow the defence config.
+          g_bench.shield_params.guard_settle_ms = cfg.guard_settle_ms;
+          g_bench.shield_params.flick_speed_min =
+              cfg.guard_flick_speed_min;
+          g_bench.shield_params.parry_press_ms =
+              cfg.guard_parry_press_ms;
+          g_bench.shield_params.parry_cooldown_ms =
+              cfg.guard_parry_cooldown_ms;
+          const ShieldGuardOutput guard_out = g_bench.shield_trigger.Feed(
+              g_bench.motion[side].grip_speed, raised,
+              (long long)commit_now, g_bench.shield_params);
+          ContactEvent defence = ClassifyDefence(
+              raised, g_bench.shield_raised_ms, (long long)commit_now,
+              overlaps);
+          // A parry window hit without the flick shape is a block.
+          if (defence == ContactEvent::Parry && !guard_out.parry &&
+              !guard_out.flicked)
+            defence = ContactEvent::ShieldBlock;
+          if (defence != ContactEvent::None) {
+            g_bench.last_event =
+              defence == ContactEvent::Parry ? 3 : 2;
+          g_bench.last_target = -2;
+          g_bench.last_scale = 0.0f;
+          bench_flags|=defence==ContactEvent::Parry ? 4u : 2u;
+            // Slice 6: deflect pulse on classified block/parry geometry.
+          if (cfg.haptics) {
+            const HapticPulse deflect = DeflectHaptic(
+                cfg.deflect_amplitude, cfg.deflect_duration_ms, true);
+            if (deflect.duration_ms > 0) {
+              auto& q = g_bench.pulse[side];
+              q.pending = true;
+              q.left = (side == 0);
+              q.amplitude = deflect.amplitude;
+              q.duration_ms = deflect.duration_ms;
+            }
+          }
+        }
+      }
+      // Report separation only; this diagnostic does not enforce collisions.
+      if (published.side[0].valid && published.side[1].valid) {
+        const Vec3 a = ArmPoseTransformPoint(
+            root_before, ArmPoseOrigin(published.side[0].hand));
+        const Vec3 b = ArmPoseTransformPoint(
+            root_before, ArmPoseOrigin(published.side[1].hand));
+        g_bench.hand_separation_m = VLen(arm_pose_detail::Sub(a, b));
+        g_bench.hands_too_close =
+            cfg.weapon_separation_min_m > 0.0f &&
+            g_bench.hand_separation_m < cfg.weapon_separation_min_m;
+        if (g_bench.hands_too_close) bench_flags|=8;
+      } else {
+        g_bench.hands_too_close = false;
+      }
+      g_bench.predicted_time_ns=g_targets.predicted_time_ns;
+      g_bench.sequence = g_targets.sequence;
+      g_bench.epoch = g_targets.epoch;
+      g_bench.captured_ms = g_targets.captured_ms;
+      g_bench.native_update_id=published.native_update_id;
+      // The destination copy is verified. Classification remains geometry
+      // only and is not evidence of native damage or a confirmed outcome.
+      // Avoid synchronous text logging while holding the publication mutex.
+      if(VrTraceActive()) {
+        VrTraceEvent event{};
+        event.event="combat_bench_provisional";
+        event.seq=g_targets.sequence;event.epoch=g_targets.epoch;
+        event.object=player;event.flags=bench_flags;
+        event.values[0]=g_bench.tip_speed[0];event.values[1]=g_bench.tip_speed[1];
+        event.values[2]=cfg.contact_speed_min;
+        event.values[3]=static_cast<float>(cfg.rehit_window_ms);
+        event.values[4]=g_bench.hand_separation_m;
+        event.values[5]=g_bench.last_scale;
+        event.values[6]=static_cast<float>(g_bench.last_target);
+        for(unsigned hand=0;hand<2;++hand) {
+          event.values[7+hand*3]=g_bench.tip[hand].x;
+          event.values[8+hand*3]=g_bench.tip[hand].y;
+          event.values[9+hand*3]=g_bench.tip[hand].z;
+        }
+        event.values[13]=g_targets.world_scale;
+        event.values[14]=cfg.weapon_separation_min_m;
+        event.values[15]=static_cast<float>(g_bench.last_event);
+        VrTraceRecord(event);
+      }
+    } else {
+      // A repeated native callback for the same tracking packet may refresh
+      // final pose geometry, but it cannot feed swing motion or classify again.
+      g_bench.native_update_id=published.native_update_id;
+      for(unsigned side=0;side<2;++side) {
+        g_bench.blade_valid[side]=published.side[side].valid &&
+            committed_blade_valid[side];
+        if(g_bench.blade_valid[side]) {
+          g_bench.grip[side]=committed_grip[side];
+          g_bench.tip[side]=committed_tip[side];
+        } else {
+          g_bench.motion[side].Reset();
+        }
+      }
+      if(published.side[0].valid && published.side[1].valid) {
+        const Vec3 left=ArmPoseTransformPoint(
+            root_before,ArmPoseOrigin(published.side[0].hand));
+        const Vec3 right=ArmPoseTransformPoint(
+            root_before,ArmPoseOrigin(published.side[1].hand));
+        g_bench.hand_separation_m=VLen(arm_pose_detail::Sub(left,right));
+        g_bench.hands_too_close=cfg.weapon_separation_min_m>0.f &&
+            g_bench.hand_separation_m<cfg.weapon_separation_min_m;
+      }
+    }
+  } else {
+    g_bench={};
+  }
+}
+
+bool VerifyNaturalCopy(ArmIkHands& verified) {
+  verified={};
   const auto& pending=g_pending_copy;
   const auto cfg=DiagnosticsCurrentConfig();
   const auto now=GetTickCount64();
@@ -1221,7 +1296,39 @@ bool VerifyNaturalCopy() {
     return false;
   for(unsigned i=0;i<12;++i)
     if(!std::isfinite(body_root.m[i]) || body_root.m[i]!=model_root.m[i])return false;
-  return PoseCopyMatches(current.layout,source,body,g_rig.owned);
+  if (!pending.hands.native_update_id ||
+      pending.hands.sequence!=g_targets.sequence ||
+      pending.hands.epoch!=g_targets.epoch ||
+      pending.hands.calibration_revision!=g_targets.calibration.revision ||
+      pending.hands.rig_revision!=g_rig.revision ||
+      pending.hands.predicted_time_ns!=g_targets.predicted_time_ns ||
+      pending.hands.equipment_bound!=pending.equipment_bound ||
+      (pending.equipment_bound &&
+       (pending.hands.weapon_id[0]!=pending.equipment.weapon_id[0] ||
+        pending.hands.weapon_id[1]!=pending.equipment.weapon_id[1] ||
+        pending.hands.native_stance!=pending.equipment.native_stance)) ||
+      !PoseCopyMatches(current.layout,source,body,g_rig.owned))
+    return false;
+  verified=pending.hands;
+  for (unsigned side=0;side<2;++side) {
+    if (!verified.side[side].valid) continue;
+    const int hand=g_rig.side[side].hand;
+    const int weapon=g_rig.side[side].weapon;
+    if (hand<0 || weapon<0 ||
+        static_cast<unsigned>(hand)>=current.layout.source_count ||
+        static_cast<unsigned>(weapon)>=current.layout.source_count)
+      return false;
+    const int hand_destination=current.layout.destination[hand];
+    const int weapon_destination=current.layout.destination[weapon];
+    if (hand_destination<0 || weapon_destination<0 ||
+        static_cast<unsigned>(hand_destination)>=current.layout.destination_count ||
+        static_cast<unsigned>(weapon_destination)>=current.layout.destination_count)
+      return false;
+    if (verified.side[side].weapon_id!=verified.weapon_id[side]) return false;
+    verified.side[side].hand=body[hand_destination];
+    verified.side[side].weapon=body[weapon_destination];
+  }
+  return true;
 }
 
 void __fastcall SourcePoseUpdateDetour(void* self) {
@@ -1243,8 +1350,10 @@ void __fastcall PoseUpdateDetour(void* self) {
   const auto previous_scope=g_source_scope;
   const bool previous_seen=g_source_seen;
   const bool own=local && !previous_scope && g_enabled.load() && !g_stopping.load();
+  const auto previous_update_id=g_native_update_id;
   g_source_scope=own?self:nullptr;g_source_seen=false;
   if(own) {
+    g_native_update_id=g_native_update_serial.fetch_add(1,std::memory_order_relaxed)+1;
     g_pending_copy.ready=false;
     g_copy_verified.store(false,std::memory_order_release);
   }
@@ -1255,9 +1364,18 @@ void __fastcall PoseUpdateDetour(void* self) {
     g_original(self);
   }
   g_source_scope=previous_scope;g_source_seen=previous_seen;
+  g_native_update_id=previous_update_id;
   if(!own)return;
-  if(g_pending_copy.ready && !g_stopping.load() && VerifyNaturalCopy()) {
+  ArmIkHands verified{};
+  if(g_pending_copy.ready && !g_stopping.load() && VerifyNaturalCopy(verified)) {
     ++g_copy_commits;++g_pose_commits;g_last_commit=g_targets.sequence;
+    {
+      std::lock_guard<std::mutex> lock(g_hands_mutex);
+      g_hands=verified;
+    }
+     UpdateCombatBenchForVerifiedPose(DiagnosticsCurrentConfig(),verified,g_pending_copy.root,
+        g_pending_copy.player,g_pending_copy.model,g_pending_copy.equipment_bound,
+        g_pending_copy.equipment,GetTickCount64());
     g_copy_verified.store(true,std::memory_order_release);
     if(g_copy_commits==1 || g_copy_commits%300==0)
       DSVR_LOG("ArmIK: native body copy verified=%llu refused=%llu map=%u body=%u distinct=%d seq=%llu",
@@ -1294,7 +1412,10 @@ bool PublishedHandsCurrent(const Config& cfg,TrackingFrame frame,bool have_frame
       !XrMenuPresentationActive() && !CalibrationCapturesInput() &&
       have_frame && frame.focused && frame.orientation_valid && frame.position_valid &&
       now>=frame.captured_ms && now-frame.captured_ms<=100 &&
+      g_hands.native_update_id && g_hands.predicted_time_ns>0 && g_hands.rig_revision &&
       g_hands.sequence && g_hands.sequence<=frame.sequence &&
+      (g_hands.sequence!=frame.sequence ||
+       g_hands.predicted_time_ns==frame.predicted_time_ns) &&
       g_hands.sequence==XrAppliedCameraSequence() && g_hands.epoch==frame.space_epoch &&
       g_hands.calibration_revision==CalibrationCurrent().revision &&
       now>=g_hands.captured_ms && now-g_hands.captured_ms<=100;
@@ -1388,9 +1509,12 @@ void ArmIkCopyPublicationStatus(ArmIkCopyPublication& out) {
   const bool have_frame=XrLatestTrackingFrame(frame);
   std::lock_guard<std::mutex> lock(g_hands_mutex);
   if (!PublishedHandsCurrent(cfg,frame,have_frame) ||
-        g_bench.sequence!=g_hands.sequence || g_bench.epoch!=g_hands.epoch)
+        g_bench.sequence!=g_hands.sequence || g_bench.epoch!=g_hands.epoch ||
+        g_bench.native_update_id!=g_hands.native_update_id)
     return false;
   out.fresh = true;
+  out.sequence = g_bench.sequence;
+  out.native_update_id = g_bench.native_update_id;
   for (int i = 0; i < 2; ++i) {
       out.grip[i] = g_bench.grip[i];
       out.tip[i] = g_bench.tip[i];
@@ -1469,7 +1593,8 @@ void ArmIkTick(const TrackingFrame& frame) {
   const auto cfg=DiagnosticsCurrentConfig(); const auto now=GetTickCount64();
   if (!cfg.vr_enabled || !cfg.arm_ik_enabled || !cfg.headlook_enabled || cfg.observer_only ||
       !frame.focused || !frame.orientation_valid || !frame.position_valid ||
-      !frame.sequence || !frame.space_epoch || now<frame.captured_ms || now-frame.captured_ms>100 ||
+      !frame.sequence || !frame.space_epoch || frame.predicted_time_ns<=0 ||
+      now<frame.captured_ms || now-frame.captured_ms>100 ||
       !std::isfinite(cfg.world_scale) || cfg.world_scale<=0 || XrMenuPresentationActive() ||
       CalibrationCapturesInput()) { g_reset_torso.store(true); return; }
   Vec3 head{},right{},up{},forward{},anchor{}; float reference[4]{};
@@ -1490,6 +1615,7 @@ void ArmIkTick(const TrackingFrame& frame) {
   targets.world_scale=mapping.world_scale;
   targets.heading_right=right;targets.heading_up=up;targets.heading_forward=forward;
   targets.head_right=head_right;targets.head_up=head_up;targets.head_forward=head_forward;
+  Vec3 hand_right=right,hand_up=up,hand_forward=forward;
   targets.head_basis_valid=have_head_basis;
   const Vec3 relative{head.x-anchor.x,head.y-anchor.y,head.z-anchor.z};
   targets.head=relative;
@@ -1512,7 +1638,7 @@ void ArmIkTick(const TrackingFrame& frame) {
         VNorm(arm_pose_detail::Column(bind_root, 0)),
         VNorm(arm_pose_detail::Column(bind_root, 1)),
         VNorm(arm_pose_detail::Column(bind_root, 2))};
-    const Vec3 calibration_basis[3] = {right, up, forward};
+    const Vec3 calibration_basis[3] = {hand_right, hand_up, hand_forward};
     for (unsigned side = 0; side < 2; ++side) {
       const int hand_bone = g_rig.side[side].hand;
       if (hand_bone < 0 || hand_bone >= kBones ||
@@ -1542,17 +1668,26 @@ void ArmIkTick(const TrackingFrame& frame) {
     for (float value:hand.quat) norm2+=value*value;
     if (!std::isfinite(norm2) || norm2<1e-6f) continue;
     const float inv=1/std::sqrt(norm2);
+    const auto* neutral=targets.calibration.neutral_controller[side];
+    float neutral_controller[4]{neutral[0],neutral[1],neutral[2],neutral[3]};
+    float alignment_ref[4]{0,0,0,1},inverse_camera[4]{
+        -reference[0],-reference[1],-reference[2],reference[3]};
+    if(targets.calibration.hand_alignment_valid)
+      for(int i=0;i<4;++i)alignment_ref[i]=targets.calibration.alignment_reference_yaw[i];
+    float absolute_neutral[4]{},local_neutral[4]{};
+    QuatMul(alignment_ref,neutral_controller,absolute_neutral);
+    QuatMul(inverse_camera,absolute_neutral,local_neutral);
     const Vec3 axes[]={{1,0,0},{0,1,0},{0,0,1}};
     for (int axis=0;axis<3;++axis) {
       const auto xr=QuatRotate(axes[axis],hand.quat[0]*inv,hand.quat[1]*inv,
                                hand.quat[2]*inv,hand.quat[3]*inv);
-      const auto world=HeadTranslationFromReference(xr,reference,right,up,forward,1);
+      const auto world=HeadTranslationFromReference(xr,reference,hand_right,hand_up,hand_forward,1);
       targets.orientation[side].m[axis]=world.x;
       targets.orientation[side].m[4+axis]=world.y;
       targets.orientation[side].m[8+axis]=world.z;
-      const auto* neutral=targets.calibration.neutral_controller[side];
-      const auto neutral_xr=QuatRotate(axes[axis],neutral[0],neutral[1],neutral[2],neutral[3]);
-      const auto neutral_world=HeadTranslationWorld(neutral_xr,right,up,forward,1);
+      const auto neutral_xr=QuatRotate(axes[axis],local_neutral[0],local_neutral[1],
+                                       local_neutral[2],local_neutral[3]);
+      const auto neutral_world=HeadTranslationWorld(neutral_xr,hand_right,hand_up,hand_forward,1);
       targets.neutral_controller[side].m[axis]=neutral_world.x;
       targets.neutral_controller[side].m[4+axis]=neutral_world.y;
       targets.neutral_controller[side].m[8+axis]=neutral_world.z;
@@ -1566,27 +1701,26 @@ void ArmIkTick(const TrackingFrame& frame) {
     const Vec3 blade=BladeDirection(hand.quat[0]*inv,hand.quat[1]*inv,
                                     hand.quat[2]*inv,hand.quat[3]*inv);
     targets.physical_tip[side]=VAdd(targets.physical_grip[side],VScale(blade,.9f));
-    targets.blade_direction[side]=HeadTranslationFromReference(
-        blade,reference,right,up,forward,1);
     const Vec3 delta{hand.pos[0]-frame.head_pos[0],hand.pos[1]-frame.head_pos[1],
                      hand.pos[2]-frame.head_pos[2]};
     const auto offset=VAdd(relative,HeadTranslationFromReference(
-        delta,reference,right,up,forward,targets.world_scale));
+        delta,reference,hand_right,hand_up,hand_forward,targets.world_scale));
     if (!FiniteVec(offset) || VLen(offset)>10) { g_reset_torso.store(true); return; }
     targets.relative[side]=offset; targets.valid[side]=true;
     const float elevation=delta.y+targets.calibration.head_to_arm_m;
     const float lift=std::clamp(elevation/.5f,0.f,1.f);
-    targets.pole[side]=VAdd(VAdd(VScale(right,sign*(.55f+.35f*lift)),VScale(forward,-.4f)),
-        VScale(up,-(1.f-.8f*lift)));
+    targets.pole[side]=VAdd(VAdd(VScale(hand_right,sign*(.55f+.35f*lift)),VScale(hand_forward,-.4f)),
+        VScale(hand_up,-(1.f-.8f*lift)));
   }
   ArmPoseMatrix resolved_neutral_hand[2]{};
-      // The right neutral bind matches the operator's calibrated wrist. When it
-      // is available, mirror it for the left instead of preserving a side-specific
-      // left bind twist that remains visible even with both controllers co-located.
+      // ponytail: each arm calibrates from its own native bind. Never mirror
+      // one hand's neutral onto the other.
       bool neutral_basis_valid[2]={native_neutral_valid[0],native_neutral_valid[1]};
-      if (neutral_basis_valid[1]) neutral_basis_valid[0]=false;
   NeutralHandBasisSource neutral_source[2]{};
-  if (!ResolveNeutralHandBases(native_neutral_hand, neutral_basis_valid, right, up, forward, resolved_neutral_hand, neutral_source)) {
+  if (!g_neutral_hand_basis.Resolve(
+          native_neutral_hand, neutral_basis_valid, hand_right, hand_up, hand_forward,
+          targets.calibration.revision, g_rig.revision,
+          resolved_neutral_hand, neutral_source)) {
     g_reset_torso.store(true);
     return;
   }

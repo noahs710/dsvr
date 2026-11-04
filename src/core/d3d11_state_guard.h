@@ -30,9 +30,9 @@ class D3D11StateGuard {
     context_->QueryInterface(__uuidof(ID3D11DeviceContext1),
                               reinterpret_cast<void**>(&context1_));
     if (context1_)
-      context1_->PSGetConstantBuffers1(0, 1, &pixel_constants_, &first_constant_, &constant_count_);
+      context1_->PSGetConstantBuffers1(0, 2, pixel_constants_, first_constant_, constant_count_);
     else
-      context_->PSGetConstantBuffers(0, 1, &pixel_constants_);
+      context_->PSGetConstantBuffers(0, 2, pixel_constants_);
     context_->IAGetInputLayout(&input_layout_);
     context_->IAGetPrimitiveTopology(&topology_);
     context_->GetPredication(&predicate_, &predicate_value_);
@@ -70,9 +70,9 @@ class D3D11StateGuard {
     context_->PSSetShaderResources(0, 1, &pixel_resource_);
     context_->PSSetSamplers(0, 1, &pixel_sampler_);
     if (context1_)
-      context1_->PSSetConstantBuffers1(0, 1, &pixel_constants_, &first_constant_, &constant_count_);
+      context1_->PSSetConstantBuffers1(0, 2, pixel_constants_, first_constant_, constant_count_);
     else
-      context_->PSSetConstantBuffers(0, 1, &pixel_constants_);
+      context_->PSSetConstantBuffers(0, 2, pixel_constants_);
     context_->IASetInputLayout(input_layout_);
     context_->IASetPrimitiveTopology(topology_);
     context_->SetPredication(predicate_, predicate_value_);
@@ -81,7 +81,7 @@ class D3D11StateGuard {
     for (auto*& view : unordered_views_) Release(view);
     Release(depth_view_); Release(blend_); Release(depth_state_);
     Release(rasterizer_); Release(pixel_resource_); Release(pixel_sampler_);
-    Release(pixel_constants_);
+    for (auto*& constants : pixel_constants_) Release(constants);
     Release(context1_);
     Release(input_layout_); Release(predicate_);
     vs_.Release(); ps_.Release(); gs_.Release();
@@ -104,7 +104,7 @@ class D3D11StateGuard {
   };
   ID3D11DeviceContext* context_ = nullptr;
   ID3D11DeviceContext1* context1_ = nullptr;
-  UINT first_constant_ = 0, constant_count_ = 0;
+  UINT first_constant_[2]{}, constant_count_[2]{};
   ID3D11RenderTargetView* render_targets_[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]{};
   ID3D11DepthStencilView* depth_view_ = nullptr;
   ID3D11UnorderedAccessView* unordered_views_[D3D11_PS_CS_UAV_REGISTER_COUNT]{};
@@ -123,7 +123,7 @@ class D3D11StateGuard {
   ShaderState<ID3D11ComputeShader> cs_;
   ID3D11ShaderResourceView* pixel_resource_ = nullptr;
   ID3D11SamplerState* pixel_sampler_ = nullptr;
-  ID3D11Buffer* pixel_constants_ = nullptr;
+  ID3D11Buffer* pixel_constants_[2]{};
   ID3D11InputLayout* input_layout_ = nullptr;
   D3D11_PRIMITIVE_TOPOLOGY topology_ = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
   ID3D11Predicate* predicate_ = nullptr;

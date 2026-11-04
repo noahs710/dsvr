@@ -11,6 +11,7 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 option(DSVR_BUILD_TESTS "Build CTest unit tests" ON)
 option(DSVR_BUILD_SETUP "Build DSVR-Setup installer/configurator" ON)
 option(DSVR_BUILD_RESHADE_ADDON "Build the optional ReShade D3D11 host adapter" OFF)
+option(DSVR_BUILD_HMD_LAB "Build the autonomous OpenXR Simulator HMD test host and API layer" OFF)
 
 # Warnings as errors for our own code (not third_party).
 if(MSVC)
@@ -35,6 +36,9 @@ endif()
 if(DSVR_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)
+endif()
+if(DSVR_BUILD_HMD_LAB)
+  add_subdirectory(tools/hmd)
 endif()
 
 # Convenience: refresh the overwritable dev test package in dist/.

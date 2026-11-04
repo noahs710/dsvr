@@ -19,6 +19,9 @@ struct TrackingFrame {
   bool focused = false;
   bool orientation_valid = false;
   bool position_valid = false;
+  bool head_tracking_flags_available = false;
+  bool head_orientation_tracked = false;
+  bool head_position_tracked = false;
   float head_quat[4] = {0, 0, 0, 1};
   float head_pos[3] = {0, 0, 0};
   float vfov_rad = 0;

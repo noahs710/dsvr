@@ -58,7 +58,7 @@ void ReportCamGate(CamGate gate) {
   static const char* const kWhy[] = {
       "applied; IK body, locomotion and immersive rect armed",
       "headlook_enabled=false",
-      "XR menu presentation active (theater/sanctuary)",
+      "XR menu presentation active (theater)",
       "no fresh XR tracking frame",
       "native model/stature revisions disagree",
       "calibration mapping refused to resolve",

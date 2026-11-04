@@ -26,6 +26,7 @@
 #define xrCreateSwapchain TestCreateSwapchain
 #define xrEnumerateSwapchainImages TestEnumerateSwapchainImages
 #define xrCreateReferenceSpace TestCreateReferenceSpace
+#define xrGetReferenceSpaceBoundsRect TestGetReferenceSpaceBoundsRect
 #include "../src/core/xr.cpp"
 
 #include <cstdio>
@@ -55,29 +56,43 @@ bool request_config_result = true;
 XrResult poll_error=XR_SUCCESS;
 bool acquired[2]{}, ready[2]{}, frame_begun = false, bad_order = false;
 unsigned acquisitions = 0, frame_waits = 0, submitted = 0;
+uint32_t returned_image_index = 0;
 XrDuration longest_wait = 0;
 XrResult image_wait[2]{XR_SUCCESS, XR_SUCCESS};
 XrResult image_release[2]{XR_SUCCESS, XR_SUCCESS};
+XrResult injected_end_result = XR_SUCCESS;  // poison the worker cycle only
 XrResult destroy_result[2]{XR_SUCCESS, XR_SUCCESS};
 XrTime predicted = 0;
 dsvr::Config config{};
+// The grid layer adds a third swapchain the two-eye fixture cannot model;
+// the config gate keeps the mono recovery tests on the single-layer path.
+static const bool grid_off = [] { config.theater_floor_grid = false; return true; }();
 dsvr::ComfortMotion comfort_motion{};
 dsvr::UserCalibration calibration_profile{};
 bool gameplay_ready = true, mod_menu_visible = false, calibration_visible = false;
+ID3D11Texture2D* observed_scene = nullptr;
+bool rendered_recovery_status = false;
 bool native_cutscene = false;
 bool physical_trigger = false;
+bool split_trigger_state = false, physical_left_trigger = false,
+     physical_right_trigger = false;
 bool tracking_valid=true,should_render=true;
 float head_yaw=0;
 XrPosef last_projection_pose{};
 XrPosef last_projection_poses[2]{};
+XrExtent2Di last_projection_extents[2]{};
+XrStructureType last_layer_type = XR_TYPE_UNKNOWN;
+XrSpace last_quad_space = XR_NULL_HANDLE;
+XrPosef last_quad_pose{};
 XrFovf view_fov[2]{{-1,1,1,-1},{-1,1,1,-1}};
 bool block_inactive_wait=false;
 HANDLE inactive_wait_entered=nullptr,inactive_wait_release=nullptr;
 XrSessionState next_session_state=XR_SESSION_STATE_UNKNOWN;
 unsigned ended_sessions=0,begun_sessions=0;
 unsigned calibration_samples = 0;
-bool sampled_trigger = false, sampled_gameplay = false, sampled_floor = false;
+bool sampled_trigger = false, sampled_presentation = false, sampled_floor = false;
 float sampled_height = 0, sampled_fallback = 0;
+const char* sampled_play_style = "";
 bool allow_swapchain_creation = false;
 unsigned next_created_eye = 0;
 uint32_t created_width[2]{}, created_height[2]{}, created_samples[2]{};
@@ -87,6 +102,8 @@ int Side(XrSwapchain chain) { return chain == chains[0] ? 0 : 1; }
 // Observe the actual WARP context calls made by production xr.cpp. A private
 // vtable copy affects only this fixture's context; no game/runtime hooks.
 using CopyFn = void (STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11Resource*, ID3D11Resource*);
+using RegionCopyFn = void (STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11Resource*, UINT, UINT, UINT, UINT, ID3D11Resource*, UINT, const D3D11_BOX*);
+RegionCopyFn original_region_copy = nullptr;
 using MapFn = HRESULT (STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11Resource*, UINT,
                                          D3D11_MAP, UINT, D3D11_MAPPED_SUBRESOURCE*);
 using GetDataFn = HRESULT (STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11Asynchronous*,
@@ -95,12 +112,18 @@ CopyFn original_copy = nullptr;
 MapFn original_map = nullptr;
 GetDataFn original_get_data = nullptr;
 unsigned source_copies = 0, readback_maps = 0;
+ID3D11Resource* counted_source = nullptr;
 unsigned query_polls = 0;
 bool force_queries_pending = false, query_flush_requested = false;
 void STDMETHODCALLTYPE CountCopy(ID3D11DeviceContext* context, ID3D11Resource* dst,
                                   ID3D11Resource* src) {
-  ++source_copies;
+  if (src == counted_source) ++source_copies;
   original_copy(context, dst, src);
+}
+void STDMETHODCALLTYPE CountRegionCopy(ID3D11DeviceContext* context, ID3D11Resource* dst,
+    UINT dst_sub, UINT x, UINT y, UINT z, ID3D11Resource* src, UINT src_sub, const D3D11_BOX* box) {
+  if (src == counted_source) ++source_copies;
+  original_region_copy(context,dst,dst_sub,x,y,z,src,src_sub,box);
 }
 HRESULT STDMETHODCALLTYPE CountMap(ID3D11DeviceContext* context, ID3D11Resource* resource,
     UINT subresource, D3D11_MAP kind, UINT flags, D3D11_MAPPED_SUBRESOURCE* out) {
@@ -158,7 +181,19 @@ XRAPI_ATTR XrResult XRAPI_CALL TestGetSystem(XrInstance,const XrSystemGetInfo*,X
   ++system_calls;if(setup_unavailable)return XR_ERROR_FORM_FACTOR_UNAVAILABLE;*out=7;return XR_SUCCESS;
 }
 XRAPI_ATTR XrResult XRAPI_CALL TestGetSystemProperties(XrInstance,XrSystemId,XrSystemProperties*) {return XR_SUCCESS;}
-XRAPI_ATTR XrResult XRAPI_CALL TestEnumerateViewConfigurationViews(XrInstance,XrSystemId,XrViewConfigurationType,uint32_t,uint32_t* count,XrViewConfigurationView*) {*count=0;return XR_SUCCESS;}
+XRAPI_ATTR XrResult XRAPI_CALL TestEnumerateViewConfigurationViews(XrInstance,XrSystemId,XrViewConfigurationType,
+    uint32_t capacity,uint32_t* count,XrViewConfigurationView* views) {
+  *count=2;
+  if (capacity) {
+    if (capacity<2) return XR_ERROR_SIZE_INSUFFICIENT;
+    for (unsigned eye=0;eye<2;++eye) {
+      views[eye].recommendedImageRectWidth=views[eye].recommendedImageRectHeight=64;
+      views[eye].maxImageRectWidth=views[eye].maxImageRectHeight=256;
+      views[eye].recommendedSwapchainSampleCount=views[eye].maxSwapchainSampleCount=1;
+    }
+  }
+  return XR_SUCCESS;
+}
 XRAPI_ATTR XrResult XRAPI_CALL TestGetInstanceProcAddr(XrInstance,const char* name,PFN_xrVoidFunction* out) {
   *out=nullptr;
   if(!strcmp(name,"xrGetDisplayRefreshRateFB")) {
@@ -235,17 +270,19 @@ XRAPI_ATTR XrResult XRAPI_CALL TestLocateViews(XrSession, const XrViewLocateInfo
     views[eye].pose.orientation.y=std::sin(head_yaw*.5f);
     views[eye].pose.orientation.w=std::cos(head_yaw*.5f);
     views[eye].pose.position.x = eye ? .032f : -.032f;
+    views[eye].pose.position.y = 1.6f;
     views[eye].fov = view_fov[eye];
   }
   return XR_SUCCESS;
 }
-XRAPI_ATTR XrResult XRAPI_CALL TestLocateSpace(XrSpace, XrSpace, XrTime, XrSpaceLocation* out) {
+XRAPI_ATTR XrResult XRAPI_CALL TestLocateSpace(XrSpace space, XrSpace, XrTime,
+                                               XrSpaceLocation* out) {
   out->locationFlags = tracking_valid?
       XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT:0;
   out->pose.orientation.w = 1;
   out->pose.orientation.y=std::sin(head_yaw*.5f);
   out->pose.orientation.w=std::cos(head_yaw*.5f);
-  out->pose.position.y = 1.6f;
+  out->pose.position.y = space == dsvr::g_floor_space ? 0.0f : 1.6f;
   return XR_SUCCESS;
 }
 XRAPI_ATTR XrResult XRAPI_CALL TestAcquireSwapchainImage(XrSwapchain chain,
@@ -254,7 +291,7 @@ XRAPI_ATTR XrResult XRAPI_CALL TestAcquireSwapchainImage(XrSwapchain chain,
   if (acquired[eye]) bad_order = true;
   acquired[eye] = true;
   ++acquisitions;
-  *index = 0;
+  *index = returned_image_index;
   return XR_SUCCESS;
 }
 XRAPI_ATTR XrResult XRAPI_CALL TestWaitSwapchainImage(XrSwapchain chain,
@@ -276,18 +313,26 @@ XRAPI_ATTR XrResult XRAPI_CALL TestEndFrame(XrSession, const XrFrameEndInfo* inf
   if (!frame_begun || info->displayTime != predicted) bad_order = true;
   frame_begun = false;
   if (info->layerCount) {
+    last_layer_type = info->layers[0]->type;
     if (acquired[0] || acquired[1]) bad_order = true;
     if (info->layers[0]->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
       const auto* layer = reinterpret_cast<const XrCompositionLayerProjection*>(info->layers[0]);
       if (layer->viewCount != 2) bad_order = true;
       else {
-        for (unsigned eye = 0; eye < 2; ++eye) last_projection_poses[eye] = layer->views[eye].pose;
+        for (unsigned eye = 0; eye < 2; ++eye) {
+          last_projection_poses[eye] = layer->views[eye].pose;
+          last_projection_extents[eye] = layer->views[eye].subImage.imageRect.extent;
+        }
         last_projection_pose = last_projection_poses[0];
       }
+    } else if (info->layers[0]->type == XR_TYPE_COMPOSITION_LAYER_QUAD) {
+      const auto* quad = reinterpret_cast<const XrCompositionLayerQuad*>(info->layers[0]);
+      last_quad_space = quad->space;
+      last_quad_pose = quad->pose;
     }
     ++submitted;
   }
-  return XR_SUCCESS;
+  return injected_end_result;
 }
 XRAPI_ATTR XrResult XRAPI_CALL TestDestroySwapchain(XrSwapchain chain) {
   if (XR_FAILED(destroy_result[Side(chain)])) return destroy_result[Side(chain)];
@@ -297,6 +342,13 @@ XRAPI_ATTR XrResult XRAPI_CALL TestDestroySwapchain(XrSwapchain chain) {
   return XR_SUCCESS;
 }
 XRAPI_ATTR XrResult XRAPI_CALL TestDestroySpace(XrSpace) { return XR_SUCCESS; }
+XRAPI_ATTR XrResult XRAPI_CALL TestGetReferenceSpaceBoundsRect(
+    XrSession, XrReferenceSpaceType, XrExtent2Df* bounds) {
+  if (!bounds) return XR_ERROR_VALIDATION_FAILURE;
+  bounds->width = 2.4f;
+  bounds->height = 3.2f;
+  return XR_SUCCESS;
+}
 XRAPI_ATTR XrResult XRAPI_CALL TestEndSession(XrSession) {
   ++ended_sessions;if(frame_begun)bad_order=true;return XR_SUCCESS;
 }
@@ -314,7 +366,8 @@ XRAPI_ATTR XrResult XRAPI_CALL TestEnumerateSwapchainFormats(XrSession, uint32_t
 }
 XRAPI_ATTR XrResult XRAPI_CALL TestCreateReferenceSpace(XrSession,
     const XrReferenceSpaceCreateInfo* info, XrSpace* out) {
-  *out = reinterpret_cast<XrSpace>(info->referenceSpaceType + 100);
+  *out = reinterpret_cast<XrSpace>(
+      static_cast<uintptr_t>(info->referenceSpaceType) + 100u);
   return XR_SUCCESS;
 }
 XRAPI_ATTR XrResult XRAPI_CALL TestCreateSwapchain(XrSession,
@@ -359,18 +412,27 @@ void LogWrite(LogLevel, const char*, int, const char*, ...) {}
 bool CameraIsTitle() { return false; }
 bool CameraGameplayReady() { return gameplay_ready; }
 bool CameraNativeCutscene() { return native_cutscene; }
-bool ModMenuVisible() { return mod_menu_visible; }
+bool ModMenuVisible() { return mod_menu_visible || calibration_visible; }
+bool ModMenuSettingsOpen() { return mod_menu_visible && !calibration_visible; }
+bool ModMenuRenderTexture(ID3D11Device*, ID3D11Texture2D*, bool, const char* status) {
+  rendered_recovery_status = status != nullptr;
+  return true;
+}
+ID3D11Texture2D* DepthProbeSceneSource() { return observed_scene; }
 CalibrationStatus CalibrationGetStatus() {
   CalibrationStatus status{};
   status.screen_visible = calibration_visible;
   return status;
 }
-void CalibrationSample(const TrackingFrame& frame, bool trigger, bool gameplay,
-                       bool floor_valid, float height, float fallback) {
+void CalibrationSample(const TrackingFrame& frame, bool both_triggers, bool presentation,
+                       bool floor_valid, float height, float fallback,
+                       const char* play_style) {
   if (!frame.sequence) bad_order = true;
   ++calibration_samples;
-  sampled_trigger = trigger; sampled_gameplay = gameplay; sampled_floor = floor_valid;
+  sampled_trigger = both_triggers; sampled_presentation = presentation;
+  sampled_floor = floor_valid;
   sampled_height = height; sampled_fallback = fallback;
+  sampled_play_style = play_style ? play_style : "";
 }
 void InputAttachSession(void*, void*) {}
 void InputInvalidateFrame() { comfort_motion = {}; }
@@ -382,10 +444,14 @@ bool DepthProbeMainPair(ID3D11Texture2D*&, ID3D11Texture2D*&, std::uint32_t&,
 void InputCopyTrackingSamples(HandSample hands[2], ArmTarget arms[2]) {
   hands[0] = hands[1] = {};
   hands[0].valid = true;
-  hands[0].trigger_held = physical_trigger;
+  hands[0].trigger_held = split_trigger_state ? physical_left_trigger : physical_trigger;
   hands[1].valid = true;
-    hands[1].trigger_held = physical_trigger;
+  hands[1].trigger_held = split_trigger_state ? physical_right_trigger : physical_trigger;
   hands[1].squeeze_held = physical_trigger;
+  for (unsigned hand = 0; hand < 2; ++hand) {
+    hands[hand].tracking_flags_available = true;
+    hands[hand].position_tracked = hands[hand].orientation_tracked = true;
+  }
   arms[0] = arms[1] = {};
 }
 bool InputLatestPad(VirtualPadState& out) {
@@ -414,8 +480,10 @@ int main() {
   std::array<void*, 134> context_vtable{};
   std::memcpy(context_vtable.data(), original_vtable, sizeof(context_vtable));
   original_copy = reinterpret_cast<CopyFn>(context_vtable[47]);
+  original_region_copy = reinterpret_cast<RegionCopyFn>(context_vtable[46]);
   original_map = reinterpret_cast<MapFn>(context_vtable[14]);
   original_get_data = reinterpret_cast<GetDataFn>(context_vtable[29]);
+  context_vtable[46] = reinterpret_cast<void*>(&CountRegionCopy);
   context_vtable[47] = reinterpret_cast<void*>(&CountCopy);
   context_vtable[14] = reinterpret_cast<void*>(&CountMap);
   context_vtable[29] = reinterpret_cast<void*>(&CountGetData);
@@ -486,7 +554,7 @@ int main() {
   g_state = XR_SESSION_STATE_FOCUSED;
   g_running = true;
   g_xr_thread = GetCurrentThreadId();
-  g_eye_width = g_eye_height = 64;
+  for (auto& eye : g_eyes) eye.width = eye.height = 64;
   g_eye_format = DXGI_FORMAT_R8G8B8A8_UNORM;
   CHECK(EnsureBlit());
   D3D11_TEXTURE2D_DESC desc{};
@@ -496,14 +564,15 @@ int main() {
   desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
   ID3D11Texture2D* backbuffer = nullptr;
   CHECK(SUCCEEDED(g_device->CreateTexture2D(&desc, nullptr, &backbuffer)));
+  counted_source = backbuffer;
   ID3D11Texture2D* textures[2]{};
   for (int eye = 0; eye < 2; ++eye) {
     CHECK(SUCCEEDED(g_device->CreateTexture2D(&desc, nullptr, &textures[eye])));
-    g_swapchain[eye] = chains[eye];
-    g_images[eye].push_back({XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR, nullptr, textures[eye]});
+    g_eyes[eye].swapchain = chains[eye];
+    g_eyes[eye].images.push_back({XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR, nullptr, textures[eye]});
     ID3D11RenderTargetView* rtv = nullptr;
     CHECK(SUCCEEDED(g_device->CreateRenderTargetView(textures[eye], nullptr, &rtv)));
-    g_rtvs[eye].push_back(rtv);
+    g_eyes[eye].rtvs.push_back(rtv);
   }
 
   ID3D11RenderTargetView* native_target=nullptr;
@@ -545,7 +614,8 @@ int main() {
   CHECK(restored_cb==native_cb);if(restored_cb)restored_cb->Release();
   CHECK(got_first==first_constant && got_count==constant_count);
   CHECK(submitted == 1 && !acquired[0] && !acquired[1]);
-  CHECK(calibration_samples == 1 && !sampled_gameplay && !sampled_trigger && !sampled_floor);
+  CHECK(calibration_samples == 1 && sampled_presentation &&
+        !sampled_trigger && !sampled_floor);
   const unsigned first_frame_copies = source_copies;
   // A normal periodic frame must never synchronously read GPU pixels back to
   // the CPU. This used to allocate/map two staging textures every 600 frames.
@@ -555,6 +625,9 @@ int main() {
   XrRecordCameraFrame(rendered_pose,rendered_pose.vfov_rad);
   head_yaw=.6f; // runtime advances AFTER the game has rendered the old camera
   gameplay_ready=true;
+  Sleep(40); // loading exits once the camera remains ready across three frames
+  rendered_pose.captured_ms=GetTickCount64();
+  XrRecordCameraFrame(rendered_pose,rendered_pose.vfov_rad);
   XrSubmitMonoFrame(backbuffer);
   CHECK(!XrMenuPresentationActive());
   CHECK(std::fabs(last_projection_pose.orientation.y-rendered_pose.head_quat[1])<1e-6f);
@@ -583,7 +656,7 @@ int main() {
     }
     // Reject bad source provenance without losing the next camera prediction.
     // Recovery needs a natural camera receipt, not a diagnostic sequence tag.
-    for (unsigned mutation = 0; mutation < 13; ++mutation) {
+    for (unsigned mutation = 0; mutation < 14; ++mutation) {
       TrackingFrame source{};
       CHECK(XrLatestTrackingFrame(source));
       float vfov = source.vfov_rad;
@@ -600,19 +673,22 @@ int main() {
         case 9: vfov = .5f; break;
         case 10: vfov = 3.1f; break;
         case 11: source.fov_aspect = 0; break;
+        case 13: source.head_quat[0] = std::numeric_limits<float>::quiet_NaN(); break;
         default: break;
       }
       XrRecordCameraFrame(source, vfov);
       if (mutation == 12) XrRecordCameraSequence(source.sequence);
       const auto before_submit = submitted, before_copy = source_copies;
       XrSubmitMonoFrame(backbuffer);
-      CHECK(submitted == before_submit && source_copies == before_copy);
+      CHECK(submitted == before_submit + 1 && source_copies == before_copy + 1);
+      CHECK(rendered_recovery_status);
+      CHECK(XrRenderMetricsSnapshot(metrics) && metrics.theater && metrics.source_tracking_sequence == 0);
       CHECK(!frame_begun && !acquired[0] && !acquired[1]);
       TrackingFrame fresh{};
       CHECK(XrLatestTrackingFrame(fresh) && fresh.sequence > source.sequence);
       XrRecordCameraFrame(fresh, fresh.vfov_rad);
       XrSubmitMonoFrame(backbuffer);
-      CHECK(submitted == before_submit + 1);
+      CHECK(submitted == before_submit + 2);
       CHECK(XrRenderMetricsSnapshot(metrics) && metrics.submitted);
       CHECK(metrics.source_tracking_sequence == fresh.sequence);
     }
@@ -620,11 +696,8 @@ int main() {
   // force theater: loading and non-3D cutscenes are never immersive.
   // The debouncer needs 150 ms of FrontEnd readings: the fixture clock
   // is real time, so sleep past the window before asserting the flip.
-  // g_gameplay_observed latches true once gameplay was seen, so reset it
-  // by restarting the presentation state for this transition.
   gameplay_ready=false;
   g_menu_debounce = MenuDebouncer{0};
-  g_gameplay_observed = false;
   SubmitMono(backbuffer);
   CHECK(XrMenuPresentationActive());
   Sleep(200);
@@ -690,46 +763,199 @@ int main() {
     view_fov[0]=view_fov[1]={-1,1,1,-1};
     config=saved;readback->Release();
   }
-  // The explicit DSVR menu forces the head-anchored canvas (one eye drawn). The
-  // calibration overlay does NOT: it is a panel drawn into the flat game image,
-  // so it keeps both eyes and the readable theater rect. Calibration readiness
-  // still comes from the natural gameplay observation, including when that
-  // overlay itself is visible. Loading (no gameplay sample) forces theater too,
-  // and the trigger+stick gesture resizes it.
+  {
+    D3D11_TEXTURE2D_DESC source_desc{}; backbuffer->GetDesc(&source_desc);
+    XrView room_view{XR_TYPE_VIEW}; room_view.pose.orientation.w=1;
+    room_view.fov={-1,1,1,-1};
+    MenuAnchor poster{0,0,-1,0};
+    D3D11_TEXTURE2D_DESC read_desc{};g_eyes[0].stage->GetDesc(&read_desc);
+    read_desc.Usage=D3D11_USAGE_STAGING;read_desc.BindFlags=0;
+    read_desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+    ID3D11Texture2D* readback=nullptr;
+    CHECK(SUCCEEDED(g_device->CreateTexture2D(&read_desc,nullptr,&readback)));
+    auto red = [&](int x=32, int y=32) {
+      g_context->CopyResource(readback,g_eyes[0].stage);
+      D3D11_MAPPED_SUBRESOURCE mapped{};
+      if(FAILED(g_context->Map(readback,0,D3D11_MAP_READ,0,&mapped))) return -1;
+      const int value=static_cast<unsigned char*>(mapped.pData)[y*mapped.RowPitch+x*4];
+      g_context->Unmap(readback,0);return value;
+    };
+    for(float alpha : {0.f, .5f, 1.f}) {
+      const float color[4]{1,0,0,alpha};
+      g_context->ClearRenderTargetView(native_target,color);
+      CHECK(PrepareMonoSource(backbuffer,source_desc));
+      CHECK(DrawImmersiveRoom(0,0,room_view,source_desc,g_blit_srv,poster,1.5f,false,false));
+      CHECK(red()>250);
+    }
+    const float transparent[4]{};
+    g_context->ClearRenderTargetView(native_target,transparent);
+    CHECK(PrepareMonoSource(backbuffer,source_desc));
+    CHECK(DrawImmersiveRoom(0,0,room_view,source_desc,g_blit_srv,poster,1.5f,false,true));
+    CHECK(red()>=0 && red()<80);
+    const float white[4]{1,1,1,1};g_context->ClearRenderTargetView(native_target,white);
+    CHECK(PrepareMonoSource(backbuffer,source_desc));
+    const bool immersive_before=g_immersive;g_immersive=true;
+    g_screen_rect[0][0]=g_screen_rect[0][1]=20;
+    g_screen_rect[0][2]=g_screen_rect[0][3]=10;
+    const SymmetricFrustum narrow{.5f,.5f,1.0f,1.0f};
+    CHECK(BlitToEye(0,0,source_desc,{-1.1f,.7f,.9f,-.8f},0,&narrow));
+    CHECK(red(1,1)>250 && red(62,1)>250 && red(1,62)>250 && red(62,62)>250);
+    g_immersive=immersive_before;
+    for (UINT samples : {1u,4u}) {
+      auto input_desc=source_desc;
+      input_desc.Format=samples==1 ? DXGI_FORMAT_R8G8B8A8_TYPELESS : DXGI_FORMAT_R8G8B8A8_UNORM;
+      input_desc.SampleDesc.Count=samples;
+      Microsoft::WRL::ComPtr<ID3D11Texture2D> input;
+      CHECK(SUCCEEDED(g_device->CreateTexture2D(&input_desc,nullptr,&input)));
+      D3D11_RENDER_TARGET_VIEW_DESC view{};view.Format=DXGI_FORMAT_R8G8B8A8_UNORM;
+      view.ViewDimension=samples==1 ? D3D11_RTV_DIMENSION_TEXTURE2D : D3D11_RTV_DIMENSION_TEXTURE2DMS;
+      Microsoft::WRL::ComPtr<ID3D11RenderTargetView> target;
+      CHECK(SUCCEEDED(g_device->CreateRenderTargetView(input.Get(),&view,&target)));
+      const float color[4]{1,0,0,0};g_context->ClearRenderTargetView(target.Get(),color);
+      CHECK(PrepareMonoSource(input.Get(),input_desc));
+      CHECK(DrawImmersiveRoom(0,0,room_view,input_desc,g_blit_srv,poster,1.5f,false,false));
+      CHECK(red()>250);
+    }
+    auto invalid_desc=source_desc;invalid_desc.Format=DXGI_FORMAT_D32_FLOAT;
+    invalid_desc.BindFlags=D3D11_BIND_DEPTH_STENCIL;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> invalid_source;
+    CHECK(SUCCEEDED(g_device->CreateTexture2D(&invalid_desc,nullptr,&invalid_source)));
+    auto* preserved_source=g_stage;auto* preserved_view=g_blit_srv;
+    CHECK(!PrepareMonoSource(invalid_source.Get(),invalid_desc));
+    CHECK(g_stage==preserved_source && g_blit_srv==preserved_view);
+    observed_scene=invalid_source.Get();
+    SubmitMono(backbuffer);
+    CHECK(XrRenderMetricsSnapshot(metrics) && metrics.submitted && metrics.theater);
+    CHECK(metrics.source_copies==0 && rendered_recovery_status);
+    observed_scene=nullptr;
+    CHECK(PrepareMonoSource(backbuffer,source_desc));
+    readback->Release();
+    std::puts("PASS production room shader: opaque game RGB ignores alpha; transparent UI preserves room");
+  }
+  {
+    observed_scene=backbuffer;
+    SubmitMono(backbuffer);
+    CHECK(g_stage_from_scene);
+    const auto copies=source_copies;
+    observed_scene=nullptr;
+    const float black[4]{};g_context->ClearRenderTargetView(native_target,black);
+    SubmitMono(backbuffer);
+    CHECK(source_copies==copies);
+    CHECK(XrRenderMetricsSnapshot(metrics) && metrics.source_retained && metrics.source_copies==0);
+    CHECK(g_completed_camera_frame.sequence==metrics.source_tracking_sequence);
+    D3D11_TEXTURE2D_DESC read_desc{};g_stage->GetDesc(&read_desc);
+    read_desc.Usage=D3D11_USAGE_STAGING;read_desc.BindFlags=0;read_desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> readback;
+    CHECK(SUCCEEDED(g_device->CreateTexture2D(&read_desc,nullptr,&readback)));
+    g_context->CopyResource(readback.Get(),g_stage);
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    CHECK(SUCCEEDED(g_context->Map(readback.Get(),0,D3D11_MAP_READ,0,&mapped)));
+    const auto retained_red=static_cast<unsigned char*>(mapped.pData)[32*mapped.RowPitch+32*4];
+    g_context->Unmap(readback.Get(),0);
+    CHECK(retained_red==255);
+    g_source_capture_ms=GetTickCount64()-600;
+    g_completed_camera_frame.captured_ms=GetTickCount64()-600;
+    XrSubmitMonoFrame(backbuffer);
+    CHECK(XrRenderMetricsSnapshot(metrics) && metrics.theater && metrics.source_retained);
+    CHECK(metrics.source_age_ms>=600 && rendered_recovery_status);
+    g_stage_from_scene=false;
+    const float white[4]{1,1,1,1};g_context->ClearRenderTargetView(native_target,white);
+  }
+  {
+    const auto before=submitted;
+    returned_image_index=42;
+    SubmitMono(backbuffer);
+    CHECK(submitted==before && acquired[0] && ready[0]);
+    returned_image_index=0;
+    SubmitMono(backbuffer);
+    CHECK(submitted==before+1 && !acquired[0] && !acquired[1] && !bad_order);
+  }
+  // Startup calibration has its own immersive room and projection pass.
+  // Menus and loading retain the 16:9 theater quad, while gameplay cutscenes
+  // stay in that theater until the game camera is ready.
   g_menu_debounce = MenuDebouncer{0};
   calibration_visible = true;
   gameplay_ready = false;
   native_cutscene = true;
   physical_trigger = true;
+  g_session_visible.store(true);
   config.eye_height = 1.73f;config.eye_height_override=true;
   calibration_profile.valid=true;calibration_profile.eye_height_m=1.71f;
-  g_floor_space = reinterpret_cast<XrSpace>(5);
+  g_floor_space = reinterpret_cast<XrSpace>(static_cast<uintptr_t>(5));
   SubmitMono(backbuffer);
-  CHECK(sampled_trigger && !sampled_gameplay && sampled_floor);
+  CHECK(sampled_trigger && sampled_presentation && sampled_floor);
   CHECK(std::fabs(sampled_height - 1.6f) < .001f);
   CHECK(std::fabs(sampled_fallback - 1.71f) < .001f);
-  CHECK(XrRenderMetricsSnapshot(metrics) && metrics.theater && metrics.eye_draws == 2);
+  CHECK(g_calibration_room_ps && g_calibration_room_constants);
+  CHECK(std::fabs(g_calibration_room_half_x - 1.2f) < .001f);
+  CHECK(std::fabs(g_calibration_room_half_z - 1.6f) < .001f);
+  CHECK(XrRenderMetricsSnapshot(metrics) && !metrics.theater && metrics.eye_draws == 2);
+  CHECK(last_layer_type == XR_TYPE_COMPOSITION_LAYER_PROJECTION);
+  split_trigger_state = true;
+  physical_left_trigger = true;
+  physical_right_trigger = false;
+  SubmitMono(backbuffer);
+  CHECK(!sampled_trigger);
+  physical_right_trigger = true;
+  SubmitMono(backbuffer);
+  CHECK(sampled_trigger);
+  split_trigger_state = false;
+  // The immersive room keeps rendering with the last safe per-eye pose while
+  // runtime orientation and position validity recover.
+  tracking_valid=false;
+  g_calibration_last_view_valid=false;
+  g_calibration_last_eye_position_valid=false;
+  SubmitMono(backbuffer);
+  CHECK(XrRenderMetricsSnapshot(metrics) && metrics.submitted &&
+        !metrics.theater && metrics.eye_draws == 2);
+  CHECK(last_layer_type == XR_TYPE_COMPOSITION_LAYER_PROJECTION);
+  tracking_valid=true;
   calibration_visible = false;
   mod_menu_visible = true;
   SubmitMono(backbuffer);
-  CHECK(XrRenderMetricsSnapshot(metrics) && metrics.theater && metrics.eye_draws == 1);
+  CHECK(XrRenderMetricsSnapshot(metrics) && metrics.theater && metrics.eye_draws == 2);
+  CHECK(last_layer_type == XR_TYPE_COMPOSITION_LAYER_PROJECTION);
   mod_menu_visible = false;
   // Cutscene without gameplay: theater stays forced even with the menu closed.
   SubmitMono(backbuffer);
-  CHECK(XrRenderMetricsSnapshot(metrics) && metrics.theater && metrics.eye_draws == 1);
+  CHECK(XrRenderMetricsSnapshot(metrics) && metrics.theater && metrics.eye_draws == 2);
+  // A loading canvas holds its last world anchor when positional tracking
+  // drops. It must not switch into headset space during the recovery interval.
+  g_menu_anchored = true;
+  g_menu_anchor = {.25f, 1.62f, -2.1f, .35f};
+  tracking_valid = false;
+  SubmitMono(backbuffer);
+  CHECK(XrRenderMetricsSnapshot(metrics) && metrics.theater);
+  CHECK(last_layer_type == XR_TYPE_COMPOSITION_LAYER_PROJECTION);
+  CHECK(g_menu_anchor.x == .25f && g_menu_anchor.y == 1.62f && g_menu_anchor.z == -2.1f);
+  tracking_valid = true;
   // Trigger held + right stick up/down resizes the theater window live.
   {
     const float before = config.mono_screen_fov_deg;
     physical_trigger = true;
     SubmitMono(backbuffer);
     CHECK(XrRenderMetricsSnapshot(metrics) && metrics.theater);
+    CHECK(config.mono_screen_fov_deg == before);
     physical_trigger = false;
   }
   native_cutscene = false;
   gameplay_ready = true;
   physical_trigger = false;
+  Sleep(40); // loading exit uses three 90 Hz frames
   SubmitMono(backbuffer);
   CHECK(XrRenderMetricsSnapshot(metrics) && !metrics.theater && metrics.eye_draws == 2);
+  // A renderable-but-unfocused session still publishes valid poses so the
+  // camera pipeline stays primed; the image restores on refocus.
+  g_state = XR_SESSION_STATE_VISIBLE;
+  SubmitMono(backbuffer);
+  CHECK(XrRenderMetricsSnapshot(metrics) && metrics.submitted);
+  // Validity-gated publish keeps the pipeline warm while unfocused.
+  CHECK(XrRenderMetricsSnapshot(metrics) && metrics.tracking_published);
+  g_state = XR_SESSION_STATE_FOCUSED;
+  SubmitMono(backbuffer);  // refocus restores a readable pose on the next frame
+  TrackingFrame restored_tracking{};
+  CHECK(XrLatestTrackingFrame(restored_tracking));
+  g_session_visible.store(false);
   // Project the runtime AIM pose through the shipped XR adapter. Deliberately
   // point the grip elsewhere: a grip-based ray would miss every sample below.
   {
@@ -740,6 +966,7 @@ int main() {
       config.menu_distance_m=distance;
       g_menu_anchor=MakeMenuAnchor(.2f,1.6f,-.3f,yaw,distance);
       const float width=MenuWidth(distance,config.menu_reading_fov_deg);
+      g_panel_width.store(width);  // the pointer ray follows the published quad width
       const float height=width/(1280.f/720.f);
       for(float u:{.1f,.5f,.9f})for(float v:{.1f,.5f,.9f}) {
         const Vec3 normal{std::sin(yaw),0,std::cos(yaw)};
@@ -763,6 +990,32 @@ int main() {
         CHECK(std::fabs(pointer.x-u*1280)<.01f && std::fabs(pointer.y-v*720)<.01f);
       }
     }
+    calibration_visible=true;
+    g_calibration_anchored=true;
+    g_calibration_anchor={0,1.6f,-2.2f,0};
+    TrackingFrame calibration_pointer{};
+    calibration_pointer.focused=calibration_pointer.orientation_valid=
+        calibration_pointer.position_valid=true;
+    calibration_pointer.predicted_time_ns=1;
+    calibration_pointer.captured_ms=GetTickCount64();
+    calibration_pointer.head_pos[1]=1.6f;
+    calibration_pointer.head_quat[3]=1;
+    auto& cal_hand=calibration_pointer.hand[1];
+    cal_hand.valid=cal_hand.aim_valid=true;
+    cal_hand.aim_pos[1]=1.6f;
+    cal_hand.aim_quat[3]=1;
+    g_tracking_frames.Publish(calibration_pointer);
+    const auto calibration_center=XrMenuPointerInput(3440,1440);
+    CHECK(calibration_center.valid &&
+          std::fabs(calibration_center.x-1720)<.01f &&
+          std::fabs(calibration_center.y-720)<.01f);
+    cal_hand.aim_pos[1]=1.6f+(.5f-.08f)*(g_calibration_panel_width/(16.0f/9.0f));
+    calibration_pointer.captured_ms=GetTickCount64();
+    g_tracking_frames.Publish(calibration_pointer);
+    const auto calibration_matte=XrMenuPointerInput(3440,1440);
+    CHECK(!calibration_matte.valid);
+    calibration_visible=false;
+    g_calibration_anchored=false;
     config=saved_config;g_local_space=saved_local;g_menu_active=false;g_menu_anchored=false;
     g_tracking_frames.Publish(saved_tracking); // pointer-only packets are not native camera predictions
   }
@@ -892,18 +1145,40 @@ int main() {
   CloseHandle(inactive_wait_entered);CloseHandle(inactive_wait_release);
   SubmitMono(backbuffer);
   CHECK(!XrMenuPresentationActive() && XrLatestTrackingFrame(suppressed));
+  // A faulted inactive worker recovers through ResetSession without a session
+  // re-begin; only a failed reset suspends VR.
+  injected_end_result = XR_ERROR_RUNTIME_FAILURE;
+  should_render = false;
+  g_state = XR_SESSION_STATE_SYNCHRONIZED;
+  SubmitMono(backbuffer);  // render thread parks; the worker faults once
+  auto fault_deadline = GetTickCount64() + 2000;
+  while (!g_inactive_pump.Snapshot().faulted && GetTickCount64() < fault_deadline) Sleep(1);
+  CHECK(g_inactive_pump.Snapshot().faulted);
+  CHECK(!g_pump_failed.load());
+  injected_end_result = XR_SUCCESS;
+  const auto begun_before = begun_sessions;
+  const auto submitted_before = submitted;
+  g_state = XR_SESSION_STATE_FOCUSED;
+  should_render = true;
+  for (int i = 0; i < 10 && submitted == submitted_before; ++i) SubmitMono(backbuffer);
+  CHECK(submitted == submitted_before + 1);
+  SubmitMono(backbuffer);
+  SubmitMono(backbuffer);
+  CHECK(XrRenderMetricsSnapshot(metrics) && metrics.submitted && !metrics.theater);
+  CHECK(begun_sessions == begun_before && !bad_order);
+  CHECK(!g_pump_failed.load() && !g_inactive_pump.Snapshot().faulted);
   // Failed owner destruction must retain that eye's lease and resources;
   // successful partial teardown must not erase the remaining owner's state.
   for (int entry = 0; entry < 3; ++entry) {
     if (entry) {
       g_head_space = reinterpret_cast<XrSpace>(4);
-      g_eye_width = g_eye_height = 64;
+      for (auto& eye : g_eyes) eye.width = eye.height = 64;
       for (int eye = 0; eye < 2; ++eye) {
-        g_swapchain[eye] = chains[eye];
-        g_images[eye].push_back({XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR, nullptr, textures[eye]});
+        g_eyes[eye].swapchain = chains[eye];
+        g_eyes[eye].images.push_back({XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR, nullptr, textures[eye]});
         ID3D11RenderTargetView* rtv = nullptr;
         CHECK(SUCCEEDED(g_device->CreateRenderTargetView(textures[eye], nullptr, &rtv)));
-        g_rtvs[eye].push_back(rtv);
+        g_eyes[eye].rtvs.push_back(rtv);
       }
     }
     image_wait[1] = XR_TIMEOUT_EXPIRED;
@@ -913,15 +1188,15 @@ int main() {
     const auto cleanup_deadline = GetTickCount64() + 1000;
     do {
       CHECK(!DestroySwapchains());
-      if (!g_swapchain[0]) break;
+      if (!g_eyes[0].swapchain) break;
       Sleep(1);  // Pump bounded teardown while the actual WARP GPU marker completes.
     } while (GetTickCount64() < cleanup_deadline);
-    CHECK(!g_swapchain[0] && g_swapchain[1] == chains[1]);
+    CHECK(!g_eyes[0].swapchain && g_eyes[1].swapchain == chains[1]);
     CHECK(g_mono_images[1].chain == chains[1] && !g_mono_images[1].ready);
-    CHECK(g_rtvs[0].empty() && !g_rtvs[1].empty() && g_head_space);
+    CHECK(g_eyes[0].rtvs.empty() && !g_eyes[1].rtvs.empty() && g_head_space);
     CHECK(g_destroy_pending && g_destroy_query);
     CHECK(!EnsureSwapchains(backbuffer));
-    CHECK(g_swapchain[1] == chains[1] && g_mono_images[1].chain == chains[1]);
+    CHECK(g_eyes[1].swapchain == chains[1] && g_mono_images[1].chain == chains[1]);
     destroy_result[1] = XR_SUCCESS;
     // Resume through public entry points while that image STILL times out.
     // Cleanup must run before waiting on the retained image again.
@@ -931,7 +1206,7 @@ int main() {
       NativeStereoFrame frame{};
       CHECK(!XrBeginNativeStereoFrame(backbuffer, frame));
     }
-    CHECK(!g_swapchain[1] && !g_mono_images[1].chain && !g_head_space && !acquired[1]);
+    CHECK(!g_eyes[1].swapchain && !g_mono_images[1].chain && !g_head_space && !acquired[1]);
     CHECK(!g_destroy_pending && !g_destroy_query);
     image_wait[1] = XR_SUCCESS;
   }
@@ -941,16 +1216,24 @@ int main() {
   // MSAA 4x is the default: swapchain creation must request 4 samples.
   allow_swapchain_creation = true;
   g_eye_scale_percent = 0;  // fresh startup after the earlier failure cases
-  g_rec_width = g_rec_height = 100;
-  g_max_eye_width = 120; g_max_eye_height = 110;
+  for (auto& eye : g_eyes) { eye.recommended_width = eye.recommended_height = 100; eye.max_width = 120; eye.max_height = 110; }
+  g_eyes[1].recommended_width = 103;
+  g_eyes[1].recommended_height = 97;
   config.render_scale_percent = 100;
   config.aa_mode = 3;  // MSAA 4x default
   CHECK(EnsureSwapchains(backbuffer));
   CHECK(created_width[0] == 100 && created_height[0] == 100);
-  CHECK(created_width[1] == 100 && created_height[1] == 100);
-  CHECK(created_samples[0] == 4 && created_samples[1] == 4);
+  CHECK(created_width[1] == 103 && created_height[1] == 97);
+  CHECK(created_samples[0] == 1 && created_samples[1] == 1);
+  config.gameplay_theater=true;
+  SubmitMono(backbuffer);
+  CHECK(last_projection_extents[0].width==100 && last_projection_extents[0].height==100);
+  CHECK(last_projection_extents[1].width==103 && last_projection_extents[1].height==97);
+  D3D11_TEXTURE2D_DESC eye_desc{};g_eyes[1].stage->GetDesc(&eye_desc);
+  CHECK(eye_desc.Width==103 && eye_desc.Height==97);
+  config.gameplay_theater=false;
   config.render_scale_percent = 200;
-  CHECK(EnsureSwapchains(backbuffer) && g_eye_width == 100);
+  CHECK(EnsureSwapchains(backbuffer) && g_eyes[0].width == 100);
   auto finish_teardown = [&]() {
     const auto deadline = GetTickCount64() + 1000;
     while (!DestroySwapchains() && GetTickCount64() < deadline) Sleep(1);

@@ -65,6 +65,42 @@ bool PollTraceStopRequest() {
   return false;
 }
 
+// Hands-free capture start for modes with no usable hotkey or chord (the
+// OpenXR-Simulator gamepad path has one button per hand, so the Menu+X chord
+// is inexpressible, and sim config disables hotkeys). Dropping an empty
+// DSVR-trace-go-<pid>.request next to the executable begins the same bounded
+// capture DiagnosticsLogMarker would (hook install is observer-gated inside
+// DiagnosticsBeginCapture; non-observer modes rely on the gameplay path that
+// installed them). One shot per file: consumed even when a capture is
+// already active, in which case it is skipped and logged, never queued.
+std::wstring TraceGoRequestPath() {
+  wchar_t executable[MAX_PATH]{};
+  const DWORD length=GetModuleFileNameW(nullptr,executable,MAX_PATH);
+  if (!length || length >= MAX_PATH) return {};
+  std::wstring path(executable,length);
+  const auto separator=path.find_last_of(L"\\/");
+  if (separator == std::wstring::npos) return {};
+  path.resize(separator+1);
+  path += L"DSVR-trace-go-"+std::to_wstring(GetCurrentProcessId())+
+          L".request";
+  return path;
+}
+
+bool PollTraceGoRequest() {
+  static const auto path=TraceGoRequestPath();
+  if (path.empty() || !DeleteFileW(path.c_str())) return false;
+  if (VrTraceState() == TraceCaptureState::Recording ||
+      VrTraceState() == TraceCaptureState::Closing) {
+    DSVR_LOG("Diagnostics: consumed trace go request while a capture is "
+             "active; skipping");
+    return false;
+  }
+  const bool started=DiagnosticsBeginCapture();
+  DSVR_LOG("Diagnostics: consumed trace go request, capture started=%d",
+           (int)started);
+  return started;
+}
+
 
 
 void PumpMenuRequests(bool flush = false) {
@@ -276,7 +312,7 @@ bool ReloadConfig() {
 DWORD WINAPI DiagnosticsThread(LPVOID /*param*/) {
   bool marker_down = false;
   bool reload_down = false;
-  bool sanctuary_down = false;
+  bool theater_down = false;
   bool recenter_down = false;
   bool home_down = false;
   bool automatic_combat_attempted = false;
@@ -319,6 +355,7 @@ DWORD WINAPI DiagnosticsThread(LPVOID /*param*/) {
       next_combat_health=now+5000;
     }
     if(cfg.observer_only && cfg.combat_trace_only) PollTraceStopRequest();
+    PollTraceGoRequest();
     if (cfg.hotkeys_enabled && GameIsForeground()) {
       bool m = cfg.log_marker_vk > 0 &&
                (GetAsyncKeyState(cfg.log_marker_vk) & 0x8000) != 0;
@@ -330,20 +367,20 @@ DWORD WINAPI DiagnosticsThread(LPVOID /*param*/) {
       bool c = (GetAsyncKeyState(VK_F6) & 0x8000) != 0;
       bool home = (GetAsyncKeyState(VK_HOME) & 0x8000) != 0;
       if (home && !home_down) ModMenuToggle();
-      if (!cfg.observer_only && s && !sanctuary_down) XrToggleSanctuary();
+      if (!cfg.observer_only && s && !theater_down) XrToggleTheater();
       if (!cfg.observer_only && c && !recenter_down) {
-        XrRecenterSanctuary();
+        XrRecenterTheater();
         CalibrationRecenter();
       }
       home_down = home;
-      sanctuary_down = s;
+      theater_down = s;
       recenter_down = c;
       marker_down = m;
       reload_down = r;
     } else {
       marker_down = false;
       reload_down = false;
-      sanctuary_down = recenter_down = false;
+      theater_down = recenter_down = false;
       home_down = false;
     }
     if (!cfg.observer_only) LabPump();

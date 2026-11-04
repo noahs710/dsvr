@@ -13,6 +13,7 @@
 #include "input.h"
 #include "pad_math.h"
 #include "hook_install.h"
+#include "iat_patch.h"
 #include "lab_runner.h"
 
 namespace dsvr {
@@ -20,16 +21,45 @@ namespace {
 
 using XInputGetStateFn = DWORD(WINAPI*)(DWORD, XINPUT_STATE*);
 using XInputGetCapabilitiesFn = DWORD(WINAPI*)(DWORD, DWORD, XINPUT_CAPABILITIES*);
+using XInputSetStateFn = DWORD(WINAPI*)(DWORD, XINPUT_VIBRATION*);
 // Untyped like the IAT slots: both routes of one export share one detour body
 // (MergeRoute), which names the function type at the call site.
 std::atomic<void*> g_original{nullptr};
 std::atomic<void*> g_caps_original{nullptr};
+std::atomic<void*> g_setstate_original{nullptr};
 void* g_target = nullptr;
 void* g_caps_target = nullptr;
+void* g_setstate_target = nullptr;
 std::atomic<unsigned long long> g_last_hash{0};
 std::atomic<DWORD> g_packet{1};
 std::atomic<bool> g_logged_first_override{false};
 std::atomic<bool> g_logged_first_caps{false};
+std::atomic<bool> g_logged_first_rumble{false};
+// Read-only poll watch: what keyboard/API state the game reads while the
+// front-end is up. Never modifies results; uninstall removes the patches.
+using GetAsyncKeyStateFn = SHORT(WINAPI*)(int);
+using GetKeyboardStateFn = BOOL(WINAPI*)(PBYTE);
+using DirectInput8CreateFn = HRESULT(WINAPI*)(HINSTANCE, DWORD, REFIID, LPVOID*, void*);
+iat::IatPatch g_askeys_iat;
+iat::IatPatch g_kbstate_iat;
+iat::IatPatch g_dicreate_iat;
+std::atomic<unsigned long long> g_askeys_calls{0};
+std::atomic<unsigned long long> g_askeys_down{0};
+std::atomic<unsigned long long> g_askeys_last_summary{0};
+std::atomic<unsigned long long> g_kbstate_calls{0};
+std::atomic<unsigned long long> g_kbstate_down{0};
+std::atomic<unsigned long long> g_kbstate_last_summary{0};
+std::atomic<int> g_first_key_down{-1};
+
+void MaybePollSummary(const char* what, unsigned long long calls,
+                      unsigned long long down,
+                      std::atomic<unsigned long long>& last) {
+  const auto now = GetTickCount64();
+  auto prev = last.load(std::memory_order_relaxed);
+  if ((!prev || now < prev || now - prev >= 60000) &&
+      last.compare_exchange_strong(prev, now, std::memory_order_relaxed))
+    DSVR_LOG("Input: %s polls=%llu down=%llu (60s window)", what, calls, down);
+}
 
 extern "C" std::uintptr_t DsvrIatCompareExchange(void* slot, std::uintptr_t expected,
                                                  std::uintptr_t desired);
@@ -46,8 +76,11 @@ struct IatPatch {
 };
 IatPatch g_state_iat;
 IatPatch g_caps_iat;
+IatPatch g_setstate_iat;
 DWORD WINAPI XInputIatDetour(DWORD, XINPUT_STATE*);
 DWORD WINAPI XInputCapsIatDetour(DWORD, DWORD, XINPUT_CAPABILITIES*);
+DWORD WINAPI XInputSetStateDetour(DWORD, XINPUT_VIBRATION*);
+DWORD WINAPI XInputSetStateIatDetour(DWORD, XINPUT_VIBRATION*);
 
 template <typename T>
 bool ReadImage(std::uintptr_t base, std::size_t size, std::uint64_t offset, T& out) {
@@ -199,6 +232,7 @@ bool InstallXInputIat(HMODULE provider, void* target, IatPatch& patch,
 
 std::atomic<bool> g_inline_enabled{false};
 std::atomic<bool> g_caps_inline_enabled{false};
+std::atomic<bool> g_setstate_inline_enabled{false};
 std::atomic<bool> g_logged_first_iat_poll{false};
 
 bool EnableInlineBridge(void* target, std::atomic<bool>& flag, const char* what) {
@@ -246,7 +280,10 @@ unsigned long long HashPad(const XINPUT_GAMEPAD& pad) {
 }
 
 DWORD MergeXInputState(DWORD user_index, XINPUT_STATE* state, DWORD result) {
-  if (user_index != 0) return result;
+  // The front-end may poll any user slot for its menus, so the same virtual
+  // pad answers on users 0-3 (a Quest-only player has no physical pad on any
+  // slot). User 4+ stays native passthrough.
+  if (user_index > 3) return result;
   VirtualPadState motion{};
   const bool have_motion = InputLatestPad(motion);
   const VirtualPadState physical = result == ERROR_SUCCESS ?
@@ -317,10 +354,39 @@ DWORD WINAPI XInputIatDetour(DWORD user_index, XINPUT_STATE* state) {
       state, user_index);
 }
 
+// A Quest-only player has no physical rumble motors, so the native SetState
+// answers ERROR_DEVICE_NOT_CONNECTED. Some front-ends treat a failed rumble
+// as a missing pad and keep ignoring the state feed, so accept rumble for the
+// virtual pads (users 0-3) without touching the disconnected driver. User 4+
+// falls through to the saved original.
+DWORD AcceptVirtualRumble(DWORD user_index, XINPUT_VIBRATION* vibration) {
+  if (!vibration) return ERROR_BAD_ARGUMENTS;
+  if (user_index > 3) return ERROR_DEVICE_NOT_CONNECTED;
+  if (!g_logged_first_rumble.exchange(true))
+    DSVR_LOG("XInput: game sent rumble to the virtual pad (accepted)");
+  return ERROR_SUCCESS;
+}
+
+DWORD WINAPI XInputSetStateDetour(DWORD user_index, XINPUT_VIBRATION* vibration) {
+  if (user_index <= 3 || !vibration) return AcceptVirtualRumble(user_index, vibration);
+  return MergeRoute<XInputSetStateFn>(
+      g_setstate_original, g_setstate_inline_enabled,
+      [](DWORD, XINPUT_VIBRATION*, DWORD result) { return result; },
+      vibration, user_index);
+}
+
+DWORD WINAPI XInputSetStateIatDetour(DWORD user_index, XINPUT_VIBRATION* vibration) {
+  if (user_index <= 3 || !vibration) return AcceptVirtualRumble(user_index, vibration);
+  return MergeRoute<XInputSetStateFn>(
+      g_setstate_iat.original, g_setstate_iat.enabled,
+      [](DWORD, XINPUT_VIBRATION*, DWORD result) { return result; },
+      vibration, user_index);
+}
+
 // A Quest-only player has no physical XInput device, so the native call answers
-// ERROR_DEVICE_NOT_CONNECTED and the game's front-end never treats user 0 as a
-// pad at all: menus stay unreachable even while the state bridge is live. Report
-// the standard virtual gamepad that the state detour actually feeds.
+// ERROR_DEVICE_NOT_CONNECTED and the game's front-end never treats users 0-3
+// as pads at all: menus stay unreachable even while the state bridge is live.
+// Report the standard virtual gamepad that the state detour actually feeds.
 DWORD FillVirtualCapabilities(XINPUT_CAPABILITIES* caps) {
   std::memset(caps, 0, sizeof(*caps));
   caps->Type = XINPUT_DEVTYPE_GAMEPAD;
@@ -356,6 +422,64 @@ DWORD WINAPI XInputGetCapabilitiesDetour(DWORD user_index, DWORD flags,
       caps, user_index, flags);
 }
 
+// The pinned game does not import XInputGetCapabilities, so neither hook
+// route can reach it; it resolves the export dynamically instead and the
+// unpatched resolution reports no connected pad while state already reports
+// our virtual gamepad. Reroute that dynamic resolution through the game's own
+// GetProcAddress import so capability queries agree with state.
+using GetProcAddressFn = FARPROC(WINAPI*)(HMODULE, LPCSTR);
+iat::IatPatch g_procaddress_iat;
+std::atomic<bool> g_logged_caps_reroute{false};
+bool ModuleIsXInput(HMODULE mod) {
+  if (!mod) return false;
+  const wchar_t* names[] = {L"xinput1_3.dll", L"xinput1_4.dll",
+                            L"xinput9_1_0.dll"};
+  for (const wchar_t* name : names) {
+    HMODULE known = GetModuleHandleW(name);
+    if (known && known == mod) return true;
+  }
+  return false;
+}
+DWORD WINAPI XInputVirtualCapsDetour(DWORD user_index, DWORD,
+                                     XINPUT_CAPABILITIES* caps) {
+  if (!caps) return ERROR_BAD_ARGUMENTS;
+  return MergeXInputCapabilities(user_index, caps, ERROR_DEVICE_NOT_CONNECTED,
+                                 "procaddress route");
+}
+void LogInterestingResolution(LPCSTR name) {
+  static const char* kWatched[] = {
+      "XInputGetCapabilities", "XInputGetState", "GetActiveWindow",
+      "GetFocus", "IsWindowVisible", "GetForegroundWindow", "SetCapture",
+      "GetCapture", "IsIconic", "GetWindow", "GetWindowTextW",
+      "DirectInput8Create", "GetKeyboardState", "GetKeyState",
+      "SetFocus", "SetActiveWindow", "ShowWindow"};
+  static bool logged[sizeof(kWatched) / sizeof(kWatched[0])] = {};
+  for (std::size_t i = 0; i < sizeof(kWatched) / sizeof(kWatched[0]); ++i) {
+    if (!logged[i] && std::strcmp(name, kWatched[i]) == 0) {
+      logged[i] = true;
+      DSVR_LOG("XInput: game resolved %s dynamically", kWatched[i]);
+      return;
+    }
+  }
+}
+FARPROC WINAPI XInputGetProcAddressDetour(HMODULE mod, LPCSTR name) {
+  const auto original = reinterpret_cast<GetProcAddressFn>(
+      g_procaddress_iat.original);
+  FARPROC resolved = original ? original(mod, name) : nullptr;
+  if (resolved && name &&
+      (reinterpret_cast<std::uintptr_t>(name) >> 16) != 0) {
+    LogInterestingResolution(name);
+  }
+  if (resolved && name &&
+      (reinterpret_cast<std::uintptr_t>(name) >> 16) != 0 &&
+      std::strcmp(name, "XInputGetCapabilities") == 0 &&
+      ModuleIsXInput(mod)) {
+    if (!g_logged_caps_reroute.exchange(true, std::memory_order_acq_rel))
+      DSVR_LOG("XInput: rerouting dynamic XInputGetCapabilities resolution to the virtual gamepad");
+    return reinterpret_cast<FARPROC>(&XInputVirtualCapsDetour);
+  }
+  return resolved;
+}
 DWORD WINAPI XInputCapsIatDetour(DWORD user_index, DWORD flags,
                                  XINPUT_CAPABILITIES* caps) {
   return MergeRoute<XInputGetCapabilitiesFn>(
@@ -411,6 +535,70 @@ bool BridgeExport(HMODULE module, const char* name, void*& target,
 
 }  // namespace
 
+bool NoteFirstKeyDown(int vkey) {
+  int expected = -1;
+  return vkey >= 0 && vkey < 256 &&
+         g_first_key_down.compare_exchange_strong(expected, vkey,
+                                                 std::memory_order_acq_rel);
+}
+
+SHORT WINAPI LogGetAsyncKeyState(int vkey) {
+  const auto orig = reinterpret_cast<GetAsyncKeyStateFn>(
+      g_askeys_iat.original);
+  const SHORT result = orig ? orig(vkey) : 0;
+  const unsigned long long n =
+      g_askeys_calls.fetch_add(1, std::memory_order_relaxed) + 1;
+  if (n == 1)
+    DSVR_LOG("Input: game polls GetAsyncKeyState (global keyboard path live)");
+  if (result & 0x8000) {
+    g_askeys_down.fetch_add(1, std::memory_order_relaxed);
+    if (NoteFirstKeyDown(vkey))
+      DSVR_LOG("Input: game saw async key down (vkey=0x%02x)", vkey & 0xff);
+  }
+  MaybePollSummary("GetAsyncKeyState",
+                   g_askeys_calls.load(std::memory_order_relaxed),
+                   g_askeys_down.load(std::memory_order_relaxed),
+                   g_askeys_last_summary);
+  return result;
+}
+
+BOOL WINAPI LogGetKeyboardState(PBYTE keys) {
+  const auto orig = reinterpret_cast<GetKeyboardStateFn>(
+      g_kbstate_iat.original);
+  const BOOL result = orig ? orig(keys) : FALSE;
+  const unsigned long long n =
+      g_kbstate_calls.fetch_add(1, std::memory_order_relaxed) + 1;
+  if (n == 1)
+    DSVR_LOG("Input: game polls GetKeyboardState (thread-queue keyboard path live)");
+  if (result && keys) {
+    for (int i = 0; i < 256; ++i) {
+      if (keys[i] & 0x80) {
+        g_kbstate_down.fetch_add(1, std::memory_order_relaxed);
+        if (NoteFirstKeyDown(i))
+          DSVR_LOG("Input: game saw thread-queue key down (vkey=0x%02x)", i);
+        break;
+      }
+    }
+  }
+  MaybePollSummary("GetKeyboardState",
+                   g_kbstate_calls.load(std::memory_order_relaxed),
+                   g_kbstate_down.load(std::memory_order_relaxed),
+                   g_kbstate_last_summary);
+  return result;
+}
+
+HRESULT WINAPI LogDirectInput8Create(HINSTANCE instance, DWORD version,
+                                     REFIID riid, LPVOID* out,
+                                     void* outer) {
+  const auto orig = reinterpret_cast<DirectInput8CreateFn>(
+      g_dicreate_iat.original);
+  const HRESULT result = orig ? orig(instance, version, riid, out, outer)
+                              : E_FAIL;
+  DSVR_LOG("Input: game called DirectInput8Create (version=0x%08lx result=0x%08lx)",
+           version, static_cast<unsigned long>(result));
+  return result;
+}
+
 bool XInputBridgeInstall(bool enabled) {
   std::lock_guard<std::mutex> install_lock(HookInstallMutex());
   if (!enabled) {
@@ -458,6 +646,37 @@ bool XInputBridgeInstall(bool enabled) {
           reinterpret_cast<void*>(&XInputCapsIatDetour), g_caps_inline_enabled,
           g_caps_iat))
     DSVR_WARN("XInput: capabilities route unavailable; the verified state route remains live");
+  if (!BridgeExport<XInputSetStateFn>(
+          module, "XInputSetState", g_setstate_target, g_setstate_original,
+          reinterpret_cast<void*>(&XInputSetStateDetour),
+          reinterpret_cast<void*>(&XInputSetStateIatDetour), g_setstate_inline_enabled,
+          g_setstate_iat))
+    DSVR_WARN("XInput: rumble route unavailable; the verified state route remains live");
+  if (!iat::InstallIat(GetModuleHandleA("kernel32.dll"), "kernel32.dll",
+                       "GetProcAddress", g_procaddress_iat,
+                       reinterpret_cast<void*>(&XInputGetProcAddressDetour),
+                       "XInputProcAddress"))
+    DSVR_WARN("XInput: GetProcAddress route unavailable; dynamic capability queries stay unpatched");
+  // Read-only poll watch: which keyboard/API state the front-end reads.
+  // Best-effort and independent of the state bridge; a missing import only
+  // loses the corresponding observation, never input.
+  if (!iat::InstallIat(GetModuleHandleA("user32.dll"), "user32.dll",
+                       "GetAsyncKeyState", g_askeys_iat,
+                       reinterpret_cast<void*>(&LogGetAsyncKeyState),
+                       "KeyPollWatch"))
+    DSVR_WARN("Input: GetAsyncKeyState watch unavailable; async-key polling stays unobserved");
+  if (!iat::InstallIat(GetModuleHandleA("user32.dll"), "user32.dll",
+                       "GetKeyboardState", g_kbstate_iat,
+                       reinterpret_cast<void*>(&LogGetKeyboardState),
+                       "KeyPollWatch"))
+    DSVR_WARN("Input: GetKeyboardState watch unavailable; thread-queue polling stays unobserved");
+  const HMODULE dinput = GetModuleHandleA("dinput8.dll");
+  if (!dinput ||
+      !iat::InstallIat(dinput, "dinput8.dll", "DirectInput8Create",
+                       g_dicreate_iat,
+                       reinterpret_cast<void*>(&LogDirectInput8Create),
+                       "KeyPollWatch"))
+    DSVR_WARN("Input: DirectInput8Create watch unavailable; device creation stays unobserved");
   return true;
 }
 
@@ -465,12 +684,25 @@ void XInputBridgeUninstall() {
   std::lock_guard<std::mutex> install_lock(HookInstallMutex());
   RemoveXInputIat(g_state_iat, reinterpret_cast<void*>(&XInputIatDetour));
   RemoveXInputIat(g_caps_iat, reinterpret_cast<void*>(&XInputCapsIatDetour));
+  RemoveXInputIat(g_setstate_iat, reinterpret_cast<void*>(&XInputSetStateIatDetour));
+  iat::RemoveIat(g_procaddress_iat,
+                 reinterpret_cast<void*>(&XInputGetProcAddressDetour),
+                 "XInputProcAddress");
+  iat::RemoveIat(g_askeys_iat, reinterpret_cast<void*>(&LogGetAsyncKeyState),
+                 "KeyPollWatch");
+  iat::RemoveIat(g_kbstate_iat, reinterpret_cast<void*>(&LogGetKeyboardState),
+                 "KeyPollWatch");
+  iat::RemoveIat(g_dicreate_iat,
+                 reinterpret_cast<void*>(&LogDirectInput8Create),
+                 "KeyPollWatch");
   g_inline_enabled.store(false, std::memory_order_release);
   g_caps_inline_enabled.store(false, std::memory_order_release);
-  const void* targets[] = {g_target, g_caps_target};
+  g_setstate_inline_enabled.store(false, std::memory_order_release);
+  const void* targets[] = {g_target, g_caps_target, g_setstate_target};
   const bool owned[] = {static_cast<bool>(g_original.load(std::memory_order_acquire)),
-                        static_cast<bool>(g_caps_original.load(std::memory_order_acquire))};
-  for (std::size_t i = 0; i < 2; ++i) {
+                        static_cast<bool>(g_caps_original.load(std::memory_order_acquire)),
+                        static_cast<bool>(g_setstate_original.load(std::memory_order_acquire))};
+  for (std::size_t i = 0; i < 3; ++i) {
     if (!targets[i] || !owned[i]) continue;
     const auto status = MH_DisableHook(const_cast<void*>(targets[i]));
     if (status != MH_OK && status != MH_ERROR_DISABLED)

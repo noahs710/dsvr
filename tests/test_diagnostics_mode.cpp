@@ -49,8 +49,8 @@ bool CombatNativeLocalPlayer(std::uintptr_t& player) {
 }
 void ModMenuToggle() {}
 void CalibrationRecenter() {}
-void XrToggleSanctuary() { ++xr_calls; }
-void XrRecenterSanctuary() { ++xr_calls; }
+void XrToggleTheater() { ++xr_calls; }
+void XrRecenterTheater() { ++xr_calls; }
 double XrLastDisplayRefreshHz() { return 0.0; }  // sidecar write is a no-op keeper here
 void LabPump() { ++lab_calls; }
 void LabRequestAbort() { ++lab_calls; }
@@ -154,6 +154,7 @@ int main(int argc, char** argv) {
   const bool combat=std::string(argv[1])=="combat";
   const bool session=std::string(argv[1])=="session";
   const bool session_stop=std::string(argv[1])=="session-stop";
+  const bool go=std::string(argv[1])=="go";
   const bool observer = combat || std::string(argv[1]).starts_with("observer");
   const bool disabled = std::string(argv[1]) == "disabled";
   refuse_camera = std::string(argv[1]) == "observer-refused";
@@ -171,7 +172,7 @@ int main(int argc, char** argv) {
   requested.hide_player_model = requested.hide_second_model = true;
   requested.motion_attacks = requested.haptics = requested.arm_ik_enabled = true;
   requested.arm_ik_log_only = false;
-  requested.sanctuary_override = true;
+  requested.theater_override = true;
   requested.hotkeys_enabled = false;  // never consume real desktop keys
   requested.verbose_logging = true;
   CHECK(ConfigSave(path, requested));
@@ -271,6 +272,49 @@ int main(int argc, char** argv) {
     std::puts("test_diagnostics_mode (session): PASS");
     return 0;
   }
+  if (go) {
+    // VR/non-observer mode: no automatic capture, no installs until asked.
+    Sleep(80);
+    CHECK(captures == 0 && trace_calls == 0 && camera_calls == 0);
+    wchar_t exe[MAX_PATH]{};
+    CHECK(GetModuleFileNameW(nullptr, exe, MAX_PATH));
+    std::wstring dir(exe);
+    dir.resize(dir.find_last_of(L"\\/") + 1);
+    const std::wstring go_path = dir + L"DSVR-trace-go-" +
+        std::to_wstring(GetCurrentProcessId()) + L".request";
+    auto drop_go = [&]() -> bool {
+      HANDLE h = CreateFileW(go_path.c_str(), GENERIC_WRITE, 0, nullptr,
+                             CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+      if (h == INVALID_HANDLE_VALUE) return false;
+      CloseHandle(h);
+      return true;
+    };
+    auto wait_captures = [&](unsigned n) -> bool {
+      for (unsigned i = 0; i < 200 && captures.load() < n; ++i) Sleep(10);
+      return captures.load() >= n;
+    };
+    auto gone = [&]() -> bool {
+      return GetFileAttributesW(go_path.c_str()) == INVALID_FILE_ATTRIBUTES;
+    };
+    CHECK(drop_go());
+    CHECK(wait_captures(1));  // hands-free file trigger begins the capture
+    CHECK(capture_duration == 20000);  // verbose non-observer window
+    CHECK(gone());  // one shot: the file is consumed
+    CHECK(drop_go());
+    CHECK(wait_captures(2));  // idle again: a new file re-triggers
+    CHECK(gone());
+    fake_session_mode = true;  // simulate an active capture from elsewhere
+    fake_trace_state = TraceCaptureState::Recording;
+    CHECK(drop_go());
+    Sleep(300);  // polls run, but nothing new begins while Recording
+    CHECK(captures == 2);
+    CHECK(gone());  // still consumed: never queued behind an active capture
+    fake_session_mode = false;
+    fake_trace_state = TraceCaptureState::Idle;
+    DiagnosticsStop();
+    std::puts("test_diagnostics_mode (go): PASS");
+    return 0;
+  }
   if(combat) {
     Sleep(60);CHECK(captures==0 && trace_calls==0);
     player_loaded=true;
@@ -309,7 +353,7 @@ int main(int argc, char** argv) {
         c.headlook_enabled == !observer);
   CHECK(c.xr_input_enabled == !observer && c.arm_ik_enabled == !observer);
   CHECK(c.arm_ik_log_only == observer && c.motion_attacks == !observer);
-  CHECK(c.haptics == !observer && c.sanctuary_override == !observer);
+  CHECK(c.haptics == !observer && c.theater_override == !observer);
   CHECK(c.hide_player_model == !observer && c.hide_second_model == !observer);
   DiagnosticsStart(requested, L"must-not-replace-startup-path");
   CHECK(DiagnosticsCurrentConfig().observer_only == observer);

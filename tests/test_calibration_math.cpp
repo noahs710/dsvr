@@ -1,6 +1,7 @@
 #include "../src/core/calibration_math.h"
 #include <cstdio>
 #include <limits>
+#include <utility>
 #define CHECK(x) do { if(!(x)){std::printf("FAIL %d: %s\n",__LINE__,#x);return 1;} } while(0)
 namespace {
 dsvr::TrackingFrame Pose() {
@@ -48,10 +49,10 @@ int main() {
       CHECK(std::fabs(seated.neutral_controller[side][axis]-standing.neutral_controller[side][axis])<1e-5f);
   }
   CalibrationCapture capture;UserCalibration result;auto f=Pose();
-  // A trigger already held while opening the screen cannot start gameplay.
-  for(int i=0;i<30;++i) { CHECK(!capture.Feed(f,true,false,0,1.65f,result));Step(f); }
+  // A combined trigger release never advances the capture timer.
+  for(int i=0;i<30;++i) { CHECK(!capture.Feed(f,false,false,0,1.65f,result));Step(f); }
   CHECK(!result.valid && capture.Progress()==0);
-  CHECK(!capture.Feed(f,false,false,0,1.65f,result));Step(f);
+  Step(f);
   bool done=false;
   for(int i=0;i<22 && !done;++i) {
     // q and -q represent the same rotation; averaging must not cancel them.
@@ -81,7 +82,7 @@ int main() {
     done=capture.Feed(f,true,false,0,1.65f,result);
   }
   CHECK(done && CalibrationValidProfile(result));
-  auto invalid=result;invalid.version=2;CHECK(!CalibrationValidProfile(invalid));
+  auto invalid=result;invalid.version=3;CHECK(!CalibrationValidProfile(invalid)); // v2 is current; unknown versions rejected
   invalid=result;invalid.neutral_controller[0][0]=std::numeric_limits<float>::quiet_NaN();
   CHECK(!CalibrationValidProfile(invalid));
   capture.Reset();f=Pose();f.arm[1].valid=false;
@@ -144,7 +145,7 @@ int main() {
     done=capture.Feed(f,true,false,0,1.65f,result);Step(f);
   }
   CHECK(done);
-  // A deliberate move still trips the gate: one step past the budget restarts
+  // A deliberate move still trips the stability check: one step past the budget restarts
   // the hold and clears the bar.
   capture.Reset();f=Pose();
   capture.Feed(f,false,false,0,1.65f,result);Step(f);
@@ -164,15 +165,16 @@ int main() {
   TrackingFrame dup=f;--dup.sequence;
   CHECK(!capture.Feed(dup,true,false,0,1.65f,result));
   CHECK(capture.Progress()==held);
-  // Releasing the trigger is a real reset and does clear the bar.
+  // Releasing either trigger clears the combined hold and its visible bar.
   CHECK(!capture.Feed(f,false,false,0,1.65f,result));
   CHECK(capture.Progress()==0);
-  // Grip jitter beyond 5cm or roughly 11.5 degrees cannot finish a hold.
+  // Excessive grip jitter or a wrist swing beyond the 25 degree tolerance
+  // restarts the hold without demanding a frozen, unnatural pose.
   for(bool angular:{false,true}) {
     capture.Reset();f=Pose();capture.Feed(f,false,false,0,1.65f,result);Step(f);done=false;
     for(int i=0;i<24 && !done;++i) {
       if(angular) {f.arm[0].quat[0]=std::sin((i&1)?.25f:-.25f);f.arm[0].quat[3]=std::cos(.25f);}
-      else f.arm[0].pos[0]=-.72f+(i&1)*.06f;
+      else f.arm[0].pos[0]=-.72f+(i&1)*.16f;
       done=capture.Feed(f,true,false,0,1.65f,result);Step(f);
     }
     CHECK(!done);
@@ -210,23 +212,64 @@ int main() {
     CHECK(std::fabs(diag.LastSpanM()-1.44f)<1e-3f);
     CHECK(std::fabs(diag.LastPlaneM()-.25f)<1e-3f);
     CHECK(diag.LastHandsValid() && diag.Ready()); }
-  // Relaxed A pose: arms down-out (hands ~0.45m below head height,
-  // narrower than a full T) must also capture; hands at the hips must not.
+  // A relaxed A pose is recommended, but the exact hand spread and height do
+  // not gate the one-second capture.
   {
     CalibrationCapture a;UserCalibration out;auto pose=Pose();
     pose.arm[0].pos[0]=-.55f;pose.arm[1].pos[0]=.55f;
     pose.arm[0].pos[1]=1.20f;pose.arm[1].pos[1]=1.20f; // head 1.65, plane .45
     a.Feed(pose,false,false,0,1.65f,out);Step(pose);
-    bool done=false;
-    for(int i=0;i<22 && !done;++i){done=a.Feed(pose,true,false,0,1.65f,out);Step(pose);}
-    CHECK(done && CalibrationValidProfile(out));
+    bool relaxed_done=false;
+    for(int i=0;i<22 && !relaxed_done;++i){relaxed_done=a.Feed(pose,true,false,0,1.65f,out);Step(pose);}
+    CHECK(relaxed_done && CalibrationValidProfile(out));
     CHECK(std::fabs(out.arm_span_m-1.23446025f)<1e-5f);
     CalibrationCapture hips;auto hip=Pose();
     hip.arm[0].pos[0]=-.20f;hip.arm[1].pos[0]=.20f;
     hip.arm[0].pos[1]=.95f;hip.arm[1].pos[1]=.95f; // plane .70, span .40
     hips.Feed(hip,false,false,0,1.65f,out);Step(hip);
-    for(int i=0;i<22;++i){CHECK(!hips.Feed(hip,true,false,0,1.65f,out));Step(hip);}
-    CHECK(!hips.Ready());
+    bool hips_done=false;
+    for(int i=0;i<22 && !hips_done;++i) {
+      hips_done=hips.Feed(hip,true,false,0,1.65f,out);Step(hip);
+    }
+    CHECK(hips_done && CalibrationValidProfile(out));
+  }
+  // Seated guidance is useful, but the same tracked lap pose also remains
+  // available to people who selected a different playstyle.
+  {
+    const auto lap_pose=[](){
+      CalibrationCapture c;UserCalibration out;auto pose=Pose();
+      pose.arm[0].pos[0]=-.175f;pose.arm[1].pos[0]=.175f;  // span .35
+      pose.arm[0].pos[1]=1.20f;pose.arm[1].pos[1]=1.20f;   // head 1.65, plane .45
+      pose.arm[0].pos[2]=.40f;pose.arm[1].pos[2]=.40f;     // hands forward
+      c.Feed(pose,false,false,0,1.65f,out);Step(pose);
+      bool lap_done=false;
+      for(int i=0;i<22 && !lap_done;++i)
+        {lap_done=c.Feed(pose,true,false,0,1.65f,out);Step(pose);}
+      return std::pair{lap_done,out};
+    };
+    const auto lap_result=lap_pose();
+    CHECK(lap_result.first && CalibrationValidProfile(lap_result.second));
+    CHECK(std::fabs(lap_result.second.eye_height_m-1.65f)<1e-5f);
+    const auto lap_again=lap_pose();
+    CHECK(lap_again.first && CalibrationValidProfile(lap_again.second));
+  }
+  // Wrist pose never gates or normalizes the capture: a strongly bent wrist
+  // completes the hold and its orientation is recorded verbatim in the neutral
+  // grip, so the IK drives the game hand in exactly that bent pose (the hand
+  // is 1:1 with the controller at any wrist angle, not just a flat grip).
+  {
+    CalibrationCapture bent;UserCalibration out;auto pose=Pose();
+    for(auto& arm:pose.arm) {arm.quat[0]=.5f;arm.quat[3]=std::sqrt(.75f);}  // 60 deg wrist pitch
+    bent.Feed(pose,false,false,0,1.65f,out);Step(pose);
+    bool bent_done=false;
+    for(int i=0;i<22 && !bent_done;++i){bent_done=bent.Feed(pose,true,false,0,1.65f,out);Step(pose);}
+    CHECK(bent_done && CalibrationValidProfile(out));
+    for(int side=0;side<2;++side) {
+      CHECK(std::fabs(out.neutral_controller[side][0]-.5f)<1e-5f &&
+            std::fabs(out.neutral_controller[side][3]-std::sqrt(.75f))<1e-5f);
+      CHECK(std::fabs(out.neutral_controller[side][1])<1e-5f &&
+            std::fabs(out.neutral_controller[side][2])<1e-5f);
+    }
   }
   // The same idealized anatomy in T and A must produce the same scale inputs.
   // This asserts an independently constructed geometry, not capture's own math.

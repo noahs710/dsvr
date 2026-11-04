@@ -12,6 +12,7 @@
 
 #include "render.h"
 #include "render_host.h"
+#include "iat_patch.h"
 #include "reshade_bridge.h"
 
 #include <windows.h>
@@ -26,6 +27,7 @@
 #include "camera.h"
 #include "calibration.h"
 #include "core.h"
+#include "depth_probe.h"
 #include "afr_policy.h"
 #include "diagnostics.h"
 #include "stereo_gate.h"
@@ -47,6 +49,19 @@ ResizeBuffersFn g_resize_orig = nullptr;
 void* g_present_target = nullptr;
 void* g_resize_target = nullptr;
 
+using GetForegroundWindowFn = HWND(WINAPI*)();
+using ClipCursorFn = BOOL(WINAPI*)(const RECT*);
+using SetCaptureFn = HWND(WINAPI*)(HWND);
+iat::IatPatch g_fg_iat;
+iat::IatPatch g_active_iat;
+iat::IatPatch g_focuswnd_iat;
+iat::IatPatch g_visible_iat;
+iat::IatPatch g_clip_iat;
+iat::IatPatch g_capture_iat;
+std::atomic<std::uintptr_t> g_focus_spoof_hwnd{0};
+void UpdateFocusSpoof(HWND hwnd, const Config& cfg);
+std::atomic<bool> g_focus_spoof_active{false};
+
 std::atomic<unsigned long long> g_frames{0};
 std::atomic<bool> g_described{false};
 bool g_verbose = false;
@@ -60,6 +75,13 @@ std::atomic<bool> g_desktop_notified{false};
 std::atomic<bool> g_observer_menu_only{false};
 RenderHost g_host;
 ReShadeBridge g_reshade_bridge{g_host};
+
+struct ProbeInternalPass {
+  ProbeInternalPass() { DepthProbeBeginInternalPass(); }
+  ~ProbeInternalPass() { DepthProbeEndInternalPass(); }
+  ProbeInternalPass(const ProbeInternalPass&) = delete;
+  ProbeInternalPass& operator=(const ProbeInternalPass&) = delete;
+};
 
 long long NowQpc() {
   LARGE_INTEGER v{};
@@ -99,6 +121,12 @@ void RecordHostRateEvidence() {
                  (unsigned long long)metrics.gpu_frame_sequence, metrics.gpu_copy_ms,
                  metrics.gpu_blit_ms);
       if(metrics.frame_sequence)
+        DSVR_LOG("VRImage: source=%ux%u generation=%llu retained=%d age_ms=%llu eyes=%ux%u/%ux%u",
+            metrics.source_width,metrics.source_height,
+            static_cast<unsigned long long>(metrics.source_generation),static_cast<int>(metrics.source_retained),
+            static_cast<unsigned long long>(metrics.source_age_ms),
+            metrics.eye_widths[0],metrics.eye_heights[0],metrics.eye_widths[1],metrics.eye_heights[1]);
+      if(metrics.frame_sequence)
         DSVR_LOG("VRSubmissionHealth: frame=%llu submitted=%d pose_published=%d image_timeouts=%llu held_image_skips=%llu",
             static_cast<unsigned long long>(metrics.frame_sequence),static_cast<int>(metrics.submitted),
             static_cast<int>(metrics.tracking_published),static_cast<unsigned long long>(metrics.image_timeouts),
@@ -136,6 +164,8 @@ void PollHost(void*) {
 
 void SubmitHostMono(void*, const HostSource& source, HostStamp stamp) {
   CpuStageScope host_time(CpuStage::HostFrame);
+  DepthProbeFrameBoundary(reinterpret_cast<ID3D11Texture2D*>(source.image),
+                          stamp.ordinal);
   const auto capture = VrTraceCaptureId();
   if (capture && VrTraceActive()) {
     VrTraceEvent trace{};
@@ -162,12 +192,15 @@ void SubmitHostMono(void*, const HostSource& source, HostStamp stamp) {
     trace.object = source.device;
     VrTraceRecord(trace);
   }
-  // Draw once into the accepted source before its single XR snapshot. This
-  // also keeps Home available on the desktop when the headset is not running.
+  // Desktop menus render directly. While the headset is visible, the XR owner
+  // renders the menu to its independent transparent surface instead.
   const Config cfg = DiagnosticsCurrentConfig();
-  CalibrationGameplayReady(cfg.vr_enabled && !cfg.observer_only && XrSessionRunning() && CameraGameplayReady());
+  CalibrationPresentationReady(cfg.vr_enabled && !cfg.observer_only && XrSessionVisible());
+  if (!XrSessionVisible()) {
+    ProbeInternalPass probe_scope;
     ModMenuRenderTexture(reinterpret_cast<ID3D11Device*>(source.device),
-                        reinterpret_cast<ID3D11Texture2D*>(source.image));
+                         reinterpret_cast<ID3D11Texture2D*>(source.image));
+  }
   if (XrSessionRunning()) {
     // T3 stereo gate: no native eye renderer is bound (Present sees one
     // finished image), so a stereo request refuses once and mono continues.
@@ -185,6 +218,7 @@ void SubmitHostMono(void*, const HostSource& source, HostStamp stamp) {
         !afr_refusal_logged.exchange(true))
       DSVR_WARN("AFR: afr_enabled requested while stereo is inactive; "
                 "alternating a mono image proves nothing, continuing mono");
+    ProbeInternalPass probe_scope;
     XrSubmitMonoFrame(reinterpret_cast<void*>(source.image));
   }
   RecordHostRateEvidence();
@@ -244,7 +278,7 @@ void DescribeOnce(IDXGISwapChain* swap) {
 // Render only the existing menu into this process's backbuffer. Closed menus do
 // not inspect the swapchain or acquire any D3D/DXGI references.
 void RenderObserverMenu(IDXGISwapChain* swap) {
-  if (!ModMenuVisible()) return;
+  if (!ModMenuVisible() || XrSessionVisible()) return;
   DXGI_SWAP_CHAIN_DESC desc{};
   if (FAILED(swap->GetDesc(&desc)) ||
       !RenderWindowBelongsToProcess(desc.OutputWindow))
@@ -266,6 +300,137 @@ void RenderObserverMenu(IDXGISwapChain* swap) {
 }
 
 std::atomic<bool> g_sync_logged{false};
+// Mirror-off black-out: the headset copy already ran in DispatchTexture, so
+// clearing here only affects the desktop backbuffer. A skipped Present would
+// otherwise freeze the last image on screen; black proves "no mirror".
+void ClearBackbufferForNoMirror(IDXGISwapChain* swap) {
+  ID3D11Texture2D* backbuffer = nullptr;
+  if (FAILED(swap->GetBuffer(0, __uuidof(ID3D11Texture2D),
+                             reinterpret_cast<void**>(&backbuffer))) ||
+      !backbuffer)
+    return;
+  ID3D11Device* device = nullptr;
+  backbuffer->GetDevice(&device);
+  if (device) {
+    ID3D11DeviceContext* context = nullptr;
+    device->GetImmediateContext(&context);
+    if (context) {
+      ID3D11RenderTargetView* rtv = nullptr;
+      if (SUCCEEDED(device->CreateRenderTargetView(backbuffer, nullptr, &rtv)) &&
+          rtv) {
+        const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        context->ClearRenderTargetView(rtv, black);
+        rtv->Release();
+      }
+      context->Release();
+    }
+    device->Release();
+  }
+  backbuffer->Release();
+}
+
+// No-mirror window set. The game process can own several visible top-level
+// windows at once (the game window plus the simulator status window), and
+// the game can recreate its window at any time. While the mirror is off,
+// every such window is minimized (before the session shows) or hidden (once
+// it shows); every tracked window is restored when the mirror returns, the
+// session hides, or hooks unload. Only the render thread calls these, so a
+// plain fixed-size set is sufficient.
+struct NoMirrorWin {
+  HWND hwnd = nullptr;
+  bool hidden = false;
+  bool minimized = false;
+};
+NoMirrorWin g_no_mirror_wins[4];
+
+NoMirrorWin* TrackNoMirrorWin(HWND hwnd) {
+  for (auto& slot : g_no_mirror_wins)
+    if (slot.hwnd == hwnd) return &slot;
+  for (auto& slot : g_no_mirror_wins) {
+    if (!slot.hwnd || !IsWindow(slot.hwnd)) {
+      slot.hwnd = hwnd;
+      slot.hidden = false;
+      slot.minimized = false;
+      return &slot;
+    }
+  }
+  return nullptr;
+}
+
+bool IsNoMirrorCandidate(HWND hwnd) {
+  if (!hwnd || !IsWindow(hwnd) || !IsWindowVisible(hwnd)) return false;
+  if (GetWindow(hwnd, GW_OWNER)) return false;
+  DWORD pid = 0;
+  GetWindowThreadProcessId(hwnd, &pid);
+  if (pid != GetCurrentProcessId()) return false;
+  char cls[64] = {};
+  GetClassNameA(hwnd, cls, static_cast<int>(sizeof(cls) - 1));
+  return strcmp(cls, "ConsoleWindowClass") != 0;
+}
+
+struct NoMirrorScan {
+  HWND hwnds[4];
+  int count = 0;
+};
+
+BOOL CALLBACK CollectNoMirrorWindows(HWND hwnd, LPARAM out) {
+  auto* scan = reinterpret_cast<NoMirrorScan*>(out);
+  if (scan->count >= 4) return FALSE;
+  if (!IsNoMirrorCandidate(hwnd)) return TRUE;
+  scan->hwnds[scan->count++] = hwnd;
+  return TRUE;
+}
+
+void HideNoMirrorCandidate(HWND hwnd) {
+  if (!hwnd || !IsWindow(hwnd) || !IsWindowVisible(hwnd)) return;
+  NoMirrorWin* slot = TrackNoMirrorWin(hwnd);
+  if (!slot || slot->hidden) return;
+  slot->hidden = true;
+  slot->minimized = false;
+  ShowWindowAsync(hwnd, SW_HIDE);
+  DSVR_LOG("Render: no-mirror game window hidden (hwnd=%p)",
+           static_cast<void*>(hwnd));
+}
+
+void MinimizeNoMirrorCandidate(HWND hwnd) {
+  if (!hwnd || !IsWindow(hwnd) || !IsWindowVisible(hwnd)) return;
+  NoMirrorWin* slot = TrackNoMirrorWin(hwnd);
+  if (!slot || slot->hidden || slot->minimized) return;
+  slot->minimized = true;
+  // A window the user already minimized still takes the flag so a later
+  // restore brings it back instead of merely showing it.
+  if (!IsIconic(hwnd)) ShowWindowAsync(hwnd, SW_SHOWMINNOACTIVE);
+  DSVR_LOG("Render: no-mirror game window minimized while XR starts (hwnd=%p)",
+           static_cast<void*>(hwnd));
+}
+
+// Re-hide tracked windows the game re-showed behind our back; each re-show
+// is logged, since it means something actively fights the hidden state.
+void ReassertNoMirrorHidden() {
+  for (auto& slot : g_no_mirror_wins) {
+    if (!slot.hidden || !slot.hwnd || !IsWindow(slot.hwnd)) continue;
+    if (!IsWindowVisible(slot.hwnd)) continue;
+    ShowWindowAsync(slot.hwnd, SW_HIDE);
+    DSVR_LOG("Render: no-mirror game window re-hidden (hwnd=%p)",
+             static_cast<void*>(slot.hwnd));
+  }
+}
+
+void RestoreNoMirrorWindows() {
+  for (auto& slot : g_no_mirror_wins) {
+    if ((!slot.hidden && !slot.minimized) || !slot.hwnd) continue;
+    HWND hwnd = slot.hwnd;
+    slot.hwnd = nullptr;
+    slot.hidden = false;
+    slot.minimized = false;
+    if (!IsWindow(hwnd)) continue;
+    // Restore (not show) so a minimized window leaves the taskbar.
+    ShowWindowAsync(hwnd, SW_RESTORE);
+    DSVR_LOG("Render: no-mirror game window restored (hwnd=%p)",
+             static_cast<void*>(hwnd));
+  }
+}
+
 
 HRESULT STDMETHODCALLTYPE PresentDetour(IDXGISwapChain* swap,
                                         UINT sync_interval, UINT flags) {
@@ -325,9 +490,46 @@ HRESULT STDMETHODCALLTYPE PresentDetour(IDXGISwapChain* swap,
   // to the eye images above, and the native limiter (not Present) paces
   // the game. Skipping it removes desktop composition and any vsync wait.
   // TEST presents and non-VR configs always forward to the original.
+  const Config present_cfg = DiagnosticsCurrentConfig();
   const bool skip_desktop = !(flags & DXGI_PRESENT_TEST) &&
-      DiagnosticsCurrentConfig().desktop_present == false &&
-      DiagnosticsCurrentConfig().vr_enabled;
+      present_cfg.desktop_present == false &&
+      present_cfg.vr_enabled;
+  if (skip_desktop) {
+    // Mirror off means no desktop image at all: black the backbuffer, then
+    // minimize (before XR shows) or hide (once it shows) every window this
+    // process owns. The XR copy above already ran, so the headset image is
+    // unaffected.
+    ClearBackbufferForNoMirror(swap);
+    NoMirrorScan scan{};
+    if (desc.OutputWindow && IsWindow(desc.OutputWindow) &&
+        RenderWindowBelongsToProcess(desc.OutputWindow))
+      scan.hwnds[scan.count++] = desc.OutputWindow;
+    // Recreated windows surface about once a second; tracked slots cover
+    // the steady state without scanning every present.
+    static int presents_since_scan = 0;
+    if (++presents_since_scan >= 60) {
+      presents_since_scan = 0;
+      EnumWindows(CollectNoMirrorWindows, reinterpret_cast<LPARAM>(&scan));
+    }
+    for (int i = 1; i < scan.count; ++i) {
+      if (scan.hwnds[i] == scan.hwnds[0]) scan.hwnds[i] = scan.hwnds[--scan.count];
+    }
+    UpdateFocusSpoof(scan.count ? scan.hwnds[0] : nullptr, present_cfg);
+    if (ShouldHideDesktopWindow(present_cfg.desktop_present,
+                                present_cfg.vr_enabled, XrSessionVisible())) {
+      for (int i = 0; i < scan.count; ++i) HideNoMirrorCandidate(scan.hwnds[i]);
+      ReassertNoMirrorHidden();
+    } else if (ShouldMinimizeDesktopWindow(present_cfg.desktop_present,
+                                           present_cfg.vr_enabled,
+                                           XrSessionVisible())) {
+      for (int i = 0; i < scan.count; ++i)
+        MinimizeNoMirrorCandidate(scan.hwnds[i]);
+    }
+  } else {
+    UpdateFocusSpoof(nullptr, present_cfg);
+    RestoreNoMirrorWindows();
+  }
+
   const HRESULT result = skip_desktop
       ? S_OK
       : g_present_orig(swap, sync_interval, flags);
@@ -361,6 +563,84 @@ HRESULT STDMETHODCALLTYPE ResizeDetour(IDXGISwapChain* swap, UINT buffers,
            described ? after.BufferDesc.Height : 0,
            described ? after.BufferCount : 0);
   return result;
+}
+
+// The hidden no-mirror window never owns the real foreground, so games that
+// gate pad input on focus would go deaf in the headset. Spoof only foreign
+// queries: our own UI, hotkeys and diagnostics keep seeing the real answer,
+// which matters because hotkeys must not fire while the user types elsewhere.
+// From the player's perspective the hidden game is always the active,
+// focused, visible application. These three queries complete the foreground
+// lie for menus and dialogs that check a different one than the title
+// screen; same spoof-active gate, same game-module-only scope.
+HWND WINAPI GetActiveWindowDetour() {
+  const auto orig = reinterpret_cast<GetForegroundWindowFn>(g_active_iat.original);
+  if (!g_focus_spoof_active.load(std::memory_order_acquire)) return orig();
+  const auto spoof = reinterpret_cast<HWND>(
+      g_focus_spoof_hwnd.load(std::memory_order_acquire));
+  if (spoof && IsWindow(spoof)) return spoof;
+  return orig();
+}
+
+HWND WINAPI GetFocusDetour() {
+  const auto orig = reinterpret_cast<GetForegroundWindowFn>(g_focuswnd_iat.original);
+  if (!g_focus_spoof_active.load(std::memory_order_acquire)) return orig();
+  const auto spoof = reinterpret_cast<HWND>(
+      g_focus_spoof_hwnd.load(std::memory_order_acquire));
+  if (spoof && IsWindow(spoof)) return spoof;
+  return orig();
+}
+
+BOOL WINAPI IsWindowVisibleDetour(HWND hwnd) {
+  const auto orig = reinterpret_cast<BOOL(WINAPI*)(HWND)>(g_visible_iat.original);
+  if (!hwnd || !IsWindow(hwnd)) return orig(hwnd);
+  if (!g_focus_spoof_active.load(std::memory_order_acquire)) return orig(hwnd);
+  // The tracked game windows render every frame into the headset; report
+  // them visible so visibility-gated UI keeps ticking. Our own module calls
+  // the real export (its IAT is untouched), so re-show detection is honest.
+  for (const auto& slot : g_no_mirror_wins) {
+    if (slot.hwnd == hwnd && (slot.hidden || slot.minimized)) return TRUE;
+  }
+  return orig(hwnd);
+}
+
+HWND WINAPI GetForegroundWindowDetour() {
+  const auto orig = reinterpret_cast<GetForegroundWindowFn>(g_fg_iat.original);
+  if (!g_focus_spoof_active.load(std::memory_order_acquire)) return orig();
+  const auto spoof = reinterpret_cast<HWND>(
+      g_focus_spoof_hwnd.load(std::memory_order_acquire));
+  if (spoof && IsWindow(spoof)) return spoof;
+  return orig();
+}
+
+// While the game window is hidden it must not confine or capture the user's
+// mouse: a clip rect around an invisible window is exactly the stuck-cursor
+// trap. Releases (NULL rect) always pass; confinement attempts are swallowed
+// with a success code so the game never retries. In-process only; mirror-on
+// passes everything through. Our own code never captures (verified), so no
+// caller gate is needed.
+BOOL WINAPI ClipCursorDetour(const RECT* rect) {
+  const auto orig = reinterpret_cast<ClipCursorFn>(g_clip_iat.original);
+  if (!rect) return orig(nullptr);
+  if (!g_focus_spoof_active.load(std::memory_order_acquire)) return orig(rect);
+  return TRUE;
+}
+
+HWND WINAPI SetCaptureDetour(HWND hwnd) {
+  if (!g_focus_spoof_active.load(std::memory_order_acquire))
+    return reinterpret_cast<SetCaptureFn>(g_capture_iat.original)(hwnd);
+  return hwnd;
+}
+
+void UpdateFocusSpoof(HWND hwnd, const Config& cfg) {
+  const bool active =
+      ShouldSpoofFocus(cfg.desktop_present, cfg.vr_enabled);
+  if (hwnd && IsWindow(hwnd))
+    g_focus_spoof_hwnd.store(reinterpret_cast<std::uintptr_t>(hwnd),
+                             std::memory_order_release);
+  const bool was = g_focus_spoof_active.exchange(active);
+  if (active && !was)
+    DSVR_LOG("Render: foreground spoof active (no-mirror input focus)");
 }
 
 bool InstallPresentResizeHooks(const char* hook_kind) {
@@ -430,6 +710,38 @@ bool InstallPresentResizeHooks(const char* hook_kind) {
     g_present_target = g_resize_target = nullptr;
     return false;
   }
+  {
+    // Game-local IAT patches: deterministic, no trampoline allocation, and
+    // scoped to the game module so our own UI, hotkeys and diagnostics keep
+    // calling the real exports.
+    HMODULE user32 = GetModuleHandleW(L"user32.dll");
+    const bool fg_ok = !g_fg_iat.slot &&
+        InstallIat(user32, "user32.dll", "GetForegroundWindow", g_fg_iat,
+                   reinterpret_cast<void*>(&GetForegroundWindowDetour),
+                   "FocusSpoof");
+    const bool active_ok = !g_active_iat.slot &&
+        InstallIat(user32, "user32.dll", "GetActiveWindow", g_active_iat,
+                   reinterpret_cast<void*>(&GetActiveWindowDetour),
+                   "ActiveSpoof");
+    const bool focuswnd_ok = !g_focuswnd_iat.slot &&
+        InstallIat(user32, "user32.dll", "GetFocus", g_focuswnd_iat,
+                   reinterpret_cast<void*>(&GetFocusDetour), "FocusWndSpoof");
+    const bool visible_ok = !g_visible_iat.slot &&
+        InstallIat(user32, "user32.dll", "IsWindowVisible", g_visible_iat,
+                   reinterpret_cast<void*>(&IsWindowVisibleDetour),
+                   "VisibleSpoof");
+    const bool clip_ok = !g_clip_iat.slot &&
+        InstallIat(user32, "user32.dll", "ClipCursor", g_clip_iat,
+                   reinterpret_cast<void*>(&ClipCursorDetour), "ClipGuard");
+    const bool capture_ok = !g_capture_iat.slot &&
+        InstallIat(user32, "user32.dll", "SetCapture", g_capture_iat,
+                   reinterpret_cast<void*>(&SetCaptureDetour), "CaptureGuard");
+    DSVR_LOG("Render: no-mirror input guards focus=%d active=%d focuswnd=%d "
+             "visible=%d clip=%d capture=%d "
+             "(hidden game keeps input, cannot trap the cursor)",
+             fg_ok ? 1 : 0, active_ok ? 1 : 0, focuswnd_ok ? 1 : 0,
+             visible_ok ? 1 : 0, clip_ok ? 1 : 0, capture_ok ? 1 : 0);
+  }
   DSVR_LOG("Render: Present+ResizeBuffers hook installed (%s, level=0x%x)",
            hook_kind, (unsigned)level);
   return true;
@@ -480,6 +792,20 @@ void RenderHookUninstall() {
   g_desktop_ready.store(false, std::memory_order_release);
   g_observer_menu_only.store(false, std::memory_order_release);
   g_reshade_bridge.SetReady(false);
+  RestoreNoMirrorWindows();
+  g_focus_spoof_active.store(false, std::memory_order_release);
+  RemoveIat(g_fg_iat, reinterpret_cast<void*>(&GetForegroundWindowDetour),
+            "FocusSpoof");
+  RemoveIat(g_active_iat, reinterpret_cast<void*>(&GetActiveWindowDetour),
+            "ActiveSpoof");
+  RemoveIat(g_focuswnd_iat, reinterpret_cast<void*>(&GetFocusDetour),
+            "FocusWndSpoof");
+  RemoveIat(g_visible_iat, reinterpret_cast<void*>(&IsWindowVisibleDetour),
+            "VisibleSpoof");
+  RemoveIat(g_clip_iat, reinterpret_cast<void*>(&ClipCursorDetour),
+            "ClipGuard");
+  RemoveIat(g_capture_iat, reinterpret_cast<void*>(&SetCaptureDetour),
+            "CaptureGuard");
   if (g_present_target) {
     MH_DisableHook(g_present_target);
     MH_DisableHook(g_resize_target);

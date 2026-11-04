@@ -17,6 +17,51 @@ int main() {
   check(near(dsvr::MenuWidth(2, 60), 2.309401f));
   check(dsvr::MenuWidth(2, 66) > dsvr::MenuWidth(2, 60));
   check(near(dsvr::MenuWidth(4, 60), 2 * dsvr::MenuWidth(2, 60)));
+  // A fixed 16:9 surface contains source images without stretching. Pointer
+  // rays in the matte area are ignored and the image edges map back to source.
+  {
+    float u = 0, v = 0;
+    const float wide_source = 3440.0f / 1440.0f;
+    constexpr float surface_aspect = 16.0f / 9.0f;
+    check(!dsvr::FitSurfaceUvToContent(.5f, .08f, surface_aspect,
+                                      wide_source, u, v));
+    check(dsvr::FitSurfaceUvToContent(.25f, .5f, surface_aspect,
+                                      wide_source, u, v));
+    check(near(u, .25f) && near(v, .5f));
+    check(dsvr::FitSurfaceUvToContent(.5f, .25f, surface_aspect,
+                                      wide_source, u, v));
+    const float visible_height = surface_aspect / wide_source;
+    check(near(v, (.25f - (1.0f - visible_height) * .5f) / visible_height));
+    const float narrow_source = 1280.0f / 1024.0f;
+    check(!dsvr::FitSurfaceUvToContent(.05f, .5f, surface_aspect,
+                                      narrow_source, u, v));
+    check(dsvr::FitSurfaceUvToContent(.5f, .5f, surface_aspect,
+                                      narrow_source, u, v));
+    check(near(u, .5f) && near(v, .5f));
+    dsvr::MenuPointerState pointer{};
+    pointer.valid = pointer.select = pointer.beam_valid = true;
+    pointer.x = 1720; pointer.y = 80;
+    pointer.beam_x = 1720; pointer.beam_y = 720;
+    dsvr::MapSurfacePointerToContent(pointer, 3440, 1440, surface_aspect);
+    check(!pointer.valid && !pointer.select && pointer.beam_valid);
+    pointer.valid = pointer.select = true;
+    pointer.x = 1720; pointer.y = 720;
+    dsvr::MapSurfacePointerToContent(pointer, 3440, 1440, surface_aspect);
+    check(pointer.valid && pointer.select && near(pointer.x, 1720) &&
+          near(pointer.y, 720));
+  }
+  // Horizon anchor: the merged theater panel sits at eye level straight ahead
+  // and never tilts with the head. The offset is purely horizontal, the caller
+  // supplied y passes through untouched, and the anchor faces back (yaw-only).
+  {
+    const float yaw = 0.7f, dist = 2.5f;
+    auto horizon = dsvr::MakeHorizonAnchor(1, 1.42f, -3, yaw, dist);
+    check(near(horizon.y, 1.42f));  // eye level, not the 5-degree down-tilt
+    check(near(horizon.x - 1, -std::sin(yaw) * dist));
+    check(near(horizon.z + 3, -std::cos(yaw) * dist));
+    check(near(std::hypot(horizon.x - 1, horizon.z + 3), dist));
+    check(near(horizon.yaw, yaw));
+  }
   // yaw = pi puts the anchor behind (-Z convention: z increases past origin).
   {
     auto behind = dsvr::MakeMenuAnchor(1, 1.65f, 3, 3.1415926536f, 2);

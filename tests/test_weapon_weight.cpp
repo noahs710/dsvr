@@ -21,6 +21,22 @@ void PrimeSwing(SwingAttackTrigger& trigger, const SwingAttackParams& params,
         "a stationary sample does not start an attack");
   now += 16;
 }
+namespace {
+// Controllable stand-in for the offline mass table (weapon_grip.cpp is not
+// linked here; production loads the real table at startup).
+int g_mass_id = -1;
+float g_mass_response = 1.0f;
+bool g_mass_hit = false;
+}  // namespace
+
+bool dsvr::WeaponMassGet(int weapon_id, dsvr::WeaponMassEntry& out) {
+  if (!g_mass_hit || weapon_id != g_mass_id) return false;
+  out = dsvr::WeaponMassEntry{};
+  out.weapon_id = weapon_id;
+  out.response = g_mass_response;
+  return true;
+}
+
 int main() {
   const SwingAttackParams base;  // shipped defaults
   Check(base.slash_speed_min == 2.0f && base.slash_heavy_min == 4.5f,
@@ -144,6 +160,43 @@ int main() {
     Check(fired && !heavy_fired,
           "the same speed qualifies as light, not strong, on a heavy weapon");
     Check(light_fired && light_heavy, "the same speed is a strong attack on a light weapon");
+  }
+
+  // Live-path response resolution: the equipped weapon table response, or the
+  // configured fallback when nothing is known. Fail-closed throughout.
+  g_mass_id = 212000; g_mass_response = 0.4f; g_mass_hit = true;
+  Check(SwingWeaponResponse(212000, true, 1.0f) == 0.4f,
+        "a bound greatsword resolves its lagging table response");
+  Check(SwingWeaponResponse(999999, true, 1.0f) == 1.0f,
+        "a table miss falls back to the configured response");
+  Check(SwingWeaponResponse(212000, false, 1.25f) == 1.25f,
+        "unbound equipment falls back to the configured response");
+  g_mass_response = -1.0f;
+  Check(TorqueGatedSpeed(8.0f, SwingWeaponResponse(212000, true, 1.0f)) == 0.0f,
+        "a corrupt table response gates the swing to a standstill, never to a fire");
+  // Commitment end to end: the same hand speed that smashes with a dagger
+  // barely registers with a greathammer.
+  g_mass_response = 0.4f;
+  {
+    SwingAttackTrigger hammer;
+    long long now = 0;
+    PrimeSwing(hammer, base, now);
+    bool fired = false;
+    for (int i = 0; i < 40 && !fired; ++i, now += 16)
+      fired = hammer.Feed(TorqueGatedSpeed(4.5f, SwingWeaponResponse(212000, true, 1.0f)), false, now, base).fired;
+    Check(!fired, "a greatsword swung at the heavy bar still needs more commitment");
+  }
+  g_mass_id = 100; g_mass_response = 2.0f;
+  {
+    SwingAttackTrigger dagger;
+    long long now = 0;
+    PrimeSwing(dagger, base, now);
+    bool heavy = false;
+    for (int i = 0; i < 40 && !heavy; ++i, now += 16) {
+      const auto out = dagger.Feed(TorqueGatedSpeed(2.5f, SwingWeaponResponse(100, true, 1.0f)), false, now, base);
+      if (out.fired) heavy = out.heavy;
+    }
+    Check(heavy, "a dagger flick at the light bar is already a strong attack");
   }
 
   std::printf(g_failed ? "weapon_weight: %d FAILED\n" : "weapon_weight: all checks passed\n",

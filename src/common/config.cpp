@@ -106,8 +106,12 @@ void Apply(Config& c, std::string_view section_raw, std::string_view key_raw,
       c.gameplay_theater = b;
     if (k == "mono_screen_fov_deg" && ParseFloat(value, f))
       c.mono_screen_fov_deg = Clamp(f, 30.0f, 110.0f);
-    if (k == "sanctuary_override" && ParseBool(value, b))
-      c.sanctuary_override = b;
+    // theater_override replaced the older sanctuary_override name; the old
+    // key still parses so existing ini files keep working.
+    if ((k == "theater_override" || k == "sanctuary_override") && ParseBool(value, b))
+      c.theater_override = b;
+    if (k == "theater_floor_grid" && ParseBool(value, b))
+      c.theater_floor_grid = b;
     if (k == "menu_distance_m" && ParseFloat(value, f) && std::isfinite(f))
       c.menu_distance_m = Clamp(f, 1.0f, 4.0f);
     if (k == "menu_reading_fov_deg" && ParseFloat(value, f) && std::isfinite(f))
@@ -116,8 +120,16 @@ void Apply(Config& c, std::string_view section_raw, std::string_view key_raw,
       c.force_disable_motion_blur = b;
     if (k == "stereo_enabled" && ParseBool(value, b)) c.stereo_enabled = b;
     if (k == "afr_enabled" && ParseBool(value, b)) c.afr_enabled = b;
-    if (k == "aa_mode" && ParseInt(value, i))
-      c.aa_mode = Clamp(i, 0, 3);
+    if (k == "aa_mode" && ParseInt(value, i)) {
+      if (i > 1) {
+        DSVR_WARN("Config: legacy eye-buffer MSAA mode %d is not scene MSAA; "
+                  "using FXAA instead", i);
+      }
+      c.aa_mode = Clamp(i > 1 ? 1 : i, 0, 1);
+    }
+    if (k == "cas_enabled" && ParseBool(value, b)) c.cas_enabled = b;
+    if (k == "cas_strength" && ParseFloat(value, f) && std::isfinite(f))
+      c.cas_strength = Clamp(f, 0.0f, 1.0f);
   } else if (s == "controls") {
     bool b;
     int i;
@@ -277,6 +289,11 @@ void Apply(Config& c, std::string_view section_raw, std::string_view key_raw,
       c.deflect_duration_ms = Clamp(i, 10, 120);
 
       if (k == "physical_defence" && ParseBool(value, b)) c.physical_defence = b;
+      if (k == "physical_two_hand" && ParseBool(value, b)) c.physical_two_hand = b;
+      if (k == "physical_skills" && ParseBool(value, b)) c.physical_skills = b;
+      if (k == "cast_aim" && ParseBool(value, b)) c.cast_aim = b;
+      if (k == "cast_aim_seconds" && ParseFloat(value, f))
+        c.cast_aim_seconds = f;
       if (k == "guard_settle_ms" && ParseInt(value, i))
       c.guard_settle_ms = Clamp(i, 0, 500);
       if (k == "guard_flick_speed_min" && ParseFloat(value, f))
@@ -451,7 +468,8 @@ bool ConfigSave(const wchar_t* toml_path, const Config& c) {
   
   
   
-  fprintf(f, "# false skips the desktop swapchain Present (XR still copies the backbuffer).\n");
+  fprintf(f, "# false (default) skips the desktop swapchain Present and hides the game window\n");
+  fprintf(f, "# while the headset session is visible (XR still copies the backbuffer).\n");
   fprintf(f, "desktop_present = %s\n", c.desktop_present ? "true" : "false");
   fprintf(f, "comfort_vignette = %s\n", c.comfort_vignette ? "true" : "false");
   fprintf(f, "vignette_strength = %s\n", FmtFloat(c.vignette_strength).c_str());
@@ -473,8 +491,10 @@ bool ConfigSave(const wchar_t* toml_path, const Config& c) {
   fprintf(f, "# mono_screen_fov_deg: virtual cinema screen width in mono mode\n");
   fprintf(f, "mono_screen_fov_deg = %s\n\n",
           FmtFloat(c.mono_screen_fov_deg).c_str());
-  fprintf(f, "# Spatial menu canvas: F8 toggles override, F6 recentres.\n");
-  fprintf(f, "sanctuary_override = %s\n", c.sanctuary_override ? "true" : "false");
+  fprintf(f, "# theater_override: F8 toggles the spatial menu panel, F6 recentres.\n");
+  fprintf(f, "theater_override = %s\n", c.theater_override ? "true" : "false");
+  fprintf(f, "# theater_floor_grid: subtle grid lines on the judged floor plane\n");
+  fprintf(f, "theater_floor_grid = %s\n", c.theater_floor_grid ? "true" : "false");
   fprintf(f, "menu_distance_m = %s\n", FmtFloat(c.menu_distance_m).c_str());
   fprintf(f, "menu_reading_fov_deg = %s\n", FmtFloat(c.menu_reading_fov_deg).c_str());
   fprintf(f, "# Setup enforces the game's Blur=0 while installed (restored on uninstall).\n");
@@ -483,8 +503,10 @@ bool ConfigSave(const wchar_t* toml_path, const Config& c) {
   fprintf(f, "stereo_enabled = %s\n", c.stereo_enabled ? "true" : "false");
   fprintf(f, "# Experimental: alternating eyes; refused unless stereo is active.\n");
   fprintf(f, "afr_enabled = %s\n", c.afr_enabled ? "true" : "false");
-  fprintf(f, "# Eye-buffer AA: 0 off, 1 FXAA, 2 MSAA 2x, 3 MSAA 4x (restart required).\n");
-  fprintf(f, "aa_mode = %d\n\n", c.aa_mode);
+  fprintf(f, "# Full-eye spatial AA: 0 off, 1 FXAA. MSAA/TAA require native scene inputs.\n");
+  fprintf(f, "aa_mode = %d\n", c.aa_mode);
+  fprintf(f, "cas_enabled = %s\n", c.cas_enabled ? "true" : "false");
+  fprintf(f, "cas_strength = %s\n\n", FmtFloat(c.cas_strength).c_str());
 
   fprintf(f, "[controls]\n");
   fprintf(f, "dominant_hand = \"%s\"\n",
@@ -592,6 +614,10 @@ bool ConfigSave(const wchar_t* toml_path, const Config& c) {
   fprintf(f, "# Physical defence bridge: a raised shield hand holds the native\n");
   fprintf(f, "# shield button wherever it is held; a flick taps it as a parry.\n");
   fprintf(f, "physical_defence = %s\n", c.physical_defence ? "true" : "false");
+  fprintf(f, "physical_two_hand = %s\n", c.physical_two_hand ? "true" : "false");
+  fprintf(f, "physical_skills = %s\n", c.physical_skills ? "true" : "false");
+  fprintf(f, "cast_aim = %s\n", c.cast_aim ? "true" : "false");
+  fprintf(f, "cast_aim_seconds = %s\n", FmtFloat(c.cast_aim_seconds).c_str());
   fprintf(f, "guard_settle_ms = %d\n", c.guard_settle_ms);
   fprintf(f, "guard_flick_speed_min = %s\n", FmtFloat(c.guard_flick_speed_min).c_str());
   fprintf(f, "guard_parry_press_ms = %d\n", c.guard_parry_press_ms);
@@ -635,11 +661,12 @@ bool ConfigValid(const Config& c) {
   };
   if (c.observer_only && c.vr_enabled) return false;
   if (c.combat_trace_only && !c.observer_only) return false;
-  if (c.aa_mode < 0 || c.aa_mode > 3) return false;
+  if (c.aa_mode < 0 || c.aa_mode > 1) return false;
   return c.render_scale_percent >= 50 && c.render_scale_percent <= 200 &&
       range(c.vignette_strength, 0, 1) && range(c.fov_scale, 0.7f, 1.3f) &&
       c.snap_turn_degrees >= 15 && c.snap_turn_degrees <= 90 &&
       range(c.smooth_turn_speed_dps, 30, 360) && range(c.mono_screen_fov_deg, 30, 110) &&
+      range(c.cas_strength, 0, 1) &&
       range(c.menu_distance_m, 1, 4) && range(c.menu_reading_fov_deg, 45, 80) &&
       range(c.eye_height, .5f, 2.5f) && range(c.world_scale, .5f, 2) &&
       range(c.seated_height_offset_m, 0, 1) &&

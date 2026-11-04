@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <limits>
 #include <span>
 
@@ -291,31 +292,6 @@ inline bool NeutralHandFallbackBasis(unsigned side, Vec3 right, Vec3 up,
   return arm_pose_detail::ValidMatrix(out);
 }
 
-// Transfer a valid hand's authored deviation from the expected outward/palm-down
-// stance to its opposite-side fallback. This changes only orientation, never a
-// wrist position or bone basis, and avoids mixing one native neutral with one
-// unrelated world-axis guess.
-inline bool MirrorNeutralHandBasis(const ArmPoseMatrix& source,
-                                   const ArmPoseMatrix& source_fallback,
-                                   const ArmPoseMatrix& target_fallback,
-                                   ArmPoseMatrix& out) {
-  using namespace arm_pose_detail;
-  if (!ValidMatrix(source) || !ValidMatrix(source_fallback) ||
-      !ValidMatrix(target_fallback))
-    return false;
-  out = {};
-  for (int axis = 0; axis < 3; ++axis) {
-    Vec3 local{};
-    if (!ArmPoseInversePoint(source_fallback, Column(source, axis), local))
-      return false;
-    const Vec3 mapped = ArmPoseTransformPoint(target_fallback, local);
-    out.m[axis] = mapped.x;
-    out.m[4 + axis] = mapped.y;
-    out.m[8 + axis] = mapped.z;
-  }
-  return ValidMatrix(out);
-}
-
 inline bool ResolveNeutralHandBases(const ArmPoseMatrix native[2],
                                     const bool native_valid[2], Vec3 right,
                                     Vec3 up, Vec3 forward,
@@ -334,19 +310,63 @@ inline bool ResolveNeutralHandBases(const ArmPoseMatrix native[2],
     source[side] = have_native[side] ? NeutralHandBasisSource::NativeBind
                                      : NeutralHandBasisSource::TposeFallback;
   }
-  if (have_native[0] != have_native[1]) {
-    const unsigned bound_side = have_native[0] ? 0u : 1u;
-    const unsigned missing_side = 1u - bound_side;
-    ArmPoseMatrix mirrored{};
-    if (MirrorNeutralHandBasis(native[bound_side], fallback[bound_side],
-                               fallback[missing_side], mirrored)) {
-      resolved[missing_side] = mirrored;
-      source[missing_side] = NeutralHandBasisSource::MirroredNativeBind;
-    }
-  }
+  // ponytail: each side keeps its own bind. A missing bind falls back to
+  // that side's own T-pose basis, never to the other hand's deviation.
   return arm_pose_detail::ValidMatrix(resolved[0]) &&
          arm_pose_detail::ValidMatrix(resolved[1]);
 }
+
+// Native hand orientation is a calibration reference, not a live animation.
+// Cache a valid bind pair per calibration and rig revision so later animation
+// frames cannot rotate the controller's neutral wrist.
+class NeutralHandBasisCache {
+ public:
+  bool Resolve(const ArmPoseMatrix native[2], const bool native_valid[2],
+               Vec3 right, Vec3 up, Vec3 forward,
+               std::uint64_t calibration_revision,
+               std::uint64_t rig_revision,
+               ArmPoseMatrix resolved[2],
+               NeutralHandBasisSource source[2]) {
+    if (!native || !native_valid || !resolved || !source) return false;
+    if (!valid_ || revision_ != calibration_revision || rig_revision_ != rig_revision) {
+      if (revision_ != calibration_revision || rig_revision_ != rig_revision) valid_ = false;
+      ArmPoseMatrix candidate[2]{};
+      NeutralHandBasisSource candidate_source[2]{};
+      if (!ResolveNeutralHandBases(native, native_valid, right, up, forward,
+                                   candidate, candidate_source))
+        return false;
+      resolved[0] = candidate[0];
+      resolved[1] = candidate[1];
+      source[0] = candidate_source[0];
+      source[1] = candidate_source[1];
+      const bool have_native =
+          (native_valid[0] && arm_pose_detail::ValidMatrix(native[0])) ||
+          (native_valid[1] && arm_pose_detail::ValidMatrix(native[1]));
+      if (have_native) {
+        bases_[0] = candidate[0];
+        bases_[1] = candidate[1];
+        sources_[0] = candidate_source[0];
+        sources_[1] = candidate_source[1];
+        revision_ = calibration_revision;
+        rig_revision_ = rig_revision;
+        valid_ = true;
+      }
+      return true;
+    }
+    resolved[0] = bases_[0];
+    resolved[1] = bases_[1];
+    source[0] = sources_[0];
+    source[1] = sources_[1];
+    return true;
+  }
+
+ private:
+  ArmPoseMatrix bases_[2]{};
+  NeutralHandBasisSource sources_[2]{};
+  std::uint64_t revision_ = 0;
+  std::uint64_t rig_revision_ = 0;
+  bool valid_ = false;
+};
 
 // Follow controller rotation relative to a captured native held stance. The
 // controller basis may contain the XR/native handedness reflection; using the

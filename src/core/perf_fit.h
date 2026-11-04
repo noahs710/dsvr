@@ -31,17 +31,23 @@ inline HardwareTier TierForHardware(const HardwareSpec& spec) {
   return HardwareTier::kPerformance;
 }
 
-// AA mode for the eye-buffer blit. FXAA is a fullscreen post pass (cheap,
-// always available); MSAA N x is real multisampling on the eye RTV (needs
-// runtime sample-count support, falls back to FXAA when unsupported).
-enum class AaMode { kOff = 0, kFxaa = 1, kMsaa2x = 2, kMsaa4x = 3 };
+// AA modes supported on the completed image DSVR receives. Quality-tier
+// auto-smooth selects MSAA 4x; other values are reserved for a future
+// native scene path and are never selected.
+enum class AaMode {
+  kOff = 0,
+  kFxaa = 1,
+  kMsaa2x = 2,
+  kMsaa4x = 3,
+  kTaa = 4,
+};
 
 // One launcher preset: stable id, eye-buffer scale and antialiasing.
 // Rates are not part of a preset. Mono defaults to 100% eye scale, stereo 85%.
 struct Preset {
   const char* id = "";
   int render_scale_percent = 100;
-  AaMode aa_mode = AaMode::kMsaa4x;
+  AaMode aa_mode = AaMode::kFxaa;
 };
 
 inline int DefaultScaleForStereo(bool stereo_enabled) {
@@ -50,10 +56,11 @@ inline int DefaultScaleForStereo(bool stereo_enabled) {
 
 inline Preset PresetForTier(HardwareTier tier, bool prefer_smooth) {
   Preset out{};
-  out.aa_mode = AaMode::kMsaa4x;
+  out.aa_mode = AaMode::kFxaa;
   if (prefer_smooth) {
     out.id = "auto-smooth";
     out.render_scale_percent = 100;
+    if (tier == HardwareTier::kQuality) out.aa_mode = AaMode::kMsaa4x;
   } else {
     out.id = "auto-res";
     out.render_scale_percent = tier == HardwareTier::kQuality ? 130 : 100;

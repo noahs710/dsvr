@@ -128,13 +128,33 @@ inline ScreenTangentExtents FitTheaterScreenToPixels(
   return {h, v};
 }
 
-// Where the theater panel lands in one eye buffer, in pixels. This is the one
-// tested implementation of the rect xr.cpp used to compute inline (with a dead
-// y_top and a hardcoded 0.5 vertical centre). The panel IS the game image: its
-// aspect comes from the source, so nothing is letterboxed inside it.
+// Where the fixed-aspect theater surface lands in one eye buffer, in pixels.
+// xr.cpp then fits the source image inside this centered rectangle without
+// stretching either the 16:9 panel or a differently shaped game backbuffer.
 struct PixelRect {
   float x = 0.0f, y = 0.0f, w = 0.0f, h = 0.0f;
 };
+
+inline constexpr float kTheaterAspect = 16.0f / 9.0f;
+
+// Fit the theater surface to a centered texture rectangle with its fixed
+// aspect. The game image is then contained inside that surface by the blitter.
+inline PixelRect FitPixelRectToAspect(PixelRect rect, float aspect,
+                                      float max_width, float max_height) {
+  if (!std::isfinite(rect.x) || !std::isfinite(rect.y) ||
+      !std::isfinite(rect.w) || !std::isfinite(rect.h) ||
+      !std::isfinite(aspect) || rect.w <= 0.0f || rect.h <= 0.0f ||
+      aspect <= 0.0f || max_width <= 0.0f || max_height <= 0.0f)
+    return {};
+  const float width = std::min({rect.w, rect.h * aspect, max_width,
+                                max_height * aspect});
+  const float height = width / aspect;
+  if (!std::isfinite(width) || !std::isfinite(height) ||
+      width <= 0.0f || height <= 0.0f)
+    return {};
+  return {rect.x + (rect.w - width) * 0.5f,
+          rect.y + (rect.h - height) * 0.5f, width, height};
+}
 
 inline PixelRect TheaterRectForEye(const ScreenTangentExtents& screen,
                                    const EyeFrustum& eye, float eye_width,

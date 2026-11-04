@@ -117,6 +117,27 @@ int main() {
     b.invalidate_during_poll = false;
     CHECK(h.Dispatch(b.source) == HostDispatch::Refused);
   }
+  {
+    // No-mirror window policy: hide only when the mirror is off, VR owns the
+    // frame loop, and the headset session is visible. Every other combination
+    // keeps the window so the game never loses its only display.
+    CHECK(ShouldHideDesktopWindow(false, true, true));
+    CHECK(!ShouldHideDesktopWindow(true, true, true));
+    CHECK(!ShouldHideDesktopWindow(false, false, true));
+    CHECK(!ShouldHideDesktopWindow(false, true, false));
+    CHECK(!ShouldHideDesktopWindow(true, false, false));
+    CHECK(!ShouldHideDesktopWindow(false, false, false));
+    // Minimize companion: mirror off + VR on + session not yet visible.
+    CHECK(ShouldMinimizeDesktopWindow(false, true, false));
+    CHECK(!ShouldMinimizeDesktopWindow(false, true, true));
+    CHECK(!ShouldMinimizeDesktopWindow(true, true, false));
+    CHECK(!ShouldMinimizeDesktopWindow(false, false, false));
+    // Focus spoof: mirror off + VR on, regardless of session visibility.
+    CHECK(ShouldSpoofFocus(false, true));
+    CHECK(!ShouldSpoofFocus(true, true));
+    CHECK(!ShouldSpoofFocus(false, false));
+    CHECK(!ShouldSpoofFocus(true, false));
+  }
   std::printf("render host: %d checks, %d failures\n", checks, failures);
   return failures ? 1 : 0;
 }

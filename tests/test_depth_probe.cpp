@@ -44,21 +44,39 @@ int main() {
   context->Draw(3, 0);           // non-indexed path (slot 13)
   context->DrawIndexed(3, 0, 0); // indexed path (slot 12); no IB bound is fine for counting
 
-  ID3D11Texture2D* main_colour = nullptr;
-  ID3D11Texture2D* main_depth = nullptr;
-  std::uint32_t w = 0, h = 0;
-  std::uint64_t draws = 0;
-  CHECK(dsvr::DepthProbeMainPair(main_colour, main_depth, w, h, draws));
-  CHECK(main_colour == colour && main_depth == depth);
-  CHECK(w == 1920 && h == 1080 && draws >= 2);
+  dsvr::DepthProbeFrameBoundary(nullptr, 1);
+  CHECK(dsvr::DepthProbeSceneSource() == nullptr);
+  context->OMSetRenderTargets(1, &rtv, nullptr);
+  context->Draw(3,0);
+  dsvr::DepthProbeFrameBoundary(nullptr, 2);
+  CHECK(dsvr::DepthProbeSceneSource() == colour);
+  dsvr::DepthProbeBeginInternalPass();
+  dsvr::DepthProbeEndInternalPass();
+  context->Draw(3, 0);
+  dsvr::DepthProbeFrameBoundary(nullptr, 2);
+  CHECK(dsvr::DepthProbeSceneSource() == colour);
+
+  desc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;
+  desc.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;
+  desc.Width=1537;desc.Height=877;
+  ID3D11Texture2D* sampled=nullptr;
+  ID3D11ShaderResourceView* sampled_view=nullptr;
+  CHECK(SUCCEEDED(device->CreateTexture2D(&desc,nullptr,&sampled)));
+  CHECK(SUCCEEDED(device->CreateShaderResourceView(sampled,nullptr,&sampled_view)));
+  context->PSSetShaderResources(0,1,&sampled_view);
+  context->Draw(3,0);
+  dsvr::DepthProbeFrameBoundary(colour,3);
+  CHECK(dsvr::DepthProbeSceneSource() == sampled);
 
   // Unbinding and drawing elsewhere must not disturb the recorded pair.
   context->OMSetRenderTargets(0, nullptr, nullptr);
   context->Draw(3, 0);
-  CHECK(dsvr::DepthProbeMainPair(main_colour, main_depth, w, h, draws));
-  CHECK(main_colour == colour && draws >= 2);
+  dsvr::DepthProbeFrameBoundary(nullptr,4);
+  CHECK(dsvr::DepthProbeSceneSource() == nullptr);
 
   dsvr::DepthProbeUninstall();
+  context->ClearState();
+  sampled_view->Release();sampled->Release();
   rtv->Release(); dsv->Release(); colour->Release(); depth->Release();
   context->Release(); device->Release();
   std::puts("PASS depth probe pair identification (WARP, not live rendering)");

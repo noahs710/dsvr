@@ -120,6 +120,14 @@ struct VrPadInput {
   // face. The caller owns the press window; this is one line held down for
   // that window, not a damage or target claim.
   bool reach_interact = false;
+  // Physical two-hand bridge: support-grip attach taps the game's own
+  // two-hand toggle (hold Y + tap the weapon-side shoulder). The game owns
+  // the stance and all of its rules; this line only requests the toggle.
+  bool two_hand_toggle = false;
+  // Skill flourish bridge: a short weapon-hand impulse that returns to
+  // rest taps the skill channel (LT). The game picks skill vs parry by
+  // equipment; this line only requests the tap.
+  bool skill_tap = false;
   // IK arms on: weapon-hand squeeze/trigger must NOT fire RB/RT canned
   // attacks (the arm itself is the attack). Off-hand, buttons, sticks
   // and menus are unaffected.
@@ -268,6 +276,11 @@ inline VirtualPadState MapVrPad(const VrPadInput& input,bool menu_navigation=fal
   // The reach gesture taps the same A the player's thumb would press. Which
   // object it lands on, and whether anything answers at all, is the game's.
   if (input.reach_interact) out.buttons |= kPadA;
+  if (input.two_hand_toggle) {
+    out.buttons |= kPadY;
+    out.buttons |= input.dominant_left ? kPadLeftShoulder : kPadRightShoulder;
+  }
+  if (input.skill_tap) out.left_trigger = 255;
   }
   return out;
 }

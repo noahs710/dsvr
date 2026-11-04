@@ -287,26 +287,41 @@ int CheckNeutralHandBasisSelection() {
   CHECK(!NeutralHandBasisDiagnosticReady(26,false));
   CHECK(NeutralHandBasisDiagnosticReady(26,true));
   CHECK(ResolveNeutralHandBases(native,valid,right,up,forward,resolved,source));
-  CHECK(source[0]==NeutralHandBasisSource::MirroredNativeBind);
+  // ponytail: no mirroring. The missing left bind uses its own T-pose
+  // fallback (side-specific axes), never the right hand's deviation.
+  CHECK(source[0]==NeutralHandBasisSource::TposeFallback);
   CHECK(source[1]==NeutralHandBasisSource::NativeBind);
   CHECK(std::memcmp(&resolved[1],&native[1],sizeof(native[1]))==0);
-  CHECK(std::fabs(resolved[0].m[0]-1.f)<1e-5f &&
-        std::fabs(resolved[0].m[5]-1.f)<1e-5f &&
-        std::fabs(resolved[0].m[10]-1.f)<1e-5f);
+  CHECK(std::fabs(resolved[0].m[0]+1.f)<1e-5f &&
+        std::fabs(resolved[0].m[4])<1e-5f &&
+        std::fabs(resolved[0].m[8])<1e-5f &&
+        std::fabs(resolved[0].m[1])<1e-5f &&
+        std::fabs(resolved[0].m[5])<1e-5f &&
+        std::fabs(resolved[0].m[9]+1.f)<1e-5f &&
+        std::fabs(resolved[0].m[2])<1e-5f &&
+        std::fabs(resolved[0].m[6]+1.f)<1e-5f &&
+        std::fabs(resolved[0].m[10])<1e-5f);
   valid[0]=true;valid[1]=false;native[0].m[0]=1.f;native[0].m[5]=1.f;native[0].m[10]=1.f;
   CHECK(ResolveNeutralHandBases(native,valid,right,up,forward,resolved,source));
   CHECK(source[0]==NeutralHandBasisSource::NativeBind);
-  CHECK(source[1]==NeutralHandBasisSource::MirroredNativeBind);
-  CHECK(std::fabs(resolved[1].m[0]+1.f)<1e-5f &&
-        std::fabs(resolved[1].m[5]-1.f)<1e-5f &&
-        std::fabs(resolved[1].m[10]+1.f)<1e-5f);
+  CHECK(source[1]==NeutralHandBasisSource::TposeFallback);
+  CHECK(std::memcmp(&resolved[0],&native[0],sizeof(native[0]))==0);
+  CHECK(std::fabs(resolved[1].m[0]-1.f)<1e-5f &&
+        std::fabs(resolved[1].m[4])<1e-5f &&
+        std::fabs(resolved[1].m[8])<1e-5f &&
+        std::fabs(resolved[1].m[1])<1e-5f &&
+        std::fabs(resolved[1].m[5])<1e-5f &&
+        std::fabs(resolved[1].m[9]-1.f)<1e-5f &&
+        std::fabs(resolved[1].m[2])<1e-5f &&
+        std::fabs(resolved[1].m[6]+1.f)<1e-5f &&
+        std::fabs(resolved[1].m[10])<1e-5f);
   valid[0]=valid[1]=false;
   CHECK(ResolveNeutralHandBases(native,valid,right,up,forward,resolved,source));
   CHECK(source[0]==NeutralHandBasisSource::TposeFallback &&
         source[1]==NeutralHandBasisSource::TposeFallback);
   return 0;
 }
-int CheckMirroredGripRoll() {
+int CheckIndividualGripRoll() {
   using namespace dsvr;
   const auto saved_tracking=latest;
   const float saved_roll=cfg.grip_roll_correction_deg;
@@ -337,13 +352,13 @@ int CheckMirroredGripRoll() {
         // Root columns are -camera right, camera up, -camera forward. With identity head
         // reference, XR -> model is diag(-1,1,1): +90 XR Z is -90 model Z,
         // whereas +90 XR X remains +90. The fixture twists only the left
-        // native hand bind by 90 degrees around its grip axis. The good right
-        // bind is mirrored into the left neutral frame: left identity, right
-        // diag(-1,1,-1). Native wrist->weapon remains -0.1 Z; the mirrored
-        // roll sign is checked against each hand's resulting basis.
+        // native hand bind by 90 degrees around its grip axis. Each arm
+        // calibrates from its own bind: left base {0,1,0 / 1,0,0 / 0,0,-1},
+        // right diag(-1,1,-1). Native wrist->weapon remains -0.1 Z; the
+        // roll sign stays side-only against each hand's resulting basis.
         const float angle=(side?-1.f:1.f)*degrees*.017453292f;
         const float c=std::cos(angle),s=std::sin(angle);
-        const float base[2][9]={{1,0,0,0,1,0,0,0,1},{-1,0,0,0,1,0,0,0,-1}};
+        const float base[2][9]={{0,1,0,1,0,0,0,0,-1},{-1,0,0,0,1,0,0,0,-1}};
         const float turn[3][9]={{1,0,0,0,1,0,0,0,1},{0,1,0,-1,0,0,0,0,1},{1,0,0,0,0,-1,0,1,0}};
         const float roll[9]={c,-s,0,s,c,0,0,0,1};
         float rolled[9]{},expected[9]{};
@@ -376,7 +391,11 @@ int CheckHandPublication() {
   const auto saved_tracking=latest;
   const auto saved_cfg=cfg;
   const auto saved_calibration=calibration;
+  const auto saved_equipment_available=equipment_available;
+  const auto saved_equipment_left_id=equipment_left_id;
+  const auto saved_equipment_stance=equipment_stance;
   cfg.combat_test_bench=true;cfg.motion_attacks=true;
+  equipment_available=true;equipment_left_id=200123;equipment_stance=3;
   const auto step=[] {
     ++latest.sequence;latest.predicted_time_ns+=12000000;
     Fresh();ArmIkTick(latest);callback(player.data());
@@ -389,7 +408,23 @@ int CheckHandPublication() {
     CombatBenchSnapshot bench;
     CHECK(ArmIkLatestHands(hands) && hands.side[0].valid && hands.side[1].valid);
     CHECK(hands.calibration_revision==calibration.revision);
+    CHECK(hands.sequence==latest.sequence && hands.epoch==latest.space_epoch &&
+          hands.captured_ms==latest.captured_ms &&
+          hands.predicted_time_ns==latest.predicted_time_ns);
+    CHECK(hands.native_update_id && hands.rig_revision &&
+          hands.equipment_bound && hands.weapon_id[0]==equipment_left_id &&
+          hands.weapon_id[1]==100000 && hands.native_stance==equipment_stance);
     CHECK(ArmIkCombatBench(bench) && bench.fresh);
+    CHECK(bench.sequence==hands.sequence &&
+          bench.native_update_id==hands.native_update_id);
+    const Vec3 weapon_origin=ArmPoseOrigin(hands.side[1].weapon);
+    const Vec3 grip_world=ArmPoseTransformPoint(hands.root,weapon_origin);
+    const Vec3 axis_model=ArmPoseTransformPoint(hands.side[1].weapon,{0,0,-1});
+    const Vec3 axis_world=ArmPoseTransformPoint(hands.root,axis_model);
+    const Vec3 direction=VNorm(VAdd(axis_world,VScale(grip_world,-1.f)));
+    const Vec3 expected_tip=VAdd(grip_world,VScale(direction,.9f));
+    CHECK(VLen(VAdd(bench.grip[1],VScale(grip_world,-1.f)))<1e-5f);
+    CHECK(VLen(VAdd(bench.tip[1],VScale(expected_tip,-1.f)))<1e-5f);
     const auto committed_tracking=latest;
     const auto committed_cfg=cfg;
     const auto before_writes=writes,before_originals=originals;
@@ -431,12 +466,41 @@ int CheckHandPublication() {
     CHECK(ArmIkLatestHands(hands) && ArmIkCombatBench(bench));
     CHECK(bench.tip_speed[0]==0 && bench.tip_speed[1]==0);
   }
+  step();
+  latest.head_pos[0]+=.1f;
+  latest.head_pos[1]-=.05f;
+  for(unsigned side=0;side<2;++side) {
+    latest.arm[side].pos[0]+=.1f;
+    latest.arm[side].pos[1]-=.05f;
+  }
+  ++latest.sequence;latest.predicted_time_ns+=12000000;
+  Fresh();ArmIkTick(latest);callback(player.data());
+  CombatBenchSnapshot head_relative;
+  CHECK(ArmIkCombatBench(head_relative));
+  CHECK(head_relative.tip_speed[0]<1e-4f && head_relative.tip_speed[1]<1e-4f);
   // A newer valid XR packet can coexist with the unchanged camera-bound
   // native pose. Sequence advancement alone does not end that lifetime.
   step();
   ArmIkHands committed,newer;
   CombatBenchSnapshot bench;
   CHECK(ArmIkLatestHands(committed));
+  CHECK(ArmIkCombatBench(bench));
+  const auto first_update_id=committed.native_update_id;
+  const auto bench_update_id=bench.native_update_id;
+  const auto first_speed0=bench.tip_speed[0],first_speed1=bench.tip_speed[1];
+  const auto first_event=bench.last_event,first_target=bench.last_target;
+  callback(player.data());
+  ArmIkHands repeated;
+  CombatBenchSnapshot repeated_bench;
+  CHECK(ArmIkLatestHands(repeated) && repeated.native_update_id>first_update_id);
+  CHECK(ArmIkCombatBench(repeated_bench));
+  CHECK(repeated_bench.sequence==bench.sequence &&
+        repeated_bench.native_update_id==repeated.native_update_id &&
+        repeated_bench.native_update_id>bench_update_id &&
+        repeated_bench.tip_speed[0]==first_speed0 &&
+        repeated_bench.tip_speed[1]==first_speed1 &&
+        repeated_bench.last_event==first_event &&
+        repeated_bench.last_target==first_target);
   ++latest.sequence;Fresh();camera_sequence=committed.sequence;
   CHECK(ArmIkLatestHands(newer) && newer.sequence==committed.sequence);
   CHECK(ArmIkCombatBench(bench));
@@ -456,6 +520,9 @@ int CheckHandPublication() {
     CHECK(ArmIkCombatBench(bench));
   }
   latest=saved_tracking;cfg=saved_cfg;calibration=saved_calibration;
+  equipment_available=saved_equipment_available;
+  equipment_left_id=saved_equipment_left_id;
+  equipment_stance=saved_equipment_stance;
   Fresh();ArmIkTick(latest);callback(player.data());
   return 0;
 }
@@ -478,10 +545,17 @@ int CheckCombatBench() {
   CHECK(bench.tip_speed[0]==0 && bench.tip_speed[1]==0);
   CHECK(bench_trace_samples>0 && last_bench_trace.seq==latest.sequence &&
         last_bench_trace.epoch==latest.space_epoch);
-  // Grip-local -Z follows the camera heading exactly once, even with
-  // this fixture's rotated native root. It is not a matrix row or +Z.
+  // Contact geometry follows the final verified native weapon pose.
+  ArmIkHands committed{};
+  CHECK(ArmIkLatestHands(committed));
+  const Vec3 grip=ArmPoseTransformPoint(
+      committed.root,ArmPoseOrigin(committed.side[1].weapon));
+  const Vec3 axis_model=ArmPoseTransformPoint(
+      committed.side[1].weapon,{0,0,-1});
+  const Vec3 axis_world=ArmPoseTransformPoint(committed.root,axis_model);
+  const Vec3 expected_direction=VNorm(VAdd(axis_world,VScale(grip,-1.f)));
   const Vec3 direction=VNorm(VAdd(bench.tip[1],VScale(bench.grip[1],-1)));
-  CHECK(VLen(VAdd(direction,VScale(Vec3{.04822187f,0,.99883664f},-1)))<.0001f);
+  CHECK(VLen(VAdd(direction,VScale(expected_direction,-1.f)))<.0001f);
   // Physical walking and native root translations cannot become attack energy.
   for(int i=0;i<3;++i) {
     latest.head_pos[0]+=.04f;
@@ -606,7 +680,8 @@ int main() {
   // Isolate tracking rotation; configured roll is exercised separately below.
   cfg.grip_roll_correction_deg=0;
   latest.focused=latest.orientation_valid=latest.position_valid=true;
-  latest.sequence=1;latest.space_epoch=1;latest.head_pos[1]=1.5f;
+  latest.sequence=1;latest.space_epoch=1;latest.predicted_time_ns=12000000;
+  latest.head_pos[1]=1.5f;
   for (int side=0;side<2;++side) {
     latest.arm[side].valid=true;latest.arm[side].pos[0]=side?.35f:-.35f;
     latest.arm[side].pos[1]=1.1f;latest.arm[side].pos[2]=-.2f;
@@ -671,17 +746,46 @@ int main() {
   latest.arm[0].quat[2]=.70710678f;latest.arm[0].quat[3]=.70710678f;
   Fresh();ArmIkTick(latest);callback(player.data());
   // With both controllers co-located, a 90-degree turn must move the left
-  // wrist from the mirrored neutral basis to columns [0,-1,0] / [1,0,0].
+  // wrist from its own calibrated neutral basis (the authored quarter-turn
+  // bind, never a mirror of the right) to columns [1,0,0] / [0,-1,0].
   // The unturned right hand keeps its known-good baseline.
-  CHECK(std::fabs(poses[26].m[0])<1e-4f && poses[26].m[4]<-.999f);
-  CHECK(std::fabs(poses[26].m[1]-1)<1e-4f && std::fabs(poses[26].m[5])<1e-4f);
+  CHECK(std::fabs(poses[26].m[0]-1)<1e-4f && std::fabs(poses[26].m[4])<1e-4f);
+  CHECK(std::fabs(poses[26].m[1])<1e-4f && std::fabs(poses[26].m[5]+1)<1e-4f);
   CHECK(std::fabs(poses[43].m[0]+1)<1e-4f && std::fabs(poses[43].m[4])<1e-4f);
   latest.arm[0].quat[2]=0;latest.arm[0].quat[3]=1;
   Fresh();ArmIkTick(latest);callback(player.data());
   CHECK(CheckNeutralHandBasisSelection() == 0);
+  {
+    // A respawn can bind a fresh native rig whose hand palette has a different
+    // neutral twist. With unchanged tracking and calibration, the avatar hand
+    // must keep the same neutral orientation across that lifecycle rebind.
+    const auto calibrated_hand = poses[43];
+    const auto saved_native = native;
+    const auto rotate_z = [](ArmPoseMatrix& pose) {
+      const float x = pose.m[3], y = pose.m[7];
+      pose.m[0] = 0; pose.m[1] = -1;
+      pose.m[4] = 1; pose.m[5] = 0;
+      pose.m[3] = x; pose.m[7] = y;
+    };
+    rotate_z(native[43]);
+    rotate_z(native[53]);
+    rebound_entries = entries;
+    Put(flver, 0x18, Ptr(rebound_entries));
+    for (int frame = 0; frame < 2; ++frame) {
+      ++latest.sequence; Fresh(); ArmIkTick(latest); callback(player.data());
+    }
+    for (int axis = 0; axis < 3; ++axis) {
+      const Vec3 before = VNorm(arm_pose_detail::Column(calibrated_hand, axis));
+      const Vec3 after = VNorm(arm_pose_detail::Column(poses[43], axis));
+      CHECK(VDot(before, after) > .999f);
+    }
+    native = saved_native;
+    Put(flver, 0x18, Ptr(entries));
+    ++latest.sequence; Fresh(); ArmIkTick(latest); callback(player.data());
+  }
   latest.arm[0].pos[0]=-.35f;latest.arm[0].pos[1]=1.1f;latest.arm[0].pos[2]=-.2f;
   latest.arm[1].pos[0]=.35f;latest.arm[1].pos[1]=1.1f;latest.arm[1].pos[2]=-.2f;
-  CHECK(CheckMirroredGripRoll() == 0);
+  CHECK(CheckIndividualGripRoll() == 0);
   CHECK(CheckCombatBench() == 0);
   CHECK(CheckHandPublication() == 0);
   {
@@ -1063,6 +1167,15 @@ int main() {
       CHECK(VLen(arm_pose_detail::Sub(ArmPoseOrigin(copied_body[row]),ArmPoseOrigin(poses[row])))<1e-6f);
       CHECK(std::fabs(VLen(arm_pose_detail::Column(copied_body[row],1))-.95f)<1e-5f);
       CHECK(std::fabs(VLen(arm_pose_detail::Column(poses[row],1))-1.f)<1e-5f);
+    }
+    for(unsigned side=0;side<2;++side) {
+      const unsigned hand=side?43u:26u,weapon=side?53u:36u;
+      CHECK(std::memcmp(&published.side[side].hand,&copied_body[hand],
+                        sizeof(ArmPoseMatrix))==0);
+      CHECK(std::memcmp(&published.side[side].weapon,&copied_body[weapon],
+                        sizeof(ArmPoseMatrix))==0);
+      CHECK(std::fabs(VLen(arm_pose_detail::Column(
+          published.side[side].hand,1))-.95f)<1e-5f);
     }
     for(unsigned mutation:{1u,2u}) {
       mutate_before_copy=mutation;

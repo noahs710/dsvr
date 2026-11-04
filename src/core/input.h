@@ -26,6 +26,9 @@ namespace dsvr {
 
 struct HandSample {
   bool valid = false;
+  bool tracking_flags_available = false;
+  bool position_tracked = false;
+  bool orientation_tracked = false;
   float pos[3] = {0, 0, 0};        // grip position, XR LOCAL space (m)
   float quat[4] = {0, 0, 0, 1};    // grip orientation (xyzw)
   float blade_dir[3] = {0, 0, -1}; // unit, hand_math.h convention
@@ -35,6 +38,8 @@ struct HandSample {
   float linear_velocity[3] = {0, 0, 0};  // runtime grip velocity, XR local m/s
   float angular_velocity[3] = {0, 0, 0}; // runtime grip velocity, rad/s
   unsigned velocity_flags = 0;      // OpenXR linear/angular validity bits
+  bool linear_velocity_valid = false;
+  bool angular_velocity_valid = false;
   std::uint64_t space_epoch = 0;
   long long predicted_ns = 0;       // OpenXR time; not QPC
   bool squeeze_held = false;
@@ -49,6 +54,9 @@ struct HandSample {
 // Continuous arm target for the IK driver / H5 (one per logical hand).
 struct ArmTarget {
   bool valid = false;
+  bool tracking_flags_available = false;
+  bool position_tracked = false;
+  bool orientation_tracked = false;
   float pos[3] = {0, 0, 0};        // grip, XR LOCAL (m)
   float quat[4] = {0, 0, 0, 1};
   float blade_dir[3] = {0, 0, -1};
@@ -122,6 +130,9 @@ bool InputLatestRoomscaleMotion(RoomscaleMotion& out);
 void InputCopyTrackingSamples(HandSample hands[2], ArmTarget arms[2]);
 
 bool InputAvailable();
+// True only for a focused, non-menu gameplay frame with both tracked grips
+// still and all gameplay inputs neutral. Calibration uses this as a gate.
+bool InputCalibrationRefinementSafe();
 bool InputLatestHand(bool left, HandSample& out);
 // Native selection producer seam (H1): the interaction observer publishes
 // the selected row/object/generation/dummy here; the reach gate reads the

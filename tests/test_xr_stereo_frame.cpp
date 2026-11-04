@@ -14,6 +14,7 @@ bool acquired[2]{}, ready[2]{}, begun = false, bad = false;
 bool should_render = true, bad_pose = false;
 uint32_t view_count = 2, submitted = 0, ends = 0, waits = 0, acquires = 0;
 uint32_t head_locates = 0;
+XrExtent2Di image_extents[2]{};
 XrViewStateFlags view_flags = XR_VIEW_STATE_ORIENTATION_VALID_BIT | XR_VIEW_STATE_POSITION_VALID_BIT;
 XrSpaceLocationFlags head_flags = XR_SPACE_LOCATION_ORIENTATION_VALID_BIT |
                                 XR_SPACE_LOCATION_POSITION_VALID_BIT;
@@ -92,6 +93,7 @@ XRAPI_ATTR XrResult XRAPI_CALL xrEndFrame(XrSession, const XrFrameEndInfo* info)
   submitted = info->layerCount;
   if (submitted) {
     const auto* layer = reinterpret_cast<const XrCompositionLayerProjection*>(info->layers[0]);
+    for (unsigned eye=0;eye<2;++eye) image_extents[eye]=layer->views[eye].subImage.imageRect.extent;
     if (layer->viewCount != 2 || layer->space != space || acquired[0] || acquired[1] ||
         layer->views[0].pose.position.x >= 0 || layer->views[1].pose.position.x <= 0 ||
         layer->views[0].subImage.swapchain != chains[0] ||
@@ -124,7 +126,10 @@ int main() {
   CHECK(frame.Acquire(chains[0], chains[1]));
   CHECK(!frame.Acquire(chains[0], chains[1]));
   CHECK(frame.ImageIndex(0) == 1 && frame.ImageIndex(1) == 2);
-  CHECK(frame.Submit(1000, 1000) && submitted == 1 && !frame.Busy());
+  const uint32_t widths[2]{1000,1027}, heights[2]{1000,997};
+  CHECK(frame.Submit(widths, heights) && submitted == 1 && !frame.Busy());
+  CHECK(image_extents[0].width==1000 && image_extents[0].height==1000);
+  CHECK(image_extents[1].width==1027 && image_extents[1].height==997);
   CHECK(!frame.Submit(1000, 1000));
   frame.Cancel(); CHECK(ends == 1);
 

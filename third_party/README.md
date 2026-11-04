@@ -25,6 +25,11 @@ project's own harness; Catch2 is not a runtime dependency. Windows graphics
 libraries are system components. No game files or FPDSR/ERVR binaries ship.
 
 FPDSR v1.5 and ERVR 0.4.0 informed static research and design; this is not
-an endorsement by their authors. DSVR's original code is MIT (see LICENSE).
+an endorsement by their authors. DSVR's original code is MIT (see LICENSE). Lane-C slice C2 (cast-aim selection, bow steering) and the equipment-wheel decisions adapt the DESIGNS of ERVR's two_hand_aim.h, cast-aim selection and weapon_wheel_logic.h (GPL-3.0, (c) Ilya Mezerowsky, https://github.com/IlyaMez/EldenringVR), reimplemented for DSVR types; no ERVR code is copied, so the MIT grant stands. If ERVR expression is ever pasted in verbatim, the combined work must ship under GPL-3.0 instead.
 AI-assisted development: OpenCode with OpenAI GPT-6.1 Sol contributed to this
 candidate's preparation; it has not been certified by human headset review.
+
+The mono OpenXR post-process adapts the no-scaling FidelityFX Contrast
+Adaptive Sharpening (CAS) algorithm. Its MIT notice ships in
+`licenses/FidelityFX-CAS-LICENSE.txt`.
+https://github.com/GPUOpen-Effects/FidelityFX-CAS

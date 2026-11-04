@@ -652,6 +652,7 @@ bool CameraHeadBasis(Vec3& right, Vec3& up, Vec3& fwd) {
   return true;
 }
 
+
 // The locomotion basis is the planar heading of the camera we just wrote. When
 // it cannot be produced the left stick falls back to raw, so name the reason
 // once instead of letting the player discover it as an unresponsive control.

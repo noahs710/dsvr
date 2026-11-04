@@ -12,13 +12,16 @@ void ModMenuClose();
 // "Close menu anyway" button for headless coverage (no modal click possible).
 void ModMenuCloseForTest();
 bool ModMenuVisible();
+bool ModMenuSettingsOpen();
 bool ModMenuCapturesInput();
 // select is the A/confirm button only; triggers belong to the spatial ray.
 // prev_panel/next_panel are the left hand's X/Y while the menu captures input:
 // the headset has no keyboard, so this is the only way to change screens.
 void ModMenuControllerInput(float x, float y, bool select, bool back,
                             bool prev_panel = false, bool next_panel = false);
-void ModMenuRenderTexture(ID3D11Device* device, ID3D11Texture2D* image);
+bool ModMenuRenderTexture(ID3D11Device* device, ID3D11Texture2D* image,
+                         bool clear_transparent = false,
+                         const char* render_status = nullptr);
 void ModMenuShutdown();
 using ModMenuPanel = void (*)();
 // Register during startup. IDs/names are copied; duplicate IDs are refused.
