@@ -8474,3 +8474,14 @@ Actions: four scoped commits (core+tests; tools; launcher; docs+plan) naming oth
 Files and symbols touched: MODLOG.md only (this entry); commits listed in git log.
 Next exact action: seal candidate r12 from the committed tree, run Check, then the first live autopilot.py run for PLAN stage 1.
 ]
+
+[
+### 4 Nov 2026 - First autopilot live run ABORTED: invisible game ate user inputs; runner self-closed on two instances; install restored
+Task ID / objective: first live tools/hmd/autopilot.py run on candidate r12 (PLAN stage 1 proof attempt).
+What happened: Check PASS (2.5 s), game PID 46128 booted 13:52:25 under the simulator, menus reached gameplay=1 at 13:57:43 by operator E presses. The autopilot itself never got past launch: it waits for a live CombatHealth player BEFORE its menu phase, but the player only exists after menu navigation (phase-order bug), so the operator took over with the proven run-21 pattern. The sim driver's own menu program failed one ray-hold ("Capture expired...") and ended FAIL at 13:55:48, as in run 20. CombatHealth stayed equipment=0 throughout (observer never bound the player this session).
+Failure that ended it: the game window is hidden by the no-mirror harness while the game consumes global DirectInput/XInput, so the user's own button presses (unaware a game was live) drove the invisible game. The runner then threw "Two game instances are live; this session launched one; do not change files beneath them" (run_combat_capture.ps1:625) during its close and died before Restore; receipt left at Preparing. Whether a second DSR process really existed is unresolved - both were gone by inspection time.
+Recovery: manual -Mode Restore EXIT: "Restored and hash-verified original save roots and install files." Orphaned upstream simulator processes (42232/42208) stopped. No game, runner, sim or autopilot process remains; no combat trace was produced (the session trace never opened; DSVR-native.log retained in the run dir).
+Rules set by this: (1) game and sim windows get unhidden BEFORE boot in every future run - the user asked twice before; (2) confirm the user is away (or explicitly watching) before any automated input; (3) autopilot live role is benched until the phase order is fixed (menu nav before wait-player) and boot-time unhide is built in. The r12 candidate and the four landing commits are unaffected.
+Files and symbols touched: MODLOG.md; evidence in build/verification/autopilot-20261104-1352/ (receipt, mcp-run.json FAIL, DSVR-native.log).
+Next exact action: fix autopilot phase order + unhide-at-boot + user-presence confirmation, offline-test with SelfTest, then re-attempt stage 1 only when the user says go.
+]
