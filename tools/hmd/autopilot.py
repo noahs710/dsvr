@@ -25,7 +25,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 GAME_DIR = Path(r"C:/Program Files (x86)/Steam/steamapps/common/DARK SOULS REMASTERED")
 RUNNER = REPO / "tools" / "run_combat_capture.ps1"
-DEFAULT_CANDIDATE = REPO / "build/verification/synthetic-hmd-game-20261104-r11/candidate-final-receipt.json"
+DEFAULT_CANDIDATE = REPO / "build/verification/synthetic-hmd-game-20261104-r12/candidate-final-receipt.json"
 
 VK = {"E": 0x45, "W": 0x57, "A": 0x41, "S": 0x53, "D": 0x44,
       "H": 0x48, "U": 0x55, "R": 0x52, "SPACE": 0x20}
@@ -357,13 +357,15 @@ def verdict_for(trace: Path) -> dict:
 
 PHASES = [
     ("check", "pwsh -Mode Check against the candidate (read-only)"),
-    ("launch", "pwsh -Mode Launch, short budgets (soak 240, menu 300, window 30)"),
-    ("wait-player", "poll DSVR.log for a live CombatHealth player line"),
-    ("menu", "E presses gated on two sim screenshot checkpoints"),
-    ("walk", "closed-loop legs steered by trace camera position to the gate"),
+    ("launch", "pwsh -Mode Launch (detached), short driver budgets"),
+    ("wait-game", "poll for the game process"),
+    ("unhide", "show the game windows before any key is sent"),
+    ("menu", "E presses gated on the InputRoute gameplay flip"),
+    ("wait-player", "poll DSVR.log for CombatHealth equipment=1"),
+    ("walk", "scripted legs toward the gate (same seed/spawn)"),
     ("combat", "go-capture + firebomb volley (R) + H taps; watch footer"),
-    ("verdict", "analyze the capture; PASS needs a target HP drop"),
-    ("close", "Finish, WM_CLOSE hidden window, wait exit, Restore (timed)"),
+    ("verdict", "analyze the capture; PASS needs an enemy HP drop"),
+    ("close", "Finish, WM_CLOSE, wait exit, Restore (always runs)"),
 ]
 
 
@@ -400,29 +402,58 @@ def cmd_run(candidate):
     timed("check", phase_check)
 
     def phase_launch():
-        r = pwsh_runner("-Mode", "Launch", *base, "-WindowMinutes", "30",
-                        "-MenuBudgetSeconds", "300", "-SimulatorSoakSeconds", "240")
-        if r.returncode != 0:
-            raise SystemExit(f"LAUNCH FAIL: {r.stdout} {r.stderr}")
+        # Fire-and-forget: the Launch invocation spawns the detached Run
+        # child and exits; waiting on its pipes can hang on inherited
+        # handles, so poll for the launch record instead.
+        subprocess.Popen(
+            ["pwsh", "-NoProfile", "-File", str(RUNNER), "-Mode", "Launch",
+             *base, "-WindowMinutes", "30", "-MenuBudgetSeconds", "60",
+             "-SimulatorSoakSeconds", "180"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=REPO)
+        poll(lambda: (run_dir / "receipt.json.launch.json").exists()
+             or None, 60, interval=0.5, what="launch record")
     timed("launch", phase_launch)
 
-    pid = timed("wait-game", lambda: poll(game_pid, 120, what="game process"))
+    pid = None
+
+    def phase_wait_game():
+        nonlocal pid
+        pid = poll(game_pid, 120, what="game process")
+        return pid
+    timed("wait-game", phase_wait_game)
     sim_dir = run_dir / "simxr-data"
     log = LogTail()
 
-    def phase_player():
-        log.wait_for("CombatHealth: equipment=1", 120)
-    timed("wait-player", phase_player)
+    def phase_unhide():
+        # The harness hides the game window while it consumes global input;
+        # the user must be able to see it before any key is sent.
+        u = ctypes.windll.user32
+        shown = []
+        for hwnd, title in enum_windows(pid):
+            u.ShowWindow(hwnd, 5)
+            shown.append(title or "(untitled)")
+        print(f"unhidden game windows: {shown}", flush=True)
+    timed("unhide", phase_unhide)
 
     def phase_menu():
-        # Two screenshot gates only: dialog, then main menu.
-        key(VK["E"])
-        request_shot(sim_dir, "menu1")
-        key(VK["E"])
-        request_shot(sim_dir, "menu2")
-        key(VK["E"])
-        log.wait_for("InputBridges", 60)
+        # E navigates dialog -> offline notice -> main menu (Continue loads
+        # the save). Gate each press on the InputRoute gameplay flip; the
+        # player cannot exist before this, so it comes before wait-player.
+        for attempt in range(4):
+            key(VK["E"])
+            try:
+                log.wait_for("gameplay=1", 12)
+                return
+            except Deadline:
+                print(f"menu: E{attempt + 1} no gameplay yet", flush=True)
+        raise Deadline("menu navigation never reached gameplay")
     timed("menu", phase_menu)
+
+    def phase_player():
+        # Fail fast if the equipment read never binds the local player:
+        # combat evidence is meaningless without it.
+        log.wait_for("CombatHealth: equipment=1", 90)
+    timed("wait-player", phase_player)
 
     def phase_walk():
         # Scripted legs (same seed/spawn as runs 17-22) with log sanity gates.
@@ -459,19 +490,31 @@ def cmd_run(candidate):
         (run_dir / "verdict.json").write_text(json.dumps(v, indent=1))
         print(json.dumps(v, indent=1), flush=True)
         return v
-    verdict = timed("verdict", phase_verdict)
 
     def phase_close():
         pwsh_runner("-Mode", "Finish", *base)
-        for hwnd, title in enum_windows(pid):
-            ctypes.windll.user32.PostMessageW(hwnd, 0x10, 0, 0)
-        poll(lambda: game_pid() is None, 120, interval=1.0, what="game exit")
+        if pid:
+            for hwnd, title in enum_windows(pid):
+                ctypes.windll.user32.PostMessageW(hwnd, 0x10, 0, 0)
+        poll(lambda: game_pid() is None, 120, interval=1.0,
+             what="game exit")
         t0 = time.time()
         r = pwsh_runner("-Mode", "Restore", *base, timeout=170)
-        print(f"restore exit={r.returncode} in {time.time() - t0:.1f}s", flush=True)
+        print(f"restore exit={r.returncode} in "
+              f"{time.time() - t0:.1f}s", flush=True)
         if r.returncode != 0:
             raise SystemExit(f"RESTORE FAIL: {r.stdout} {r.stderr}")
-    timed("close", phase_close)
+
+    verdict = None
+    try:
+        timed("unhide", phase_unhide)
+        timed("menu", phase_menu)
+        timed("wait-player", phase_player)
+        timed("walk", phase_walk)
+        timed("combat", phase_combat)
+        verdict = timed("verdict", phase_verdict)
+    finally:
+        timed("close", phase_close)
     print(f"DONE verdict={verdict['verdict']} run_dir={run_dir}")
     return 0 if verdict["verdict"] == "PASS" else 1
 
