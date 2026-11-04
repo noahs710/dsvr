@@ -2,17 +2,17 @@
 """State-driven autopilot for DSVR sim validation runs.
 
 Drives the protected OpenXR-Simulator transaction on state oracles (mod log
-lines, live trace records) instead of screenshot steering. See
-docs/superpowers/specs/2026-11-04-autopilot-design.md.
+lines, live trace records) instead of screenshot steering.
 
 Subcommands:
   plan                 print phases, no side effects
   analyze TRACE        offline verdict on a saved capture (seconds)
-  run                  full transaction: check, launch, menu, walk, combat,
-                       verdict, close, restore; writes verdict.json
+  run                  attempts check, launch, menu, walk, combat, verdict,
+                       close and restore; writes verdict.json after analysis
 
-Proof bar: PASS only when a paired distinct-actor contact shows the target
-losing HP. Counters alone never pass.
+The offline verdict is PASS only when a paired distinct-actor contact shows
+target HP loss. A live acceptance also needs a complete trace and restored
+receipt; the analyzer does not enforce those transaction requirements.
 """
 import ctypes
 import json
@@ -25,10 +25,10 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 GAME_DIR = Path(r"C:/Program Files (x86)/Steam/steamapps/common/DARK SOULS REMASTERED")
 RUNNER = REPO / "tools" / "run_combat_capture.ps1"
-DEFAULT_CANDIDATE = REPO / "build/verification/synthetic-hmd-game-20261104-r12/candidate-final-receipt.json"
+DEFAULT_CANDIDATE = REPO / "build/verification/synthetic-hmd-game-20261104-r13/candidate-final-receipt.json"
 
-VK = {"E": 0x45, "W": 0x57, "A": 0x41, "S": 0x53, "D": 0x44,
-      "H": 0x48, "U": 0x55, "R": 0x52, "SPACE": 0x20}
+VK = {"W": 0x57, "H": 0x48, "R": 0x52}
+ACTIVE_GAME_PID = None
 
 
 class Deadline(Exception):
@@ -47,34 +47,20 @@ def poll(fn, deadline_s, interval=0.2, what="condition"):
 
 
 def key(vk, down_s=0.15):
-    u = ctypes.windll.user32
-    u.keybd_event(vk, 0, 0, 0)
-    time.sleep(down_s)
-    u.keybd_event(vk, 0, 2, 0)
+    hold(vk, down_s)
 
 
 def hold(vk, seconds):
     u = ctypes.windll.user32
+    require_game_foreground(u)
     u.keybd_event(vk, 0, 0, 0)
-    time.sleep(seconds)
-    u.keybd_event(vk, 0, 2, 0)
-
-
-def mouse_yaw(hwnd, dx):
-    """Click the sim preview to capture the mouse, then yaw by dx pixels."""
-    from ctypes import wintypes
-    u = ctypes.windll.user32
-    r = wintypes.RECT()
-    u.GetWindowRect(hwnd, ctypes.byref(r))
-    cx, cy = (r.left + r.right) // 2, (r.top + r.bottom) // 2
-    u.SetCursorPos(cx, cy)
-    time.sleep(0.2)
-    u.mouse_event(0x0002, 0, 0, 0, 0)
-    time.sleep(0.05)
-    u.mouse_event(0x0004, 0, 0, 0, 0)
-    time.sleep(0.3)
-    u.mouse_event(0x0001, dx, 0, 0, 0)
-    time.sleep(0.4)
+    try:
+        until = time.monotonic() + seconds
+        while time.monotonic() < until:
+            require_game_foreground(u)
+            time.sleep(min(0.05, max(until - time.monotonic(), 0)))
+    finally:
+        u.keybd_event(vk, 0, 2, 0)
 
 
 def enum_windows(pid):
@@ -98,6 +84,26 @@ def enum_windows(pid):
     return out
 
 
+def require_game_foreground(user32):
+    if not game_foreground(user32):
+        raise RuntimeError("refusing global key input: owned game is not foreground")
+
+
+def game_foreground(user32):
+    from ctypes import wintypes
+    current = wintypes.DWORD()
+    user32.GetWindowThreadProcessId(user32.GetForegroundWindow(),
+                                    ctypes.byref(current))
+    return bool(ACTIVE_GAME_PID and current.value == ACTIVE_GAME_PID)
+
+
+def read_receipt(path):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
 def game_pid():
     out = subprocess.run(
         ["powershell", "-NoProfile", "-Command",
@@ -116,32 +122,30 @@ class LogTail:
 
     def __init__(self, path=GAME_DIR / "DSVR.log"):
         self.path = path
-        self.pos = path.stat().st_size if path.exists() else 0
+        initial = path.stat() if path.exists() else None
+        self.pos = initial.st_size if initial else 0
+        self.created_ns = initial.st_ctime_ns if initial else None
+        self.carry = b""
 
     def wait_for(self, needle, deadline_s):
         def probe():
             if not self.path.exists():
                 return None
+            state = self.path.stat()
+            if state.st_ctime_ns != self.created_ns or state.st_size < self.pos:
+                self.pos = 0
+                self.carry = b""
+                self.created_ns = state.st_ctime_ns
             with open(self.path, "rb") as f:
                 f.seek(self.pos)
                 data = f.read()
                 self.pos = f.tell()
-            return needle.encode() in data or None
+            window = self.carry + data
+            target = needle.encode()
+            self.carry = window[-max(len(target) - 1, 0):] if target else b""
+            return target in window or None
 
         return poll(probe, deadline_s, what=f"log line {needle!r}")
-
-
-def request_shot(sim_dir: Path, tag: str, deadline_s=45) -> Path:
-    bmp = sim_dir / "screenshot.bmp"
-    old = bmp.stat().st_mtime if bmp.exists() else 0
-    (sim_dir / "screenshot_request.json").write_text(
-        json.dumps({"capture_id": tag, "eye": "both", "layer": "all", "after_sync": 0}))
-
-    def fresh():
-        return bmp.exists() and bmp.stat().st_mtime != old
-
-    poll(fresh, deadline_s, interval=0.5, what="sim screenshot")
-    return bmp
 
 
 # ---------------------------------------------------------------- analyze ---
@@ -360,12 +364,12 @@ PHASES = [
     ("launch", "pwsh -Mode Launch (detached), short driver budgets"),
     ("wait-game", "poll for the game process"),
     ("unhide", "show the game windows before any key is sent"),
-    ("menu", "E presses gated on the InputRoute gameplay flip"),
+    ("menu", "simulator driver navigates; wait for gameplay log"),
     ("wait-player", "poll DSVR.log for CombatHealth equipment=1"),
     ("walk", "scripted legs toward the gate (same seed/spawn)"),
     ("combat", "go-capture + firebomb volley (R) + H taps; watch footer"),
     ("verdict", "analyze the capture; PASS needs an enemy HP drop"),
-    ("close", "Finish, WM_CLOSE, wait exit, Restore (always runs)"),
+    ("close", "request Finish; the protected runner closes and restores"),
 ]
 
 
@@ -375,8 +379,17 @@ def cmd_plan():
     return 0
 
 
-def cmd_analyze(path):
-    print(json.dumps(verdict_for(Path(path)), indent=1))
+def newest_trace(root=GAME_DIR):
+    fs = sorted(root.glob("DSVR-trace-*.jsonl"), key=lambda p: p.stat().st_mtime)
+    return fs[-1] if fs else None
+
+
+def cmd_analyze(path=None):
+    trace = Path(path) if path else newest_trace()
+    if trace is None or not trace.exists():
+        print(f"no DSVR-trace-*.jsonl under {GAME_DIR}")
+        return 2
+    print(json.dumps(verdict_for(trace), indent=1))
     return 0
 
 
@@ -388,7 +401,8 @@ def timed(name, fn):
 
 
 def cmd_run(candidate):
-    stamp = time.strftime("%Y%m%d-%H%M")
+    global ACTIVE_GAME_PID
+    stamp = time.strftime("%Y%m%d-%H%M%S")
     run_dir = REPO / "build" / "verification" / f"autopilot-{stamp}"
     run_dir.mkdir(parents=True, exist_ok=True)
     receipt = run_dir / "receipt.json"
@@ -401,66 +415,75 @@ def cmd_run(candidate):
             raise SystemExit(f"CHECK FAIL: {r.stdout} {r.stderr}")
     timed("check", phase_check)
 
+    launched = False
+
     def phase_launch():
+        nonlocal launched
         # Fire-and-forget: the Launch invocation spawns the detached Run
         # child and exits; waiting on its pipes can hang on inherited
         # handles, so poll for the launch record instead.
         subprocess.Popen(
             ["pwsh", "-NoProfile", "-File", str(RUNNER), "-Mode", "Launch",
-             *base, "-WindowMinutes", "30", "-MenuBudgetSeconds", "60",
+             *base, "-WindowMinutes", "30", "-MenuBudgetSeconds", "180",
              "-SimulatorSoakSeconds", "180"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=REPO)
+        launched = True
         poll(lambda: (run_dir / "receipt.json.launch.json").exists()
              or None, 60, interval=0.5, what="launch record")
-    timed("launch", phase_launch)
 
     pid = None
 
     def phase_wait_game():
+        global ACTIVE_GAME_PID
         nonlocal pid
-        pid = poll(game_pid, 120, what="game process")
+        def owned_game():
+            state = read_receipt(receipt)
+            if not state:
+                return None
+            if state.get("state") == "RecoveryBlocked":
+                raise RuntimeError("protected runner blocked: inspect receipt and stderr")
+            identities = state.get("pids") or []
+            if len(identities) != 1:
+                return None
+            candidate_pid = int(identities[0]["id"])
+            return candidate_pid if candidate_pid == game_pid() else None
+
+        pid = poll(owned_game, 120, what="receipt-owned game process")
+        ACTIVE_GAME_PID = pid
         return pid
-    timed("wait-game", phase_wait_game)
-    sim_dir = run_dir / "simxr-data"
     log = LogTail()
 
     def phase_unhide():
         # The harness hides the game window while it consumes global input;
-        # the user must be able to see it before any key is sent.
+        # the user must be able to see it before any key is sent. The window
+        # can lag the process, so wait for one to exist.
         u = ctypes.windll.user32
+        wins = poll(lambda: enum_windows(pid) or None, 30, interval=0.5,
+                    what="game window")
         shown = []
-        for hwnd, title in enum_windows(pid):
+        for hwnd, title in wins:
             u.ShowWindow(hwnd, 5)
             shown.append(title or "(untitled)")
+        u.SetForegroundWindow(wins[0][0])
+        poll(lambda: game_foreground(u), 5,
+             what="owned game foreground")
         print(f"unhidden game windows: {shown}", flush=True)
-    timed("unhide", phase_unhide)
 
     def phase_menu():
-        # E navigates dialog -> offline notice -> main menu (Continue loads
-        # the save). Gate each press on the InputRoute gameplay flip; the
-        # player cannot exist before this, so it comes before wait-player.
-        for attempt in range(4):
-            key(VK["E"])
-            try:
-                log.wait_for("gameplay=1", 12)
-                return
-            except Deadline:
-                print(f"menu: E{attempt + 1} no gameplay yet", flush=True)
-        raise Deadline("menu navigation never reached gameplay")
-    timed("menu", phase_menu)
+        # The simulator driver owns controller-ray menu navigation. Historical
+        # E presses were coincident with its clicks, not proven causal.
+        log.wait_for("gameplay=1", 180)
 
     def phase_player():
         # Fail fast if the equipment read never binds the local player:
         # combat evidence is meaningless without it.
         log.wait_for("CombatHealth: equipment=1", 90)
-    timed("wait-player", phase_player)
 
     def phase_walk():
         # Scripted legs (same seed/spawn as runs 17-22) with log sanity gates.
         for vk, secs in ((VK["W"], 3.0), (VK["W"], 2.0), (VK["W"], 2.0)):
             hold(vk, secs)
             time.sleep(0.5)
-    timed("walk", phase_walk)
 
     capture = {}
 
@@ -480,10 +503,11 @@ def cmd_run(candidate):
                         key=lambda p: p.stat().st_mtime)
             if not fs:
                 return None
-            tail = fs[-1].read_bytes()[-2048:]
+            with fs[-1].open("rb") as stream:
+                stream.seek(max(stream.seek(0, os.SEEK_END) - 2048, 0))
+                tail = stream.read()
             return fs[-1] if b'"event":"footer"' in tail else None
         capture["path"] = poll(newest, 90, interval=1.0, what="capture footer")
-    timed("combat", phase_combat)
 
     def phase_verdict():
         v = verdict_for(capture["path"])
@@ -492,21 +516,27 @@ def cmd_run(candidate):
         return v
 
     def phase_close():
-        pwsh_runner("-Mode", "Finish", *base)
-        if pid:
-            for hwnd, title in enum_windows(pid):
-                ctypes.windll.user32.PostMessageW(hwnd, 0x10, 0, 0)
-        poll(lambda: game_pid() is None, 120, interval=1.0,
-             what="game exit")
-        t0 = time.time()
-        r = pwsh_runner("-Mode", "Restore", *base, timeout=170)
-        print(f"restore exit={r.returncode} in "
-              f"{time.time() - t0:.1f}s", flush=True)
-        if r.returncode != 0:
-            raise SystemExit(f"RESTORE FAIL: {r.stdout} {r.stderr}")
+        state = poll(lambda: read_receipt(receipt), 20, interval=0.5,
+                     what="protected runner receipt")
+        if not state:
+            raise RuntimeError("no receipt; inspect launch logs before recovery")
+        if state.get("state") != "Restored":
+            r = pwsh_runner("-Mode", "Finish", *base)
+            if r.returncode != 0:
+                raise RuntimeError(f"Finish failed: {r.stdout} {r.stderr}")
+
+        def restored():
+            current = read_receipt(receipt)
+            if current and current.get("state") == "RecoveryBlocked":
+                raise RuntimeError("recovery blocked; inspect receipt and runner stderr")
+            return current if current and current.get("state") == "Restored" else None
+
+        poll(restored, 240, interval=1.0, what="protected runner restore")
 
     verdict = None
     try:
+        timed("launch", phase_launch)
+        timed("wait-game", phase_wait_game)
         timed("unhide", phase_unhide)
         timed("menu", phase_menu)
         timed("wait-player", phase_player)
@@ -514,7 +544,13 @@ def cmd_run(candidate):
         timed("combat", phase_combat)
         verdict = timed("verdict", phase_verdict)
     finally:
-        timed("close", phase_close)
+        try:
+            if launched:
+                timed("close", phase_close)
+        finally:
+            ACTIVE_GAME_PID = None
+    if not verdict["complete"]:
+        raise RuntimeError("capture lacks footer despite restored transaction")
     print(f"DONE verdict={verdict['verdict']} run_dir={run_dir}")
     return 0 if verdict["verdict"] == "PASS" else 1
 
@@ -522,8 +558,8 @@ def cmd_run(candidate):
 def main(argv):
     if len(argv) < 2 or argv[1] == "plan":
         return cmd_plan()
-    if argv[1] == "analyze" and len(argv) == 3:
-        return cmd_analyze(argv[2])
+    if argv[1] == "analyze" and len(argv) in (2, 3):
+        return cmd_analyze(argv[2] if len(argv) == 3 else None)
     if argv[1] == "run":
         cand = argv[2] if len(argv) > 2 else str(DEFAULT_CANDIDATE)
         return cmd_run(cand)

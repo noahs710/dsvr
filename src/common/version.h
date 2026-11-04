@@ -11,8 +11,7 @@
 // memory-safety bug.
 //
 // Adding a row is a porting task, not a relaxation: the row is only valid once
-// the pinned evidence for that build (docs/ARM_IK_EVIDENCE.md,
-// docs/NATIVE_STEREO_CONTRACT.md, docs/NATIVE_MELEE_CONTRACT.md) is recovered
+// the native evidence for that build (see docs/EVIDENCE.md and MODLOG.md) is recovered
 // and the offline suites pass against it.
 
 namespace dsvr {

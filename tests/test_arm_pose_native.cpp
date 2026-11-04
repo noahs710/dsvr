@@ -651,7 +651,7 @@ int main() {
   native[56]=native[41];native[55]=native[42];
   native[79]={}; // real native palette has unused zero-basis slots outside either arm
   // Arm bone bases use the convention measured on every frame of the captured
-  // palette (docs/ARM_IK_EVIDENCE.md): column 0 runs along the bone toward the
+  // palette: column 0 runs along the bone toward the
   // child joint (|dot| = 1.0000 for the upper arm, forearm and both twist bones,
   // both sides), column 1 is the elbow bend-plane normal (|dot| = 1.0000) and
   // column 2 closes the right-handed frame inside the bend plane on the elbow

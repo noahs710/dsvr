@@ -14,23 +14,42 @@
         <span>DSVR</span>
       </div>
       <nav id="nav" aria-label="Launcher pages">
-        <button data-page="home" class="active">Home</button>
-        <button data-page="game">Install</button>
-        <button data-page="settings">Settings</button>
-        <button data-page="activity">Activity</button>
+        <button data-page="play" class="active">Play</button>
+        <button data-page="install">Install</button>
+        <button data-page="options">Options</button>
+        <button data-page="controls">Controls</button>
       </nav>
       <span id="engine-state" role="status"></span>
     </header>
     <main>
-      <section id="page-home" class="page active">
-        <div id="status-card"></div>
-        <div class="home-launch">
-          <button id="launch" class="big" disabled>Launch through Steam</button>
-          <p class="hint">DSVR is for offline play only. Uninstall before returning online.</p>
+      <section id="page-play" class="page active">
+        <div class="play-intro">
+          <h1>Play</h1>
+          <p class="hint">Offline only. DSVR starts the pinned Dark Souls: Remastered build through Steam.</p>
         </div>
+        <div id="status-card"></div>
+        <section class="card checks-card">
+          <div class="card-head">
+            <h2>This PC</h2>
+            <button id="recheck" class="ghost">Check again</button>
+          </div>
+          <p id="checks-summary" class="checks-summary" aria-live="polite"></p>
+          <div id="checks" class="checks" aria-live="polite"></div>
+        </section>
+        <div class="start-row">
+          <button id="launch" class="start" disabled>START VR</button>
+          <p id="start-hint" class="hint"></p>
+        </div>
+        <section class="card log-card">
+          <div class="card-head">
+            <h2>Session log</h2>
+            <button id="clear-log" class="ghost">Clear</button>
+          </div>
+          <pre id="log" aria-live="polite"></pre>
+        </section>
       </section>
 
-      <section id="page-game" class="page">
+      <section id="page-install" class="page">
         <section class="card install-card">
           <div class="section-head">
             <div>
@@ -65,43 +84,38 @@
             </div>
           </section>
           <section class="card tool-card">
-            <h2>Community add-ons</h2>
-            <p class="hint">FPS Unlock is a separate MIT mod. Texture tools download to your Downloads folder and are never launched by setup.</p>
+            <h2>Required dependency</h2>
+            <p class="hint">FPS Unlock is required. DSVR will not start without it. It is a separate MIT mod, installed as the chain proxy and hash-verified.</p>
             <div class="row">
-              <button data-verb="fpsunlock-install">Install FPS Unlock</button>
-              <button data-verb="tpup-download">Download texture tools</button>
+              <button data-verb="fpsunlock-install">Install required FPS Unlock</button>
             </div>
           </section>
           <section class="card tool-card">
-            <h2>Network block</h2>
-            <p class="hint">Steam Offline is still required. These reversible firewall rules add another barrier.</p>
+            <h2>Offline mode</h2>
+            <p class="hint">No firewall setup is needed. Put Steam in Offline Mode, then set Dark Souls to Offline Mode in the game. Offline Mode makes no online connections until you turn it back on in the game. Texture tools download to Downloads and are never launched by setup.</p>
             <div class="row">
-              <button data-verb="firewall-block">Block game network</button>
-              <button data-verb="firewall-unblock">Remove network block</button>
-              <button data-verb="firewall-status">Check block</button>
+              <button data-verb="tpup-download">Download texture tools</button>
             </div>
           </section>
         </div>
         <div id="game-result" aria-live="polite"></div>
-        <p class="credits">Built with MinHook, OpenXR SDK and Dear ImGui. DSR-FPS-Unlock by zofrea1 is optional and installed separately. Full license notices ship in <code>licenses/</code>.</p>
+        <p class="credits">Built with MinHook, OpenXR SDK and Dear ImGui. DSR-FPS-Unlock by zofrea1 is a required dependency, installed separately and hash-verified. Full license notices ship in <code>licenses/</code>.</p>
       </section>
 
-      <section id="page-settings" class="page">
+      <section id="page-options" class="page">
         <div class="settings-intro">
-          <h1>Settings</h1>
+          <h1>Options</h1>
           <p class="hint">Start with the essentials. Every setting remains available below, grouped by use.</p>
         </div>
         <section class="card quick-card">
-          <h2>Quick setup</h2>
-          <div class="row preset-row">
-            <button data-preset="comfort">Comfort</button>
-            <button data-preset="perf">Performance</button>
-            <button data-preset="veteran">Veteran</button>
-            <button data-preset="smooth">Auto Smooth</button>
-            <button data-preset="res">Auto Resolution</button>
-            <button id="safe-defaults" class="danger">Safe defaults</button>
+          <h2>Pick a starting point</h2>
+          <div id="preset-list" class="preset-grid">
+            <p class="hint">Loading presets…</p>
           </div>
-          <p class="hint compact">Presets keep the refresh rate under headset or monitor control.</p>
+          <div class="row reset-row">
+            <button id="safe-defaults" class="danger">Reset to defaults</button>
+            <span class="hint">Presets save to DSVR.toml at once; press F7 in game to reload. Refresh rate stays headset-owned.</span>
+          </div>
         </section>
         <div class="settings-toolbar">
           <label for="settings-search">All controls</label>
@@ -117,16 +131,69 @@
         </div>
       </section>
 
-      <section id="page-activity" class="page">
-        <div class="section-head activity-head">
-          <div>
-            <h1>Activity</h1>
-          </div>
-          <button id="clear-log">Clear</button>
+      <section id="page-controls" class="page">
+        <div class="settings-intro">
+          <h1>Controls</h1>
+          <p class="hint">DSVR's own controls. Combat, movement and menus stay the game's own inputs; these only open DSVR surfaces.</p>
         </div>
-        <pre id="log" aria-live="polite"></pre>
+        <section class="card controls-card">
+          <h2>Keyboard</h2>
+          <ul class="controls">
+            <li><kbd>Home</kbd><span>Open or close the DSVR menu</span></li>
+            <li><kbd>F6</kbd><span>Recenter the theater view</span></li>
+            <li><kbd>F7</kbd><span>Reload DSVR.toml</span></li>
+            <li><kbd>F8</kbd><span>Toggle the theater view</span></li>
+            <li><kbd>F9</kbd><span>Drop a log marker and start a capture</span></li>
+          </ul>
+          <p class="hint compact">Hotkeys can be disabled in Options. The marker and reload keys are configurable.</p>
+        </section>
+        <section class="card controls-card">
+          <h2>In the headset</h2>
+          <ul class="controls">
+            <li><kbd>Left Menu</kbd><span class="combo">+</span><kbd>Right grip</kbd><em>hold 0.5 s</em><span>Open or close the DSVR menu</span></li>
+            <li><kbd>Both sticks clicked</kbd><em>hold 3 s</em><span>Open or close the DSVR menu</span></li>
+            <li><kbd>Both sticks clicked</kbd><em>quick tap</em><span>Recenter the theater</span></li>
+          <li><kbd>Menu</kbd><span class="combo">+</span><kbd>Y</kbd><span>Toggle the theater view</span></li>
+          <li><kbd>Menu</kbd><span class="combo">+</span><kbd>B</kbd><span>Reload DSVR.toml</span></li>
+          <li><kbd>Menu</kbd><span class="combo">+</span><kbd>X</kbd><span>Write a log marker</span></li>
+            <li><kbd>Left stick click</kbd><span class="combo">+</span><kbd>A</kbd><em>twice</em><span>Start calibration</span></li>
+          </ul>
+        <h3>Moving and playing</h3>
+        <ul class="controls">
+          <li><kbd>Left stick</kbd><span>Move. Steered by your head by default, or by the chosen controller hand with head fallback. Hold forward to dash, as in the game.</span></li>
+          <li><kbd>Right stick</kbd><span>Turn. Snap-turn jumps the set angle; smooth-turn turns continuously. Snap off means smooth stick turning.</span></li>
+          <li><kbd>Y</kbd><span class="combo">+</span><kbd>weapon-hand shoulder</kbd><span>Toggle two-hand stance (the game's own toggle; the physical grip attaches first)</span></li>
+          <li><kbd>Squeeze</kbd><span class="combo">/</span><kbd>trigger</kbd><span>Weapon hand: light and strong attacks. Off-hand squeeze holds block, flick taps parry. Skill button taps the flourish channel.</span></li>
+          <li><kbd>Stick held</kbd><span>Opens the native D-pad choice instead of walking while held</span></li>
+          <li><kbd>Swing the arms</kbd><span>With arm-swing sprint on, loose alternating arm swings run. A one-hand flap or a two-handed swing reads as combat, not running.</span></li>
+          <li><kbd>Reach forward</kbd><em>optional, off by default</em><span>With reach-to-interact on, thrusting one hand into the reach envelope taps the interact button</span></li>
+        </ul>
+        <p class="hint compact">Quest, Index, WMR and simple controller bindings are suggested by the mod. Physical swings, blocks, parries and reaches fire the game's own inputs. Guard and damage outcomes stay the game's.</p>
+      </section>
+      <section class="card controls-card">
+        <h2>On desktop (no headset)</h2>
+        <ul class="controls">
+          <li><kbd>Home</kbd><span>Open or close the DSVR menu</span></li>
+          <li><kbd>F6</kbd><span>Recenter the theater view</span></li>
+          <li><kbd>F7</kbd><span>Reload DSVR.toml (key can be changed in Options)</span></li>
+          <li><kbd>F8</kbd><span>Toggle the theater view (game menus always use it)</span></li>
+          <li><kbd>F9</kbd><span>Drop a log marker and start a capture (key can be changed in Options)</span></li>
+          <li><kbd>Arrows</kbd><span class="combo">/</span><kbd>Enter</kbd><span class="combo">/</span><kbd>Esc</kbd><span class="combo">/</span><kbd>Mouse</kbd><span>Move through menus, select, go back, point at anything in the DSVR menu</span></li>
+        </ul>
+        <p class="hint compact">Every other game key on desktop is the game's own binding. DSVR adds nothing on top while hotkeys are off.</p>
+      </section>
       </section>
     </main>
+    <div id="confirm-backdrop" class="confirm-backdrop" hidden>
+      <div class="confirm-panel" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-body">
+        <h2 id="confirm-title"></h2>
+        <p id="confirm-body"></p>
+        <div class="confirm-actions">
+          <button id="confirm-cancel" class="ghost">Cancel</button>
+          <button id="confirm-ok" class="primary-action">Confirm</button>
+        </div>
+      </div>
+    </div>
     <script type="module" src="app.js"></script>
   </body>
 </html>

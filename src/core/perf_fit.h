@@ -1,8 +1,8 @@
 #pragma once
-// Hardware-tier presets choose eye-buffer scale and antialiasing only.
-// Frame rate always comes from the active headset or monitor and is delegated
-// to DSR-FPS-Unlock. Unknown hardware fails closed to the lowest scale tier.
-
+// Hardware-tier fit for the launcher's "Match my PC" preset. It chooses the
+// eye-buffer scale and antialiasing only. Frame rate always comes from the
+// active headset or monitor and is delegated to DSR-FPS-Unlock. Unknown
+// hardware fails closed to the lowest scale tier.
 
 namespace dsvr {
 
@@ -31,42 +31,24 @@ inline HardwareTier TierForHardware(const HardwareSpec& spec) {
   return HardwareTier::kPerformance;
 }
 
-// AA modes supported on the completed image DSVR receives. Quality-tier
-// auto-smooth selects MSAA 4x; other values are reserved for a future
-// native scene path and are never selected.
-enum class AaMode {
-  kOff = 0,
-  kFxaa = 1,
-  kMsaa2x = 2,
-  kMsaa4x = 3,
-  kTaa = 4,
-};
-
-// One launcher preset: stable id, eye-buffer scale and antialiasing.
-// Rates are not part of a preset. Mono defaults to 100% eye scale, stereo 85%.
-struct Preset {
-  const char* id = "";
+// What "Match my PC" writes: eye-buffer scale and AA only. AA stays inside the
+// modes the completed image supports (0 = off, 1 = FXAA); it must never write a
+// reserved MSAA/TAA value that ConfigValid would reject.
+struct AutoFit {
   int render_scale_percent = 100;
-  AaMode aa_mode = AaMode::kFxaa;
+  int aa_mode = 1;
 };
 
-inline int DefaultScaleForStereo(bool stereo_enabled) {
-  return stereo_enabled ? 85 : 100;
-}
-
-inline Preset PresetForTier(HardwareTier tier, bool prefer_smooth) {
-  Preset out{};
-  out.aa_mode = AaMode::kFxaa;
-  if (prefer_smooth) {
-    out.id = "auto-smooth";
-    out.render_scale_percent = 100;
-    if (tier == HardwareTier::kQuality) out.aa_mode = AaMode::kMsaa4x;
-  } else {
-    out.id = "auto-res";
-    out.render_scale_percent = tier == HardwareTier::kQuality ? 130 : 100;
+inline AutoFit AutoFitForTier(HardwareTier tier) {
+  switch (tier) {
+    case HardwareTier::kQuality:
+      return {130, 1};
+    case HardwareTier::kBalanced:
+      return {100, 1};
+    case HardwareTier::kPerformance:
+      break;
   }
-  return out;
+  return {80, 1};
 }
-
 
 }  // namespace dsvr

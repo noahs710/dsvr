@@ -36,6 +36,7 @@
 #include "menu_presentation.h"
 #include "menu_state.h"
 #include "mod_menu.h"
+#include "mono_provenance.h"
 #include "depth_probe.h"
 #include "xr_eye_resolution.h"
 #include "xr_stereo_frame.h"
@@ -2344,19 +2345,35 @@ void XrSubmitMonoFrame(void* backbuffer_texture2d) {
         const auto now = GetTickCount64();
         const XrPosef source_pose{{source.head_quat[0],source.head_quat[1],source.head_quat[2],source.head_quat[3]},
             {source.head_pos[0],source.head_pos[1],source.head_pos[2]}};
-        if (!source.sequence || source.sequence != camera_sequence_at_entry ||
-            source.space_epoch != g_tracking_frames.CurrentEpoch() ||
-            // Focus gates the image only when the session claims focus: in
-            // VISIBLE the runtime already composites our frames, so validity
-            // and freshness suffice and no forced refocus clears the room.
-            (g_state == XR_SESSION_STATE_FOCUSED && !source.focused) ||
-            !source.orientation_valid || !source.position_valid ||
-            now < source.captured_ms || now - source.captured_ms > 100 ||
-            source.predicted_time_ns <= 0 || source.predicted_time_ns > state.predictedDisplayTime ||
-            !std::isfinite(source.vfov_rad) || source.vfov_rad <= .5f || source.vfov_rad >= 3.1f ||
-            !std::isfinite(source.fov_aspect) || source.fov_aspect <= 0 ||
-            !XrStereoFrame::ValidPose(source_pose))
-        {
+        MonoProvenance provenance;
+        provenance.sequence = source.sequence;
+        provenance.expected_sequence = camera_sequence_at_entry;
+        provenance.space_epoch = source.space_epoch;
+        provenance.current_epoch = g_tracking_frames.CurrentEpoch();
+        provenance.session_focused = g_state == XR_SESSION_STATE_FOCUSED;
+        provenance.source_focused = source.focused;
+        provenance.orientation_valid = source.orientation_valid;
+        provenance.position_valid = source.position_valid;
+        provenance.pose_valid = XrStereoFrame::ValidPose(source_pose);
+        provenance.now_ms = now;
+        provenance.captured_ms = source.captured_ms;
+        provenance.predicted_ns = static_cast<std::int64_t>(source.predicted_time_ns);
+        provenance.display_time_ns = static_cast<std::int64_t>(state.predictedDisplayTime);
+        provenance.display_period_ns = static_cast<std::int64_t>(state.predictedDisplayPeriod);
+        provenance.vfov_rad = source.vfov_rad;
+        provenance.fov_aspect = source.fov_aspect;
+        if (const char* gate = MonoProvenanceFailure(provenance)) {
+          // One line per second names the gate that took the view away: a
+          // silent room looks like a stuck overlay in the headset.
+          static unsigned long long last_recovery_log_ms = 0;
+          if (last_recovery_log_ms == 0 || now - last_recovery_log_ms >= 1000) {
+            last_recovery_log_ms = now;
+            DSVR_LOG("XR: recovery room gate=%s seq=%llu expected=%llu age_ms=%lld",
+                     gate, static_cast<unsigned long long>(source.sequence),
+                     static_cast<unsigned long long>(camera_sequence_at_entry),
+                     static_cast<long long>(now) -
+                         static_cast<long long>(source.captured_ms));
+          }
           recovery_room = true;
           theater_room = immersive_room = true;
           g_immersive = false;

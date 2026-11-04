@@ -7,7 +7,7 @@ namespace dsvr {
 
 // Legacy gesture classifier retained for regression tests/reference.
 // The runtime publishes continuous motion, not these attack triggers.
-// Contact-driven native combat is planned in docs/ENGINEERING.md.
+// Contact-driven native combat remains unqualified; see docs/EVIDENCE.md.
 //
 // Conventions:
 // - Positions are XR LOCAL-space metres; blade_dir is a unit vector along

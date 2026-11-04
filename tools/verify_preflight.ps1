@@ -83,11 +83,10 @@ if ($activeRuntime -and (Test-Path $activeRuntime)) {
   else { Say "WARN" "Active OpenXR runtime is $activeRuntime (not VDXR). Record the route; do not compare its FPS with VDXR." }
 } else { Say "BLOCKED" "No readable active OpenXR runtime. Set the intended runtime before a headset run." }
 
-# Offline safety: exact-game firewall block plus save/backup inventory.
-$fwOut = netsh advfirewall firewall show rule name="DSVR Offline Block (Out)" 2>&1 | Out-String
-$fwIn = netsh advfirewall firewall show rule name="DSVR Offline Block (In)" 2>&1 | Out-String
-if ($fwOut -match "DSVR Offline Block" -and $fwIn -match "DSVR Offline Block") { Say "OK" "Firewall offline block rules (In/Out) are present for the game." }
-else { Say "WARN" "Firewall offline block not fully present. Steam Offline plus exact-EXE outbound blocking must be confirmed before launch; see docs\TESTING.md." }
+# Offline safety: Steam Offline plus the game's own Offline Mode (no firewall rules).
+# Offline Mode makes no online connections until the player turns it back on in
+# the game; confirm it on the title screen before every run.
+Say "WARN" "Offline Mode is operator-verified: Steam Offline plus Dark Souls Offline Mode on the title screen; see docs\TESTING.md."
 $saveRoot = Join-Path $HOME "Documents\NBGI\DARK SOULS REMASTERED"
 $saves = @(Get-ChildItem $saveRoot -Recurse -Filter "DRAKS0005.sl2" -ErrorAction SilentlyContinue)
 if ($saves.Count -gt 0) { Say "OK" ("Found {0} Documents save file(s); hash them into the run evidence before and after the run." -f $saves.Count) }

@@ -335,6 +335,11 @@ function OpenXRSimulatorConfig {
 chain_proxy = ""
 [vr]
 vr_enabled = true
+# Keep the game window visible for a supervised live run. The no-mirror
+# default re-hides it every frame while the XR session is visible, which let a
+# hidden game consume the operator's input in the aborted r12 run and makes a
+# foreground proof impossible.
+desktop_present = true
 headlook_enabled = true
 reshade_host = false
 force_disable_motion_blur = false
@@ -1600,9 +1605,11 @@ if(-not $user.Success -or $user.Groups[1].Value -notmatch '"WantsOfflineMode"\s*
 $connection=Get-Content -LiteralPath (Join-Path $steam 'logs\connection_log.txt') -Tail 120
 $state=@($connection | Select-String '\[(Logged On|Logged Off|Logging On|Logging Off|Connecting|Connected),') | Select-Object -Last 1
 if(-not $state -or $state.Line -notmatch '\[Logged Off,') { throw 'Current Steam client is not observed logged off. Use Steam Offline first.' }
-$blocks=@(Get-NetFirewallRule -PolicyStore ActiveStore | Where-Object { $_.Enabled -eq 'True' -and $_.Direction -eq 'Outbound' -and $_.Action -eq 'Block' -and $_.Profile -eq 'Any' } |
-  Get-NetFirewallApplicationFilter | Where-Object { $_.Program -ieq (Join-Path $game 'DarkSoulsRemastered.exe') })
-if(-not $blocks.Count) { throw 'Exact-game outbound blocking is not verified.' }
+# Offline safety is Steam Offline (checked above) plus the game
+# own Offline Mode, confirmed by the operator on the title screen
+# before play. Offline Mode makes no online connections until the
+# player turns it back on in the game; no firewall rules are
+# created or required.
 if((Hash (Join-Path $game 'DarkSoulsRemastered.exe')) -ne 'a45aaa36dd2f6cc151670a639ea5547043cf38ea79ff4178b963c6ed71f98d7b') { throw 'Unknown executable.' }
 $candidateReceiptPath=if([IO.Path]::IsPathRooted($CandidateReceipt)) { $CandidateReceipt } else { Join-Path $repo $CandidateReceipt }
 $verified=Get-Content -LiteralPath $candidateReceiptPath -Raw | ConvertFrom-Json
@@ -1696,7 +1703,7 @@ $script:transactionLease=[IO.File]::Open((Join-Path $transactionParent 'active-s
 $vault=Join-Path $transactionParent ('combat-observer-'+(Get-Date -Format 'yyyyMMdd-HHmmss')+'-'+[guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $vault | Out-Null
 $steamConfig=Join-Path $steam "userdata\$account\config\localconfig.vdf"
-$script:r=[ordered]@{state='Preparing';vault=$vault;started=(Get-Date).ToString('o');deadline=(Get-Date).AddMinutes($WindowMinutes).ToString('o');pids=@();runtime_processes=@();runtime_processes_before=@();runtime_peak_private_mb=@{};runtime_cleanup_ok=$null;runtime_forced_pids=@();trace_stop_pids=@();trace_stop_token=[guid]::NewGuid().ToString('N');roots=@();files=@();evidence=$evidence;steam_data=$steamData;steam_config=$steamConfig;steam_before=@();traces_before=@((Get-ChildItem -LiteralPath $game -Filter 'DSVR-trace-*.jsonl').Name);input_mode=$InputMode;synthetic_layer=$syntheticLayer;simulator_control=@();simulator_server_processes=@();simulator_control_forced=$false;runtime_registration_unchanged=$null;memory_samples=0;memory_peak_private_mb=@{};notes=if($InputMode -eq 'SyntheticHmd') {'Legacy SteamVR null-driver synthetic OpenXR route retained for historical receipts; not used by the selected OpenXR-Simulator runner. No physical-hit claim.'} elseif($InputMode -eq 'OpenXRSimulator') {'Unmodified upstream OpenXR Simulator v1.7.1 selected with child-process XR_RUNTIME_JSON. MCP screenshot-based controller-ray actions and the simulator documented keyboard map drive only supported controls; per-process SIMXR_DATA_DIR and Background input polling are isolated to this receipt. System runtime registration is preserved. Steam stays Offline; exact-game outbound blocking and disposable save/install transactions remain enforced. No physical-hit claim.'} else {'Observer-only LAB core; no XR/input/gameplay writes. Steam metadata snapshotted, live cache not overwritten. Keep Steam Offline. Cloud state is not independently proven; offline/exact-EXE blocking remain required.'}}
+$script:r=[ordered]@{state='Preparing';vault=$vault;started=(Get-Date).ToString('o');deadline=(Get-Date).AddMinutes($WindowMinutes).ToString('o');pids=@();runtime_processes=@();runtime_processes_before=@();runtime_peak_private_mb=@{};runtime_cleanup_ok=$null;runtime_forced_pids=@();trace_stop_pids=@();trace_stop_token=[guid]::NewGuid().ToString('N');roots=@();files=@();evidence=$evidence;steam_data=$steamData;steam_config=$steamConfig;steam_before=@();traces_before=@((Get-ChildItem -LiteralPath $game -Filter 'DSVR-trace-*.jsonl').Name);input_mode=$InputMode;synthetic_layer=$syntheticLayer;simulator_control=@();simulator_server_processes=@();simulator_control_forced=$false;runtime_registration_unchanged=$null;memory_samples=0;memory_peak_private_mb=@{};notes=if($InputMode -eq 'SyntheticHmd') {'Legacy SteamVR null-driver synthetic OpenXR route retained for historical receipts; not used by the selected OpenXR-Simulator runner. No physical-hit claim.'} elseif($InputMode -eq 'OpenXRSimulator') {'Unmodified upstream OpenXR Simulator v1.7.1 selected with child-process XR_RUNTIME_JSON. MCP screenshot-based controller-ray actions and the simulator documented keyboard map drive only supported controls; per-process SIMXR_DATA_DIR and Background input polling are isolated to this receipt. System runtime registration is preserved. Steam stays Offline with the game in Offline Mode (no firewall rules); disposable save/install transactions remain enforced. No physical-hit claim.'} else {'Observer-only LAB core; no XR/input/gameplay writes. Steam metadata snapshotted, live cache not overwritten. Keep Steam Offline. Cloud state is not independently proven; Steam Offline plus in-game Offline Mode remain required.'}}
 if($InputMode -eq 'OpenXRSimulator') {
   $script:simulatorRuntimeLock=$simulatorLock
   $script:simulatorDataDir=Join-Path $evidence 'simxr-data'

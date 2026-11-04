@@ -29,6 +29,7 @@
 #include "xr.h"
 #include "camera.h"
 #include "combat_native.h"
+#include "bridge_gates.h"
 #include "vr_trace.h"
 #include "arm_ik.h"
 #include "swing_attack_math.h"
@@ -1030,9 +1031,7 @@ void InputCopyTrackingSamples(HandSample hands[2], ArmTarget arms[2]) {
   }
 }
 
-void LogBridgeReadiness(const Config& cfg, bool motion_bridge_armed,
-                          const char* attack_gate, const char* defence_gate,
-                          const char* suppress_reason,
+void LogBridgeReadiness(const Config& cfg, const BridgeGates& gates,
                           const SwingAttackOutput& swing_attack,
                           const ShieldGuardOutput& shield_guard,
                           const ArmIkHands& committed_hands,
@@ -1046,8 +1045,8 @@ void LogBridgeReadiness(const Config& cfg, bool motion_bridge_armed,
                 "motion=%d attack=%s defence=%s suppress=%s swing=%d/%d guard=%d/%d "
                 "hands=%llu hands_epoch=%llu space_epoch=%llu motion_attacks=%d "
                 "physical_attacks=%d physical_defence=%d",
-                motion_bridge_armed ? 1 : 0, attack_gate, defence_gate,
-                suppress_reason, swing_attack.light ? 1 : 0,
+                gates.motion_bridge_armed ? 1 : 0, gates.attack, gates.defence,
+                gates.suppress, swing_attack.light ? 1 : 0,
                 swing_attack.heavy ? 1 : 0, shield_guard.block ? 1 : 0,
                 shield_guard.parry ? 1 : 0,
                 static_cast<unsigned long long>(committed_hands.sequence),
@@ -1090,14 +1089,6 @@ static void ApplyInputFramePolicy(const Config& cfg, Vec3 head,
   HandSample hand_samples[2]{};
   SwingAttackOutput swing_attack{};
     ShieldGuardOutput shield_guard{};
-    // Physical-bridge readiness, logged once per change by LogBridgeReadiness
-    // below. These are the gates that decide whether swings/guards request
-    // native input; logging them here turns a silent gate into a checkable
-    // fact. No behavior change.
-    bool motion_bridge_armed = false;
-    const char* attack_gate = "uncomputed";
-    const char* defence_gate = "uncomputed";
-    const char* suppress_reason = "uncomputed";
     // Reach geometry per hand, consumed after the loop once the opposite hand's
     // speed for this same frame is known.
     float reach_offset[2]{};
@@ -1109,28 +1100,30 @@ static void ApplyInputFramePolicy(const Config& cfg, Vec3 head,
     const CombatNativeStatus combat_status = CombatNativeGetStatus();
     ArmIkHands committed_hands{};
     const bool ik_hands_available = ArmIkLatestHands(committed_hands);
-    motion_bridge_armed = !theater && cfg.motion_attacks &&
-        !ModMenuCapturesInput() && !CalibrationCapturesInput() && !g_capture_rearm;
-    const char* bridge_gate = nullptr;
-    if (theater) bridge_gate = "theater-menu-active";
-    else if (!CameraGameplayReady()) bridge_gate = "camera-not-gameplay";
-    else if (cfg.observer_only) bridge_gate = "observer-only";
-    else if (!cfg.arm_ik_enabled) bridge_gate = "arm_ik-off";
-    else if (cfg.arm_ik_log_only) bridge_gate = "arm_ik-log-only";
-    else if (!cfg.arm_ik_block_animation) bridge_gate = "block_animation-off";
-    else if (!ik_hands_available) bridge_gate = "no-committed-hands";
-    else if (committed_hands.epoch != space_epoch) bridge_gate = "hand-epoch-stale";
-    if (bridge_gate) attack_gate = bridge_gate;
-    else if (!cfg.motion_attacks) attack_gate = "motion_attacks-off";
-    else if (!cfg.physical_attacks) attack_gate = "physical_attacks-off";
-    else if (!committed_hands.side[weapon_side].valid) attack_gate = "weapon-hand-invalid";
-    else attack_gate = "ready";
-    const bool physical_attack_ready = std::strcmp(attack_gate, "ready") == 0;
-    if (bridge_gate) defence_gate = bridge_gate;
-    else if (!cfg.physical_defence) defence_gate = "physical_defence-off";
-    else if (!committed_hands.side[shield_side].valid) defence_gate = "shield-hand-invalid";
-    else defence_gate = "ready";
-      const bool physical_defence_ready = std::strcmp(defence_gate, "ready") == 0;
+    BridgeGateState gate_state;
+    gate_state.theater_menu_active = theater;
+    gate_state.camera_gameplay_ready = CameraGameplayReady();
+    gate_state.observer_only = cfg.observer_only;
+    gate_state.arm_ik_enabled = cfg.arm_ik_enabled;
+    gate_state.arm_ik_log_only = cfg.arm_ik_log_only;
+    gate_state.arm_ik_block_animation = cfg.arm_ik_block_animation;
+    gate_state.committed_hands_available = ik_hands_available;
+    gate_state.hand_epoch_current = committed_hands.epoch == space_epoch;
+    gate_state.motion_attacks = cfg.motion_attacks;
+    gate_state.physical_attacks = cfg.physical_attacks;
+    gate_state.physical_defence = cfg.physical_defence;
+    gate_state.weapon_hand_valid =
+        ik_hands_available && committed_hands.side[weapon_side].valid;
+    gate_state.shield_hand_valid =
+        ik_hands_available && committed_hands.side[shield_side].valid;
+    gate_state.menu_captures_input = ModMenuCapturesInput();
+    gate_state.calibration_captures_input = CalibrationCapturesInput();
+    gate_state.capture_rearm = g_capture_rearm;
+    gate_state.physical_damage_bound = combat_status.physical_damage_bound;
+    gate_state.shield_contact_bound = combat_status.shield_contact_bound;
+    const BridgeGates gates = ComputeBridgeGates(gate_state);
+    const bool physical_attack_ready = gates.attack_ready;
+    const bool physical_defence_ready = gates.defence_ready;
 
   for (int side = 0; side < 2; ++side) {
     VrPadHand& pad_hand = side == 0 ? pad_input.left : pad_input.right;
@@ -1512,15 +1505,7 @@ static void ApplyInputFramePolicy(const Config& cfg, Vec3 head,
   // Visual IK is not a replacement for controls. Keep normal combat buttons
   // until real native physical damage AND defense are bound; enabling IK or
   // log-only must never leave the player unable to attack/block/parry.
-  const auto combat=CombatNativeGetStatus();
-  const bool suppress_on = cfg.arm_ik_enabled && !cfg.arm_ik_log_only &&
-      combat.physical_damage_bound && combat.shield_contact_bound;
-  pad_input.suppress_weapon_attacks = suppress_on;
-  if (!cfg.arm_ik_enabled) suppress_reason = "arm_ik-off";
-  else if (cfg.arm_ik_log_only) suppress_reason = "arm_ik-log-only";
-  else if (!combat.physical_damage_bound) suppress_reason = "damage-unbound";
-  else if (!combat.shield_contact_bound) suppress_reason = "shield-unbound";
-  else suppress_reason = "suppressed";
+  pad_input.suppress_weapon_attacks = gates.suppress_on;
   // Menu navigation is a d-pad mapping and needs no orientation reference at
     // all, so it must never be fed a stick the locomotion gate already cleared.
     // Theater and every non-gameplay state are menu navigation.
@@ -1711,14 +1696,14 @@ static void ApplyInputFramePolicy(const Config& cfg, Vec3 head,
   // and squeezes are quiet so the toggle never fights manual input.
   {
     const long long now_ms = predicted_display_time / 1000000LL;
-    const bool attached = !bridge_gate && cfg.physical_two_hand &&
+    const bool attached = !gates.shared && cfg.physical_two_hand &&
         committed_hands.epoch == space_epoch && committed_hands.two_hand_attached;
     const bool have_2h = committed_hands.equipment_bound
         ? committed_hands.native_stance == 3 : g_two_hand_assumed_2h;
     const bool player_quiet = !pad_input.left.secondary &&
         pad_input.left.trigger <= 0.1f && pad_input.right.trigger <= 0.1f &&
         pad_input.left.squeeze <= 0.5f && pad_input.right.squeeze <= 0.5f;
-    if (!bridge_gate && attached != have_2h && player_quiet &&
+    if (!gates.shared && attached != have_2h && player_quiet &&
         now_ms >= g_two_hand_hold_until_ms) {
       g_two_hand_hold_until_ms = now_ms + 90;
       if (!committed_hands.equipment_bound) g_two_hand_assumed_2h = attached;
@@ -1768,8 +1753,7 @@ static void ApplyInputFramePolicy(const Config& cfg, Vec3 head,
             pad_input.skill_tap,
         predicted_display_time, space_epoch);
   }
-  LogBridgeReadiness(cfg, motion_bridge_armed, attack_gate, defence_gate,
-                     suppress_reason, swing_attack, shield_guard,
+  LogBridgeReadiness(cfg, gates, swing_attack, shield_guard,
                      committed_hands, space_epoch);
 
   // Stick turn: theater freezes the world; otherwise the tracker owns

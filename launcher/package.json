@@ -19,8 +19,9 @@
     "appId": "dev.dsvr.launcher",
     "productName": "DSVR-Launcher",
     "asar": true,
+    "electronLanguages": ["en-US"],
     "directories": { "output": "../build/launcher-portable" },
-    "files": ["src/**/*", "package.json"],
+    "files": ["src/**/*", "package.json", "!**/*.map", "!**/node_modules/**"],
     "extraResources": [{ "from": "engine", "to": "." }],
     "win": {
       "target": "dir",

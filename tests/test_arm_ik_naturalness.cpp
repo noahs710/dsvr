@@ -4,7 +4,7 @@
 // <=5 deg, hand<->Forearm axial variation <=15 deg, per-frame bone basis
 // delta <=12 deg (native walk max 2.5 deg), UpperArm col 2 stays aligned
 // with the elbow bend direction (native |dot| = 1.000 in 64/64 samples).
-// See docs/ARM_IK_EVIDENCE.md.
+// Dated capture details are in MODLOG.md and Git history.
 // The fixture is the real captured idle palette and parent hierarchy.
 #include "../src/core/arm_pose_math.h"
 

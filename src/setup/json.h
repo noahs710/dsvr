@@ -1,6 +1,6 @@
 #pragma once
 // Machine-readable stdout JSON for `DSVR-Setup.exe --json <verb>`
-// (docs/ELECTRON_LAUNCHER_PLAN.md phase 1). Pure builders: the caller collects
+// Pure builders: the caller collects
 // the data with the existing UI-free setup_internal.h calls, this file only
 // renders it, so the documents are assertable offline without a game folder.
 #include <string>
@@ -38,6 +38,11 @@ struct SettingsRow {
 };
 const std::vector<SettingsRow>& SettingsIndex();
 std::string SettingsIndexJson();  // {rows: [{group, label, key}, ...]}
+
+// preset-index: the shared user-preset table (core/user_presets.h) as
+// {presets: [{id, label, detail, hardware_fit}]}. The launcher renders its
+// preset cards from this, so the UI and the engine cannot drift apart.
+std::string PresetIndexJson();
 
 // ---------------------------------------------------------------------------
 // Phase 3 (settings parity): the same key names SettingsIndex exposes are the

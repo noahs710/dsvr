@@ -1,4 +1,4 @@
-// Electron plan phase 1 (docs/ELECTRON_LAUNCHER_PLAN.md): the --json seam.
+// The Setup --json seam used by the Electron launcher.
 // json.cpp is pure string building, so these checks pin the exact documents
 // the launcher will parse, with no game folder, device or install state.
 #include <cstdio>
@@ -28,7 +28,7 @@ int main() {
       "\"install_state\":{\"has_loader\":false,\"has_core\":false,"
       "\"installed\":false,\"partial\":false},"
       "\"fps_unlock_state\":{\"chain_present\":false,\"ini_present\":false,"
-      "\"proxy_set\":false,\"installed\":false},"
+      "\"proxy_set\":false,\"installed\":false,\"required\":true},"
       "\"headset_hz\":120,\"version\":\"0.16.0-test\"}";
   if (status != expected_status) {
     std::printf("status mismatch\n expected: %s\n   actual: %s\n",
@@ -85,6 +85,17 @@ int main() {
   CHECK(index.find("\"key\":\"theater_floor_grid\"") != std::string::npos);
   CHECK(index.find("\"group\":\"Combat and haptics\"") != std::string::npos);
   CHECK(index.back() == '}');
+
+  // preset-index: the shared preset table, including the hardware-fit flag.
+  const std::string presets = PresetIndexJson();
+  CHECK(presets.rfind("{\"presets\":[", 0) == 0);
+  CHECK(presets.find("\"id\":\"comfort\"") != std::string::npos);
+  CHECK(presets.find("\"id\":\"balanced\"") != std::string::npos);
+  CHECK(presets.find("\"id\":\"sharper\"") != std::string::npos);
+  CHECK(presets.find("\"id\":\"match\"") != std::string::npos);
+  CHECK(presets.find("\"hardware_fit\":true") != std::string::npos);
+  CHECK(presets.find("\"hardware_fit\":false") != std::string::npos);
+  CHECK(presets.back() == '}');
 
   // ---- phase 3: config get/set round-trip -------------------------------
   // Every SettingsIndex row must be a key the config verbs accept, so the

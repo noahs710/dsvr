@@ -24,6 +24,7 @@
 #include "../common/config.h"
 #include "../common/ui_palette.h"
 #include "../common/version.h"
+#include "../core/user_presets.h"
 #include "launch.h"
 #include "setup_internal.h"
 
@@ -44,18 +45,14 @@ enum {
   CTL_SAVE = 110,
   CTL_OPEN_FOLDER = 111,
   CTL_PRESET_COMFORT = 112,
-  CTL_PRESET_PERF = 113,
-  CTL_PRESET_VETERAN = 114,
-  CTL_PRESET_SMOOTH = 120,
-  CTL_PRESET_RES = 121,
-  CTL_DETECT_HW = 122,
+  CTL_PRESET_BALANCED = 113,
+  CTL_PRESET_SHARPER = 114,
+  CTL_PRESET_MATCH = 120,
   CTL_NAV_GAME = 123,
   CTL_NAV_SETTINGS = 124,
   CTL_NAV_ACTIVITY = 125,
   CTL_RESET_SAFE = 126,
   CTL_DEVMODE = 127,  // Ctrl+D accelerator: not a control, never a setting
-  CTL_FW_BLOCK = 115,
-  CTL_FW_UNBLOCK = 116,
   CTL_DEL_CFG = 117,
   CTL_CLEAR_LOG = 118,
   CTL_LAUNCH = 119,
@@ -215,7 +212,6 @@ void Relayout(HWND hwnd);
 void SetPage(HWND window, SetupPage page);
 void ApplyDevVisibility();
 void UpdateBrief();
-void DetectHardware();
 void ApplySafeDefaults(HWND parent);
 // Stored (dev-mode) frame box -> on-screen box for the current view: frames
 // wholly below the developer block shift up with their rows; the one frame
@@ -271,9 +267,9 @@ setup::LogFn MakeLog() { return [](const std::wstring& s) { GuiLog(s); }; }
 
 setup::ConfirmFn MakeConfirm(HWND parent) {
   return [parent](const wchar_t* title, const std::wstring& text,
-                  bool /*default_yes*/, bool destructive) {
-    UINT flags = MB_YESNO | MB_ICONQUESTION;
-    if (destructive) flags |= MB_DEFBUTTON2;
+                  bool default_yes, bool destructive) {
+    UINT flags = MB_YESNO | (destructive ? MB_ICONWARNING : MB_ICONQUESTION);
+    flags |= (default_yes && !destructive) ? MB_DEFBUTTON1 : MB_DEFBUTTON2;
     return MessageBoxW(parent, text.c_str(), title, flags) == IDYES;
   };
 }
@@ -618,13 +614,13 @@ std::wstring InstallStateLine() {
     // Nothing to download twice: the button reads as done once it is chained.
     EnableWindow(g_fps_unlock, !dep.installed());
     SetWindowTextW(g_fps_unlock,
-        dep.installed() ? L"FPS Unlock installed" : L"Install FPS Unlock");
+        dep.installed() ? L"FPS Unlock installed" : L"Install required FPS Unlock");
   }
   const std::wstring rate = dep.installed()
-      ? L" Frame-rate dependency: installed and chained."
+      ? L" Required FPS Unlock: installed and chained."
       : (dep.chain_present || dep.ini_present
-             ? L" Frame-rate dependency: partially present - press Install FPS Unlock."
-             : L" Frame-rate dependency: not installed - press Install FPS Unlock.");
+             ? L" Required FPS Unlock: partially present - press Install required FPS Unlock."
+             : L" Required FPS Unlock: missing - press Install required FPS Unlock before starting.");
   if (st.partial())
     return L"Partial install: only one of dinput8.dll / DSVR.dll is present -- "
            L"run Install again, or Uninstall." + rate;
@@ -692,6 +688,13 @@ bool RefreshGame(bool log_it) {
   if (install.partial()) {
     MessageBoxW(parent, L"Only one mod DLL is present. Repair with Install DSVR or Uninstall first.",
                 L"Partial installation", MB_OK | MB_ICONWARNING);
+    return;
+  }
+  if (install.installed() && !setup::FpsUnlockStateOf(g_exe).installed()) {
+    MessageBoxW(parent,
+        L"FPS Unlock is a required dependency and is not installed yet.\n\nInstall it from Game & mods (Install required FPS Unlock), then launch again.",
+        L"Required dependency missing", MB_OK | MB_ICONWARNING);
+    SetPage(g_top, SetupPage::Game);
     return;
   }
   if (!install.installed() && MessageBoxW(parent,
@@ -1150,37 +1153,24 @@ void ApplyPreset(int id) {
   dsvr::ConfigLoad(path.c_str(), cfg);
   cfg = ReadControls(cfg);
   if (!g_read_notes.empty()) GuiLog(g_read_notes);
-  if (id == CTL_PRESET_SMOOTH || id == CTL_PRESET_RES) {
+  if (id == CTL_PRESET_MATCH) {
     const dsvr::HardwareSpec spec = setup::ProbeHardware();
     const dsvr::HardwareTier tier = dsvr::TierForHardware(spec);
-    const dsvr::Preset preset = dsvr::PresetForTier(tier, id == CTL_PRESET_SMOOTH);
-    cfg.render_scale_percent = preset.render_scale_percent;
-    cfg.aa_mode = static_cast<int>(preset.aa_mode);
-    cfg.comfort_vignette = false;
-    cfg.snap_turn = false;
-    cfg.smooth_turn = true;
-    cfg.snap_turn_degrees = 45;
-    const wchar_t* tier_name = tier == dsvr::HardwareTier::kQuality ? L"Quality" :
-        tier == dsvr::HardwareTier::kBalanced ? L"Balanced" : L"Performance";
+    const wchar_t* tier_name = tier == dsvr::HardwareTier::kQuality ? L"quality" :
+        tier == dsvr::HardwareTier::kBalanced ? L"balanced" : L"performance";
     GuiLog(std::wstring(L"Hardware: ") + std::to_wstring(spec.system_ram_gb) +
         L" GB RAM, " + std::to_wstring(spec.gpu_vram_gb) + L" GB VRAM" +
         (spec.discrete_gpu ? L", discrete GPU" : L", no discrete GPU") +
-        L" -> tier " + tier_name + L" -> preset " +
-        dsvr::WideFromUtf8(preset.id) + L" (" +
-        std::to_wstring(preset.render_scale_percent) + L"% render; refresh remains automatic).");
+        L" -> " + tier_name + L" fit (eye scale and AA only; refresh stays automatic).");
+    dsvr::ApplyMatchPcPreset(cfg, tier);
   } else {
-    cfg.comfort_vignette = id != CTL_PRESET_VETERAN;
-    cfg.vignette_strength = id == CTL_PRESET_COMFORT ? 0.8f : 0.65f;
-    cfg.snap_turn = id != CTL_PRESET_VETERAN;
-    cfg.smooth_turn = !cfg.snap_turn;
-    cfg.snap_turn_degrees = 45;
-    if (id == CTL_PRESET_VETERAN) cfg.smooth_turn_speed_dps = 150.0f;
+    const dsvr::UserPreset preset = id == CTL_PRESET_COMFORT
+        ? dsvr::UserPreset::kComfort
+        : id == CTL_PRESET_BALANCED ? dsvr::UserPreset::kBalanced
+                                    : dsvr::UserPreset::kSharper;
+    dsvr::ApplyUserPreset(cfg, preset);
   }
-  if (id == CTL_PRESET_COMFORT || id == CTL_PRESET_PERF ||
-      id == CTL_PRESET_VETERAN)
-    cfg.render_scale_percent =
-        id == CTL_PRESET_COMFORT ? 90 : id == CTL_PRESET_PERF ? 80 : 130;
-  if (!dsvr::ConfigSave(path.c_str(), cfg)) {
+  if (!dsvr::ConfigValid(cfg) || !dsvr::ConfigSave(path.c_str(), cfg)) {
     GuiLog(L"FAIL: preset not saved. Check DSVR.toml permissions; edits retained.");
     return;
   }
@@ -1214,23 +1204,6 @@ void ApplySafeDefaults(HWND parent) {
   PopulateControls(safe);
   GuiLog(L"Safe defaults applied and saved to " + path);
 }
-
-void DetectHardware() {
-  const dsvr::HardwareSpec spec = setup::ProbeHardware();
-  const dsvr::HardwareTier tier = dsvr::TierForHardware(spec);
-  const wchar_t* tier_name = tier == dsvr::HardwareTier::kQuality ? L"Quality" :
-      tier == dsvr::HardwareTier::kBalanced ? L"Balanced" : L"Performance";
-  const dsvr::Preset smooth = dsvr::PresetForTier(tier, true);
-  const dsvr::Preset res = dsvr::PresetForTier(tier, false);
-  GuiLog(std::wstring(L"Hardware: ") + std::to_wstring(spec.system_ram_gb) +
-      L" GB RAM, " + std::to_wstring(spec.gpu_vram_gb) + L" GB VRAM" +
-      (spec.discrete_gpu ? L", discrete GPU" : L", no discrete GPU") +
-      L" -> tier " + tier_name + L". Suggested: Auto Smooth (" +
-      std::to_wstring(smooth.render_scale_percent) + L"% eye scale) or Auto Res (" +
-      std::to_wstring(res.render_scale_percent) +
-      L"% eye scale). Refresh remains headset/monitor-owned.");
-}
-
 
 void ResizeContent(HWND window) {
   RECT want{0, 0, S(kClientWidth), S(ContentHeight())};
@@ -1322,9 +1295,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       g_install = Add(hwnd, L"BUTTON", L"Install DSVR", BS_PUSHBUTTON, 236, 234, 120, 28, CTL_INSTALL);
       Add(hwnd, L"BUTTON", L"Remove DSVR", BS_PUSHBUTTON, 364, 234, 100, 28, CTL_UNINSTALL);
       Add(hwnd, L"BUTTON", L"Open folder", BS_PUSHBUTTON, 472, 234, 110, 28, CTL_OPEN_FOLDER);
-      g_fps_unlock = Add(hwnd, L"BUTTON", L"Install FPS add-on", BS_PUSHBUTTON, 28, 270, 196, 26,
+      g_fps_unlock = Add(hwnd, L"BUTTON", L"Install required FPS Unlock", BS_PUSHBUTTON, 28, 270, 204, 26,
                          CTL_FPS_UNLOCK);
-    g_native_launch = Add(hwnd, L"BUTTON", L"Launch without DSVR", BS_PUSHBUTTON, 236, 270, 230, 26,
+    g_native_launch = Add(hwnd, L"BUTTON", L"Launch without DSVR", BS_PUSHBUTTON, 240, 270, 226, 26,
                          CTL_LAUNCH_NATIVE);
         AddHint(hwnd, L"TPUP helps unpack custom textures. Setup never installs textures or changes game files. Save the encrypted texture ZIP to Downloads, unzip it yourself, then import it in TPUP.", 28, 390, 778, 34);
         // The hint sits in the Game page's y band, so the id-based default
@@ -1347,15 +1320,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     g_frames.push_back({16, 650, 808, 76, 16, -1, L"Developer tuning", SetupPage::Settings});
     g_frames.push_back({16, 726, 808, 184, 16, -1, L"Game experience", SetupPage::Settings});
       Add(hwnd, L"BUTTON", L"Comfort", BS_PUSHBUTTON, 340, 308, 86, 22, CTL_PRESET_COMFORT);
-      AddHint(hwnd, L"Dim edges; gentle.", 340, 332, 86, 14);
-      Add(hwnd, L"BUTTON", L"Balanced", BS_PUSHBUTTON, 434, 308, 86, 22, CTL_PRESET_PERF);
-      AddHint(hwnd, L"Middle ground.", 434, 332, 86, 14);
-      Add(hwnd, L"BUTTON", L"Sharper", BS_PUSHBUTTON, 528, 308, 86, 22, CTL_PRESET_VETERAN);
+      AddHint(hwnd, L"Dim edges; snap turn.", 340, 332, 86, 14);
+      Add(hwnd, L"BUTTON", L"Balanced", BS_PUSHBUTTON, 434, 308, 86, 22, CTL_PRESET_BALANCED);
+      AddHint(hwnd, L"Recommended.", 434, 332, 86, 14);
+      Add(hwnd, L"BUTTON", L"Sharper", BS_PUSHBUTTON, 528, 308, 86, 22, CTL_PRESET_SHARPER);
       AddHint(hwnd, L"Clearest picture.", 528, 332, 86, 14);
-      Add(hwnd, L"BUTTON", L"Auto: smoother", BS_PUSHBUTTON, 350, 356, 132, 26, CTL_PRESET_SMOOTH);
-      Add(hwnd, L"BUTTON", L"Auto: sharper", BS_PUSHBUTTON, 490, 356, 132, 26, CTL_PRESET_RES);
-      Add(hwnd, L"BUTTON", L"Suggest for this PC", BS_PUSHBUTTON, 630, 356, 140, 26, CTL_DETECT_HW);
-      AddHint(hwnd, L"Auto picks settings for your PC. Safe to run; saves at once.", 28, 314, 300, 44);
+      Add(hwnd, L"BUTTON", L"Match this PC", BS_PUSHBUTTON, 350, 356, 132, 26, CTL_PRESET_MATCH);
+      AddHint(hwnd, L"Presets save at once. Match only sets eye scale and AA; comfort stays as it is.", 28, 314, 300, 44);
       // Startup mode is the one VR question: Play in VR, desktop observer
       // (flatscreen-only), or combat-only trace. The old Play-in-VR
       // checkbox lives here as this combo; observer modes force VR off.
@@ -1514,11 +1485,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
       } else if (id == CTL_DOCTOR) {
         if (RefreshGame(false)) setup::DoctorChecks(g_exe, MakeLog());
-      } else if (id == CTL_PRESET_COMFORT || id == CTL_PRESET_PERF || id == CTL_PRESET_VETERAN ||
-                 id == CTL_PRESET_SMOOTH || id == CTL_PRESET_RES) {
+      } else if (id == CTL_PRESET_COMFORT || id == CTL_PRESET_BALANCED ||
+                 id == CTL_PRESET_SHARPER || id == CTL_PRESET_MATCH) {
         ApplyPreset(id);
-      } else if (id == CTL_DETECT_HW) {
-        DetectHardware();
       } else if (id == CTL_DEVMODE) {
         ToggleDevMode(hwnd);
       } else if (id == CTL_RESET_SAFE) {

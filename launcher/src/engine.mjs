@@ -1,7 +1,7 @@
-// DSVR launcher engine bridge (docs/ELECTRON_LAUNCHER_PLAN.md phase 2).
+// DSVR launcher engine bridge.
 // The ONLY thing this file does is run the co-located DSVR-Setup.exe with a
 // fixed argv array chosen from a strict allow-list: the renderer can never
-// compose arbitrary commands. All install/download/hash/firewall logic stays
+// compose arbitrary commands. All install/download/hash logic stays
 // in the C++ engine; this module just spawns, waits and parses.
 // Split from main.js so the same code is smoke-testable under plain node
 // (npm run smoke) without opening an Electron window.
@@ -27,10 +27,17 @@ export const VERBS = {
   "uninstall-remove-settings": ["--json", "uninstall", "--remove-settings"],
   "fpsunlock-install": ["--json", "fpsunlock-install"],
   "tpup-download": ["--json", "tpup-download"],
-  "firewall-block": ["--json", "firewall-block"],
-  "firewall-unblock": ["--json", "firewall-unblock"],
-  "firewall-status": ["--json", "firewall-status"],
   "safe-defaults": ["--json", "safe-defaults"],
+  "preset-index": ["--json", "preset-index"],
+  "preset-comfort": ["--json", "preset-comfort"],
+  "preset-balanced": ["--json", "preset-balanced"],
+  "preset-sharper": ["--json", "preset-sharper"],
+  "preset-match": ["--json", "preset-match"],
+  // Legacy ids from the old five-preset set stay valid engine-side.
+  "preset-perf": ["--json", "preset-perf"],
+  "preset-veteran": ["--json", "preset-veteran"],
+  "preset-smooth": ["--json", "preset-smooth"],
+  "preset-res": ["--json", "preset-res"],
   "preset-comfort": ["--json", "preset-comfort"],
   "preset-perf": ["--json", "preset-perf"],
   "preset-veteran": ["--json", "preset-veteran"],
@@ -59,10 +66,16 @@ const JSON_VERBS = new Set([
   "uninstall-remove-settings",
   "fpsunlock-install",
   "tpup-download",
-  "firewall-block",
-  "firewall-unblock",
-  "firewall-status",
   "safe-defaults",
+  "preset-index",
+  "preset-comfort",
+  "preset-balanced",
+  "preset-sharper",
+  "preset-match",
+  "preset-perf",
+  "preset-veteran",
+  "preset-smooth",
+  "preset-res",
   "preset-comfort",
   "preset-perf",
   "preset-veteran",

@@ -1,80 +1,133 @@
-# DSVR testing and operation
+# Testing and protected operation
 
-Current: 21 October 2026. [Documentation authority](../README.md#authority-and-maintenance). This is the sole operating/testing policy. Follow the [cockpit plan](../MODDING_PLAN.md) for task order and the [runbook](VERIFICATION_RUNBOOK.md) for cases/thresholds.
+[PLAN.md](../PLAN.md) owns task order. This file describes how to collect
+evidence safely and defines the acceptance cases. Evidence edits and offline
+tests do not authorize a game launch.
+The latest user direction requires a fresh go-ahead before a game launch or
+automated desktop input.
 
-## Authorization and run boundaries
+## Evidence
 
-The user has authorized useful protected installation, launches and testing autonomously. Use the existing Windows/Steam account with a reversible disposable-save transaction; do not reopen the superseded lab-account setup discussion. Planning and documentation edits do not launch/deploy. Human comfort/feel requires the operator, and publication/upload requires separate authorization. Do not seize active desktop input.
+Use four levels: **source** (code or fixture), **static** (pinned executable or
+asset inspection), **native** (identified DSR run), and **headset** (operator
+review in the actual headset). `PASS` means the predeclared criterion passed
+on the named candidate; `FAIL` means it did not; `UNVERIFIED` means missing
+coverage; `BLOCKED` names a missing prerequisite. Never promote one level to
+another. Report dropped records, an incomplete footer and unpaired contacts.
 
-Same-account backups/swap provide recovery, not OS/account isolation. Steam metadata, shared account effects and synchronization need explicit handling. Historical confirmation of Steam Offline is not a live state check; verify current operating preconditions without repeatedly asking for already granted authorization.
+## Acceptance cases
 
-Before each native transaction:
+These are required observations, not claims of completed work. Name the exact
+candidate, runtime, scene, settings, actor/equipment and evidence for each
+case. Use [EVIDENCE.md](EVIDENCE.md) for current status. A simulator result is
+labeled synthetic, and a headset result requires an operator.
 
-1. Inspect current preflight and transaction tools/receipts. Establish exact executable/build/config/runtime identity and a fixed disposable scene/character. Resolve a current BLOCKED preflight before deployment; a historical missing-root report is not a present blocker by itself.
-2. Keep Steam Offline and exact-game outbound blocking. Preserve both Documents/NBGI/DARK SOULS REMASTERED and AppData/DarkSoulsRemastered save roots, active Steam userdata/570940 and relevant synchronization metadata. Check installed synchronization state; never assume store metadata proves Cloud absent or disabled. If it cannot be verified, retain offline protection and record the uncertainty; do not return Steam online with test state present.
-3. Snapshot original saves/config/install files with SHA-256 and ownership manifests before any test-owned replacement. Roots can differ; do not treat one as a redundant copy. Enumerate current files rather than assuming the old 13-file count. Preserve foreign proxies, existing config and unrelated newer changes.
-4. Confirm the game is closed before install. Use the established disposable-save route; backups alone do not demonstrate that the running process will write only the intended test state. Verify exact installed package/config hashes and actual process/save route before enabling the experiment.
-5. Name one hypothesis, bounded capture/deadline, neutral-input cleanup and exact-PID stop path. Useful desktop observation comes before asking for human headset time. Do not manufacture readiness through guessed native writes or side-effectful getters.
-6. After exit or failure, neutralize input, collect logs/dumps/results, restore test-owned files/saves/metadata through the receipt and hash-check originals. Do not overwrite unrelated newer changes; stop and reconcile such a conflict. Keep restoration state explicit. Leave Steam open when possible and offline until originals and mod deployment are reconciled.
+| Area | Required result |
+|---|---|
+| Physical melee | A tracked weapon sweep makes a native contact with an admitted enemy, causes an independently read HP or defense outcome, and produces one expected cost/reaction. Repeat deliberate hits and misses; no result from resting overlap, walking, recentering, lost tracking or a wall between blade and target. A complete trace and restored transaction receipt are required. |
+| Defense | A shield surface intercepts eligible attacks with native block, stamina and guard-break behavior. A moving parry needs eligible contact and correct native outcome; stationary, moving-away and ineligible controls do not parry. |
+| Controls and interaction | Title, calibration, settings, inventory, equipment, dialogue, combat and progression work from controllers without hidden essential prompts or leaked held input. Each supported physical interaction class needs eligibility, activation, cancellation and target-reuse cases. |
+| Locomotion and body | Tracked head/body fit stays aligned while standing, seated, crouching, turning and walking. Native collision governs walls, stairs, ledges, forced motion and ducking; no stored movement debt, body penetration or view-only invulnerability. |
+| Stereo | Both submitted eyes contain independently rendered game scenes from their own predicted pose/projection, with correct eye order, parallax and occlusion. Simulation, AI, collision and events advance once per pair. Different textures alone are insufficient. |
+| Performance and comfort | At declared 90 Hz settings, measure actual runtime period, complete eye-pair CPU/GPU p50/p95/p99 and dropped/reprojected frames across steady gameplay. The 11.11 ms pair budget needs measured headroom; reduced-rate modes are labeled separately. An operator checks scale, alignment, motion and discomfort. |
+| Lifecycle and campaign | Focus loss, headset disconnect, loading, death, equipment changes, cutscenes, traversal and representative encounters recover without stale input, pointers or XR images. A repeatable short session plus longer progression evidence is needed before a playable campaign claim. |
+| Install and release | The installed files match one versioned candidate; clean install, upgrade, uninstall and interrupted rollback restore originals. The archive contains no game-derived payload. The launcher and player guide are tested on the same candidate. |
 
-No new native contract may be guessed to bypass a blocked gate. Protect runtime registration: prefer process-scoped selection where supported; snapshot/restore any deliberate global change and qualify runtime routes separately.
+For every row record `PASS`, `FAIL`, `UNVERIFIED` or `BLOCKED` with the reason.
+Predeclare thresholds before a run; do not relax them afterward. A missing
+footer, dropped contact batch or unreadable target cannot be counted as a
+clean miss or native damage proof. `tools/hmd/autopilot.py analyze` can report
+contact-level `PASS` on a footerless historical trace, so check completeness
+and the protected receipt separately before accepting a physical-hit result.
 
-Desktop observer timing: setup/loading counts toward the transaction deadline.
-The runner defaults to 15 minutes; the operator approved a bounded **30-minute**
-retry on 24 October after setup consumed the shorter sessions. Record and tell
-the operator the absolute cutoff, check remaining time before each new case,
-and collect before doing analysis. Do not start a check near cutoff, silently
-extend a running receipt, or count a timeout-interrupted setup as a result.
-Longer duration does not weaken Offline, save-copy, exact-PID or restore guards.
-
-## Evidence and verdicts
-
-Evidence levels: **source** (implementation/fixtures), **static** (binary/data observations), **native** (observed in DSR), **headset** (operator-reviewed). Never promote one level to another.
-
-Verdicts: **PASS** means the named observation on the identified candidate met a predeclared criterion; **FAIL** means it missed it; **UNVERIFIED** means it was not exercised; **BLOCKED** means a named prerequisite prevents exercising it. BLOCKED/UNVERIFIED never mean complete. Incomplete or dropped trace intervals cannot support the affected claim.
-
-Keep build/config/executable hashes, runtime/settings, commands/exit codes, raw evidence paths and restoration receipt per run. Offline tests, doctor, synthetic stereo schema, diagnostic targets and different texture handles are insufficient native/headset proof. Confirm damage attribution independently; simultaneous HP loss alone does not identify an attack.
-
-## Build verification and packaging
-
-Run from the repository root. Inspect existing CMake cache/toolchain before configuring. The checked-in verifier selects Visual Studio 18 2026/x64.
-
-Development PowerShell scripts and their CTest entry points require PowerShell 7 (`pwsh`). Windows PowerShell 5.1 is not a supported development runtime. The portable product installer remains compatible with PowerShell 5.1 where it uses PowerShell.
+## Offline gate (one command, about 7 s)
 
 ```powershell
-# --parallel without a number uses every logical core (this box: 16).
-# /MP (root CMakeLists) parallelizes TUs inside each target on top of this.
-# Bare --parallel on ctest is safe: every temp-output test is PID-unique
-# (test_config.cpp was fixed to match); the combat_capture_transaction
-# SelfTest stays serialized by its own fixture design, not by a shared file.
-cmake --build build --config Debug --parallel
-ctest --test-dir build -C Debug --parallel --output-on-failure
-cmake --build build --config Release --parallel
-ctest --test-dir build -C Release --parallel --output-on-failure
-pwsh -File tools/auto_verify.ps1
+pwsh -NoProfile -File tools/auto_verify.ps1 -SkipPackage -NoLatest -SkipDoctor
 ```
 
-Use `ctest --test-dir build -C Release -N` to discover actual test names before focused `-R` runs. Register necessary fixtures in tests/CMakeLists.txt. Test mutation/adapter boundaries, invalid state and lifecycle, not only helper self-consistency. Run broader suites once the integrated candidate is ready; repeat when changes/failures justify it.
-For the sub-second edit loop, skip the label-slow timing-honest tests (5x
-diagnostics debounce waits, combat SelfTest case windows, package zip I/O):
-`ctest --test-dir build -C Release --parallel -LE slow --output-on-failure`.
-The full suite (`ctest -C Release --parallel`) is still the gate; `-LE slow`
-is only the inner loop. Slow labels live beside each `add_test` in
-tests/CMakeLists.txt — label a new test `slow` if it waits on production
-timing rather than asserting instantly.
+That configures only when the cache disagrees, builds Release and runs the full
+CTest on the current tree. It is the gate; do not hand-run the same
+steps. Add a Debug build only for a Debug-only boundary. Build
+`build/combat-lab` only for a staged synthetic run — an observer regression,
+not the proof path.
 
-tools/auto_verify.ps1 configures/builds Release, runs CTest and setup Doctor. Successful nonformal runs refresh `dist/DSVR-latest` and its ZIP/verification/CTest receipts. Formal `-Package -Version` runs skip the mutable latest package and publish immutable versioned assets after the release gate. Code-only turns can pass `-SkipDoctor -SkipPackage` (build + full CTest only). It does not install or launch, and does not replace Debug/native/headset qualification. Never reuse historical suite totals as current results. sources/tests define config defaults.
+The verdict step is one command with no path: `python tools/hmd/autopilot.py
+analyze` reads the newest `DSVR-trace-*.jsonl` under the game folder. Pass an
+explicit path to re-check an older capture.
 
-With DSR closed, setup supports `--doctor`, `--install [--game <folder>]` and `--uninstall`; inspect current implementation/help before use. `--yes` acknowledges setup prompts; it does not prove run preconditions. Setup deploys loader/core; an optional ReShade host/add-on requires its own pinned matched binaries and reversible manifest. Select one host at startup; restart for host/action/resource changes rather than assuming reload fully reinitializes XR.
+`tools/auto_verify.ps1` builds and checks the development tree; it does not
+install or launch the game. The protected capture runner stages the separate
+`build/combat-lab` binary, so a normal `build/` result does not qualify a
+combat-lab candidate. Seal the actual binaries and source identity used by
+the runner before its read-only `-Mode Check`.
 
-Formal versioned packages are immutable and require a passed release gate plus a new version. After qualification, run `pwsh -File tools/auto_verify.ps1 -Package -Version <new-version>`: it requires every A-J/K1-K4 checkbox closed, full CTest and Doctor pass, authenticated `gh`, and the existing pre-pushed `v<version>` tag, then automatically publishes the core ZIP, Setup executable and SHA-256 manifest to the repository configured by `origin`. Add `-IncludeLauncher` only when the optional portable app is qualified; it rebuilds `DSVR-Launcher-x64.zip` against that exact candidate and publishes it with `DSVR-Launcher-SHA256.txt`. The publisher verifies both the ZIP digest and embedded Setup hash. It never creates or pushes tags. If upload fails before GitHub creates a release, retry `python -B tools/publish_release.py publish --lanes .empryo/cockpit/lanes --out dist --version <version> --ctest-log build/latest-ctest.txt --doctor-log build/latest-doctor.txt` after fixing tag/auth; add `--include-launcher` only if the matching launcher assets exist. The immutable candidate remains. Development-package refresh is not a release claim. Include original mod code/config/notices and install/rollback/control/support instructions; exclude game assets, decompilation, credentials and saves.
+## Live transaction, only after user go-ahead
 
-## Native/headset acceptance
+From boot and before any automated input, make the game and simulator windows visible and
+confirm the user is away or explicitly watching. The r12 autopilot run showed
+that a hidden game can consume the user's input. Keep Steam Offline plus the
+game's own Offline Mode (no firewall rules), and use the disposable-save
+route. Do not take over an existing game or runtime process.
 
-Target game/runtime cadence is 90/90 at declared settings. Record actual runtime period, measured game rate, complete eye-pair CPU/GPU p50/p95/p99, misses/reprojection and full-scene coverage. Report runtime routes separately. Reduced rates, lower resolution and reprojection are explicit modes and do not satisfy the requested 90 Hz same-simulation stereo gate.
+Use the current `tools/run_combat_capture.ps1` Check/Launch/Finish/Restore
+interface and its receipt. Confirm the exact executable, source, binary,
+config, runtime and save roots before launch. The deadline includes loading.
+Collect raw logs, trace and screenshots before cleanup. Stop only owned PIDs,
+restore test-owned files and saves, then verify original hashes. A failed or
+aborted run still needs an explicit restoration result. Never overwrite
+unrelated changes to force a clean receipt.
 
-Use the runbook cases and the execution ledger A–K on the exact candidate/package. Declare thresholds before each run; do not relax them to convert a failure to PASS. Prepare a short controller/comfort route after machine-observable defects have been investigated. The operator stops immediately for discomfort; do not request repeated blind trials or ask them to recover native offsets.
+The simulator uses a per-process `XR_RUNTIME_JSON` and `SIMXR_DATA_DIR`; the
+local setup pins an upstream commit in `tools/hmd/setup_openxr_simulator.ps1`.
+Its dated UI suite had an AMD teardown crash, so interaction assertions from
+that run do not equal a passing suite. Simulator captures are synthetic and
+cannot qualify physical contact or headset comfort.
 
-Record a reproducible native session of at least ten minutes for an integrated candidate, plus paired eye captures and a 20–45 second gameplay clip before a user-facing playable claim. Final campaign qualification also requires the campaign/special-action matrix and a longer progression session; a ten-minute arena run alone is insufficient.
+Record candidate hashes, commands and exit codes, case timing, actor identity,
+raw evidence paths, verdict limits and restoration receipt in `MODLOG.md`.
 
-Support evidence includes DSVR.log, DSVR-crash dumps, doctor output, exact config/package identity and complete trace; the overhauled tools/vr_trace.py analyzes captures and autonomous session indexes (external-writer transport receipts included). All trace runs go through the overhauled path; the standalone classify/profile/split/prune scripts were culled 27 Oct. For black images isolate source/eye/compositor with bounded observation. For walking lag collect matched tracking/root/view timings. Uninstall test-owned extra DLLs before online use; Steam verification does not necessarily remove extra proxies.
+## One headset run (maximum coverage, one session)
+
+One operator, one disposable save, about 35 minutes. It covers motion
+controls, kinetic combat and physical world interaction in a realistic order:
+Firelink Shrine for setup and movement, then the Undead Burg hollow soldiers
+for combat. The combat proving ground (`combat_test_bench` in the Combat
+panel) classifies swings against a fixed sparring target first, cheap and with
+no native writes; only then do tracked swings run against real enemies with
+the trace on. Kinetic feel comes from measured tip speed, the support-hand
+separation flag, and the weapon mass/torque tuning rows: daggers answer near
+1:1, great weapons lag and need commitment, and the bench damage scale must
+rise with speed. Every physical class gets four cases: eligible hit, activated
+effect, cancelled attempt, and target reuse. Stop after three identical
+failures and revise from the trace instead of repeating.
+
+Predeclare the thresholds before starting: light slash at or above
+`swing_attack_speed_min`, strong slash at or above `swing_attack_heavy_min`,
+parry flick at or above `guard_flick_speed_min`, stillness inside
+`guard_settle_ms`, tip speed below `contact_speed_min` scores nothing. Do not
+relax them afterward.
+
+| # | Minutes | Do | Expect | Evidence |
+|---|---|---|---|---|
+| 0 | 5 | Desktop only: run the offline gate, then Doctor. Confirm FPS Unlock shows installed and START VR is enabled; if it shows required-missing, install it first. Back up saves. Put Steam in Offline Mode (logged off, `WantsOfflineMode 1`). | Gate green, Doctor has no `[FAIL]`, saves backed up, Steam logged off. | Gate output, Doctor output, backup path, Steam log line. |
+| 1 | 3 | Launch through START VR. On the title screen confirm Dark Souls Offline Mode is on (it stays offline until turned back on in the game). Read the theater panel, open the DSVR menu with Home and with left Menu + right grip, walk every menu page, then close it. | Menus readable, both open paths work, no leaked held input on close (stick and buttons neutral). | Screenshot each path, `DSVR.log` menu lines, note any stuck input. |
+| 2 | 5 | Calibrate: run startup calibration, note standing height, then seated height. Recenter with a quick both-stick tap and with F6. Look down at the body. | Head on the native head bone, arms reachable, body visible; recenter keeps reach and wrist fit. | Calibration values, recenter note, seated vs standing heights. |
+| 3 | 5 | Firelink walk: left stick forward/back/strafe, right stick snap then smooth, toggle two-hand stance off. Walk into a wall and up stairs, ride any forced motion, turn 360 degrees. With arm-swing sprint on, swing arms loosely to run; then flap one hand only. | Head-steered default (hand-steered with head fallback when set), no movement debt, native collision stops walls, one-hand flapping is not a run. | Note per case, trace movement lines, any penetration or drift. |
+| 4 | 8 | Combat proving ground on: light slash, strong slash, thrust at the sparring target; check tip speed, damage scale, hand separation, and the HIT/BLOCK/PARRY readout. Then deliberately miss wide, rest the blade on the target, and swing with a wall between. Then trace-on real swings at hollow soldiers: deliberate hits and misses. | Bench: scale rises with tip speed, heavy beats light, misses and resting overlap score nothing, wall blocks. Real: trace shows paired player-to-enemy contact, independent HP outcome, expected cost, complete footer, restored receipt. | Bench readings per swing, `autopilot.py analyze` verdict, footer/actor/HP lines, receipt. |
+| 5 | 7 | Shield and hands: raise the off-hand still to block, hold through a hit, lower to cancel. Flick to parry an eligible attack, then try stationary, moving-away and ineligible timings. Grip the weapon with the support hand to two-hand, release to let go. Open the per-hand weapon wheel (grip held still), release over a slot to switch, release over empty to cancel, switch back. Grab estus from the belt pouch and press X, then cancel a grab. | Native block with stamina and guard-break behavior; parry only on eligible contact; two-hand state follows the tracked grip; wheel switches through the game's own icons and rules; belt gives the real item. | Block/parry/stance lines in log, wheel screenshots, belt note, cancel and reuse cases each. |
+| 6 | 5 | Comfort and lifecycle: try vignette on/off, snap vs smooth turning, F8 theater during play and menus, menu distance. Die once or reload, change equipment, lose and regain tracking, alt-tab focus loss. | No stale input, pointers or XR images after any recovery; settings apply in-session; F7 reloads; scale and alignment feel right. | Comfort note (scale, motion, discomfort), recovery note per event. |
+| 7 | 3 | Close the game, stop only owned PIDs, restore the disposable saves, verify original hashes, run `python tools/hmd/autopilot.py analyze` on the newest capture. | `Restored` receipt, hashes match, verdict recorded with candidate, runtime, scene, equipment and settings. | Receipt, hash check, verdict line, `MODLOG.md` entry. |
+
+Simulator runs use the same table but stay synthetic: they prove the
+observer and the loop, never physical contact or comfort. The keyboard
+synthetic loop is an observer regression only; it bypasses the tracked-swing
+path.
+
+## Packaging
+
+Development packaging does not establish a release. The formal publication
+tool currently requires removed `.empryo/cockpit/lanes/A-K.md` files and is
+unusable on this tree. Do not call its `-Package` path or publish until the
+release gate is rebuilt and the user requests publication. Ship no game files,
+extracted assets, saves or credentials.

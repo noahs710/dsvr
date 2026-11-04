@@ -480,12 +480,14 @@ int InstallFpsUnlock(const std::wstring& exe, const LogFn& log, const ConfirmFn&
     log(L"INFO: the frame-rate dependency is already installed and chained");
     return 0;
   }
-  if (!confirm(L"Install frame-rate dependency",
-               L"DSVR will download the pinned DSR-FPS-Unlock release from GitHub, verify "
-               L"its SHA-256, and install it as the DirectInput chain proxy.\n\n"
-               L"Upstream warns official online play is untested and may risk a ban. "
-               L"Play offline.\n\nContinue?",
-               false, true)) {
+  if (!confirm(L"Install FPS Unlock -- required",
+               L"FPS Unlock is a required DSVR dependency. DSVR will not start "
+               L"without it.\n\n"
+               L"Yes: download the pinned release from GitHub, verify its "
+               L"SHA-256, and install it as the chain proxy.\n"
+               L"No: cancel. DSVR stays installed, but Start stays blocked.\n\n"
+               L"Play offline (Steam Offline + the game's Offline Mode).",
+               false, false)) {
     log(L"Cancelled: the frame-rate dependency was not installed.");
     return 1;
   }

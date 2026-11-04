@@ -12,15 +12,11 @@ namespace dsvr {
 // two distinct borrowed targets, each eye drawn at most once, submit only
 // with the full mask, and whole-pair cancel on any failure or timeout.
 // It deliberately contains no native addresses: the draw callback is the
-// seam where the proven main-scene span plugs in (gate 1 in the design
-// spec). Until that span is proven, no production hook installs this
-// bracket and live output stays mono -- wiring it to an unproven address
-// would be exactly the blind replay the repo forbids.
-// Qwen: 1411CD8A0 is NOT a drop-in DrawFn. It exhausts scratch, constructs
-// contexts and destroys parser/items; its omitted tail polls two CPU counters
-// and returns a value, despite Ghidra's void/no-return pseudocode. Read
-// docs/NATIVE_STEREO_CONTRACT.md before choosing a native hook. A CPU wait is
-// not GPU readiness, and replaying 1411BE710 also repeats dispatcher side effects.
+// seam where a proven main-scene span plugs in. Until that span is proven,
+// no production hook installs this bracket and live output stays mono --
+// wiring it to an unproven address would be exactly the blind replay the
+// repo forbids. Dated static candidates are recorded in MODLOG.md; none is
+// a qualified draw callback. A CPU wait is not GPU readiness.
 struct StereoEyeInput {
   EyeFrustum frustum{};
   Vec3 origin{}, right{1, 0, 0}, up{0, 1, 0}, forward{0, 0, 1};

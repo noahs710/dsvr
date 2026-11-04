@@ -8485,3 +8485,103 @@ Rules set by this: (1) game and sim windows get unhidden BEFORE boot in every fu
 Files and symbols touched: MODLOG.md; evidence in build/verification/autopilot-20261104-1352/ (receipt, mcp-run.json FAIL, DSVR-native.log).
 Next exact action: fix autopilot phase order + unhide-at-boot + user-presence confirmation, offline-test with SelfTest, then re-attempt stage 1 only when the user says go.
 ]
+
+[
+### 4 Nov 2026 - Documentation evidence audit after single-plan cleanup
+Scope: read-only review of source, current docs, retained captures and the latest ledger; no game launch, input injection, deployment or commit.
+Corrections: PLAN/TESTING now agree that a fresh user go-ahead is required for live desktop control; the r12 runner receipt remains Preparing despite the ledger's separate manual Restore report. The October health-writer capture has a paired 44→31 drop but no footer or valid case window; run 21 has a footer and two distinct-object contacts but no target HP drop. Neither is accepted physical-melee proof. The release publisher still requires removed A–K lane files. The launcher says "Launch through Steam," not START VR. The optional texture-tools action means the old claim that DSVR never recommends or reports external tools was too broad.
+Documentation: one PLAN.md and five live docs remain: ENGINEERING, TESTING, VERIFICATION_RUNBOOK, EVIDENCE and ATTRIBUTION. Long dated native/external investigations were removed from the active tree; Git history retains their detailed text. Stale source comments and the autopilot's deleted-spec link were corrected without changing runtime behavior. Historical next actions in this ledger remain dated observations, not current instructions.
+Checks: re-ran `autopilot.py analyze` on run 21 (`UNVERIFIED`, complete=true, combat_total=42, contacts=2, hp_drops=[]), and on the October trace (`PASS`, complete=false, EnemyIns 44→31); `tests/test_autopilot_analyze.py` passed; `tests/test_package.py` passed 16/16; local Markdown links and `git diff --check` passed. These checks do not qualify a live game or headset result. The existing uncommitted autopilot phase-order edit remains unverified.
+]
+
+[
+### 4 Nov 2026 - Offline re-verification for the finished plan
+Task ID / objective: finish PLAN.md's single next task against a verified current state (no game launch, input, deploy or commit).
+Evidence: fresh Release builds green on the current tree — main CTest 126/126, combat-lab CTest 124/124. `py_compile` clean for `tools/hmd/autopilot.py` and `tools/package_launcher.py`; `tests/test_autopilot_analyze.py` passed; `tests/test_package.py` 16/16; `autopilot.py plan` prints the corrected order (check, launch, wait-game, unhide, menu, wait-player, walk, combat, verdict, close) with foreground-gated input. Candidate r12 is stale: 18 source files differ from its `source_manifest`, all from the documentation cleanup, including `src/common/version.h`; a live Check would be refused.
+Next exact action: seal a fresh candidate from the current tree (both builds already green), then run the read-only `-Mode Check`. A live capture still needs the user's go-ahead.
+]
+
+[
+### 4 Nov 2026 - Candidate r13 sealed and Check PASS; autopilot defaults to r13
+Task ID / objective: continue PLAN.md autonomously — re-seal the stale candidate and pass the protected runner's read-only Check. No game launch, input injection, deploy or commit.
+Actions: minted `build/verification/synthetic-hmd-game-20261104-r13/candidate-final-receipt.json` from the r12 file set plus the tracked src/tests files r12 missed (`src/core/iat_patch.h`, `tests/test_autopilot_analyze.py`) and the autopilot/simulator tools; 250 manifest entries, 23 changed or new vs r12, four binaries re-hashed from the rebuild (main core/loader/setup plus combat-lab core). Fixed `tools/hmd/autopilot.py` so `DEFAULT_CANDIDATE` points at r13 and `run` directories get second precision (same-minute retry no longer self-blocks on an existing receipt). Fixed `OpenXRSimulatorConfig` in `tools/run_combat_capture.ps1` to stage `desktop_present = true`: the no-mirror default re-hides the game window every frame while the XR session is visible, which is the documented root cause of the r12 input hijack and makes a foreground proof impossible. The stale dev dist package remains unbuilt and is excluded from the r13 receipt; the runner does not consume it.
+Evidence: `pwsh -NoProfile -File tools/run_combat_capture.ps1 -Mode Check -Receipt build/verification/autopilot-preflight-20261104-r13/receipt.json -CandidateReceipt build/verification/synthetic-hmd-game-20261104-r13/candidate-final-receipt.json -InputMode OpenXRSimulator` prints `CHECK PASS`, 2 declared windows totalling 750 s. `-Mode SelfTest` PASS. `py_compile`, `tests/test_autopilot_analyze.py` and `tests/test_package.py` (16/16) pass. Environment was already compliant: Steam logged off with `WantsOfflineMode=1`, active account 1843241039, exact-game outbound block present, exe hash matches, DSR closed, no SteamVR session.
+Next exact action: the protected live loop (`python tools/hmd/autopilot.py run`) is the next step and still needs the user's explicit go-ahead, because it launches the game and sends synthetic desktop input.
+]
+
+[
+### 4 Nov 2026 - Efficiency audit: the synthetic loop is demoted out of the proof path
+Task ID / objective: user asked for a minimal, purposeful testing flow and said to stop if automation cannot test at human level. No game launch, input, deploy or commit.
+Measured: offline gate `tools/auto_verify.ps1 -SkipPackage -NoLatest -SkipDoctor` = 6.7 s (no-op build + 126/126 CTest); `python tools/hmd/autopilot.py analyze` = 0.09 s (October health-writer, PASS) and 0.70 s (run 21, UNVERIFIED); seal mint 0.21 s; runner Check 2.59 s. The only slow step is the staged synthetic run, and it sends the game's own attack key: the mod reads no `H` (only F6/F8/HOME/F9/config-reload), so the loop exercises the native observer, not the mod's tracked-swing path.
+Decision: demote the keyboard autopilot loop from the proof path. The proof flow is operator + trace: one-command 7 s gate, operator makes a tracked swing with the trace on, `python tools/hmd/autopilot.py analyze` (now defaults to the newest trace) returns the verdict in under a second. The operator supplies input, stereo, comfort and tracking; the trace supplies exact contact and damage accounting. Together they meet or beat a human-only test, which the fake-input loop cannot. The only automated route to real tracked input is simulator pose control, blocked by the deployed runtime binary (disk `0117bc6f` vs pin `0117bc9b`, unrecoverable sources).
+Changes: `autopilot.py analyze` takes an optional path and defaults to the newest trace; PLAN and TESTING now describe the three-step flow; candidate r13 re-sealed after the tool edit and passes Check.
+Next exact action: run the three-step flow on a real swing; do not accept the synthetic loop as physical-melee proof.
+]
+
+[
+### 4 Nov 2026 - Cleanup pass: docs condensed to four, one decoder seam recorded
+Task ID / objective: user asked to finish all busywork, refinement, condensation, simplification, ponytail and architecture cleanup; no game launch, input, deploy or commit.
+Changes: merged `docs/VERIFICATION_RUNBOOK.md` (acceptance cases) into `docs/TESTING.md` and deleted the separate file; the docs tree is now ATTRIBUTION, ENGINEERING, EVIDENCE, TESTING. Added a `Module seams` section to ENGINEERING naming `tools/vr_trace.py` as the single native-trace decoder and recording that motion-input/settings/frame-transaction modules stay unbuilt until a change needs the seam. Updated PLAN and README links.
+Skipped (ponytail): folding `tools/hmd/autopilot.py`'s second reader onto `vr_trace.read_capture` now — the output contracts differ and only synthetic captures could re-verify, so the seam is named instead. Deleting `src/core/frame_rate.*` — a deliberate compatibility stub documented to stay disabled, not accidental dead code. Deleting the demoted synthetic run or the protected runner — both remain staged-session tools and the runner keeps its SelfTest.
+Checks: gate green (126/126 Release CTest, 6.9 s); `tests/test_package.py` 16/16; `tests/test_autopilot_analyze.py`; no broken local links; `git diff --check` clean. The working tree is still the uncommitted consolidation (82 paths); not committed per AGENTS.
+Next exact action: operator runs the three-step proof flow on a real swing.
+]
+
+[
+### 4 Nov 2026 - AGENTS.md rewritten as the project charter
+Task ID / objective: user asked for a full rewrite of AGENTS.md for the real use case: a full OpenXR conversion of DSR, standardised on IlyaMez/EldenringVR, conjuring mechanics from existing game systems instead of inventing them.
+Changes: AGENTS.md now carries the mission (rough from-scratch full OpenXR conversion of the pinned DSR build), a 12-row ERVR parity target translated to DSR (per-eye stereo, in-body first person, swing-is-the-attack, shield, two-hand, cast aim, weapon wheel, pouch, HUD layer, in-menu settings, one launcher, optional haptics), the "conjure from existing systems" rule with an explicit forbidden list (direct HP/stat edits, synthetic enemies, fake hit events, gesture-to-button substitutes, teleport, fabricated states), the evidence labels, the single-plan and MODLOG rules, the fast gate plus operator+trace proof, and the safety rules. The ERVR feature list was read from the upstream README (fetched 4 Nov 2026), not recalled. DSR translations are explicit: no horse, no co-op, no Ash of War.
+Next exact action: operator runs the three-step proof flow; record dated per-row parity status in docs/EVIDENCE.md.
+]
+
+[
+### 4 Nov 2026 - Plan start: next step verified, two preconditions found
+Task ID / objective: user directed "Start working on the plan"; began the plan's single next task. No game launch, input, deploy or commit.
+Verification: offline gate green (126/126 Release CTest, 6.6 s). Runtime hashes: the protected runner's upstream simulator runtime is `2ebc134a…` and matches `upstream-lock.json`; the v1.7.1 runtime is `90dace37…` and matches its `runtime-lock.json`; the separately registered active runtime under `Documents\OpenXR-Simulator` is `666b2040…` and matches no lock. The plan's "disk 0117bc6f vs pin 0117bc9b" claim was stale and is corrected. SteamVR is installed (`steamxr_win64.json`, `vrpathreg.exe`), but no headset runtime is active and no headset is connected (Oculus OpenXR runtime files absent, vrserver not running).
+Finding: the tracked-swing attack bridge exists but is gated off in `src/core/input.cpp` — the attack gate clears on `arm_ik_log_only` before `motion_attacks`/`physical_attacks`, and a fired swing only logs. Clearing the flag also enables the unproven arm IK native pose write, so the bridge cannot be tested without proving that write first. The operator step therefore needs (a) the active runtime switched to SteamVR with the headset connected, and (b) the arm IK write proven before the tracked attack can be tested.
+Next exact action: switch the active OpenXR runtime to SteamVR, connect the headset, run the three-step operator flow. With no headset, the alternative is the simulator arm-IK experiment.
+]
+
+[
+### 4 Nov 2026 - First headset sessions: SteamVR mono VR works; recovery room fixed and made testable
+Task ID / objective: operator ran the plan's headset path over SteamVR; no further game run after the report.
+Headset evidence (installed lab core rebuilt 17:08): XR instance on `steamxr_win64.json` (SteamVR/OpenXR 2.19.1, Meta compatibility mode), per-eye view 2888x3088, 90 Hz observed, session READY->FOCUSED, both hands tracking valid, FP camera anchor bound at (-14.01,190.25,9.12). The mono host submitted the same centered scene image to both eyes with "native stereo renderer unbound". Trace `DSVR-trace-25728-78008171-1.jsonl`: complete, 852 combat records, 251 player contacts against 1 distinct target, 0 HP drops, every read reason `unqualified_actor_type`/`not_admitted_before_call`; `CombatHealth: equipment=0` all session and `InputBridges attack=no-committed-hands suppress=damage-unbound`, so the tracked swing never fired. One earlier launch exited during boot because `desktop_present=false` minimized the game window; the operator config now sets `desktop_present=true`.
+Fix: the reported "Restoring the view" panel is the camera-provenance recovery room. It now tolerates the game presenting one display period ahead of the XR frame (the 45 fps game against the 90 Hz loop), and names the first failing gate once per second (`XR: recovery room gate=...`). The eight gates moved into the pure, clock-free header `src/core/mono_provenance.h`, with `tests/test_mono_provenance.cpp` covering every gate, the freshness boundary, the one-period prediction tolerance and non-finite projections.
+Checks: main Release 127/127, lab Release 125/125, main Debug 127/127; `tests/test_package.py` 17/17 including a new launcher-plan rejection test; r13 re-sealed. The runner's read-only Check now refuses only on environment: Steam is Logged On with `WantsOfflineMode 0` (logon at 17:06:52), so the offline-only preflight correctly blocks a protected run.
+Next exact action: switch Steam to Offline mode before any game launch (the mod is installed in the game dir); the tracked attack still needs the equipment bind (`equipment=0` -> no committed hands) before the swing bridge can fire.
+]
+
+[
+### 4 Nov 2026 - Bridge decisions extracted to a pure module; log takes the module result
+Task ID / objective: continue offline codebase work (no game launch, no window activation).
+Changes: the tracked attack/defence/suppress decision moved out of `ApplyInputFramePolicy` into the pure, clock-free `src/core/bridge_gates.h` (`BridgeGateState` -> `BridgeGates`, including the shared gate and fail-closed defaults). `input.cpp` maps live state once and reads `attack_ready`/`defence_ready`/`suppress_on`/`shared`/`motion_bridge_armed`; four mirror locals are gone and the suppress path no longer makes a second `CombatNativeGetStatus()` call. `LogBridgeReadiness` now takes the `BridgeGates` result instead of four loose arguments, so the log and the decision cannot disagree. `tests/test_bridge_gates.cpp` covers every shared gate and its precedence order, the attack/defence-specific gates, suppression precedence and its independence from the bridge gates, the arming flag and fail-closed defaults. ENGINEERING now names both pure gate headers as the module seams.
+Checks: main Release 128/128, lab Release 126/126, main Debug 128/128; `tests/test_package.py` 17/17; r13 re-sealed over the new files (254-entry manifest, 0 mismatches). The runner's read-only Check still refuses on the environment (Steam Logged On, `WantsOfflineMode 0`), which is the offline-only gate doing its job.
+Next exact action: switch Steam to Offline before any game launch; the tracked attack still needs the real equipment bind.
+]
+
+[
+### 4 Nov 2026 - Launcher: ERVR-shaped Play tab, readiness checks, controls reference, 12.9 MB smaller payload
+Task ID / objective: give the optional Electron launcher the ERVR shape without losing the DSVR look; keep the payload small.
+Changes: tabs are now Play / Install / Options / Controls. Play holds the status strip, the doctor readiness checklist (parsed `[OK]`/`[WARN]`/`[FAIL]`/`[INFO]` rows with status dots and a summary), the START VR button and the session log; Controls documents the verified DSVR controls (Home/F6/F7/F8/F9 hotkeys; left Menu + right grip held 0.5 s; both stick clicks held 3 s for the menu and tapped to recenter; left stick click + A twice for calibration). Options is the former Settings page. The renderer passes an id-reference check, the headless engine smoke passes, and a window-focus refresh keeps the game state current.
+Size: `electronLanguages: ["en-US"]` prunes the Electron payload from 55 locale paks to one; the packaged launcher fell from 163,596,211 to 150,650,676 bytes (12.9 MB smaller), with `app.asar` at 63 KB and the engine resources unchanged.
+Fix: `copy_package_resources` now rebuilds the launcher staging from scratch; the stale staging was shipping an old `MODLOG.md` and old engine DLLs beside the current engine. `tests/test_package.py` covers the rebuild (18 tests).
+Note: packaging fails when `ELECTRON_RUN_AS_NODE=1` is inherited (the built exe starts as Node); clear it before running `tools/package_launcher.py` in an Electron-hosted shell.
+Next exact action: open `dist/DSVR-Launcher-x64.zip`'s launcher on a desktop when convenient; no game launch was made.
+]
+
+[
+### 4 Nov 2026 - Presets overhauled: one shared table, four user-facing choices
+Task ID / objective: refine the preset settings and replace the five-preset set with a smaller, plain-language one shared by the launcher and the native setup UI.
+Changes: new `src/core/user_presets.h` owns the set — Comfort, Balanced, Sharper, Match my PC — with stable verbs, labels, one-line details and the apply logic; `perf_fit.h` now exposes `AutoFitForTier` instead of the MSAA-era `PresetForTier`. Engine verbs are `preset-comfort/balanced/sharper/match` plus the new `preset-index` (the launcher renders its cards from it), and the old `preset-perf/veteran/smooth/res` names stay as aliases. The native setup GUI's five buttons collapse to the same four and share the apply code. `Match my PC` writes only eye scale and AA, so a hardware read can no longer flip the player's comfort choices, and it fixes the old auto-smooth bug where a quality-tier PC wrote `aa_mode = MSAA 4x (3)`, which `ConfigValid` rejects.
+Launcher: the Options tab's flat preset row became four preset cards (label plus plain-language detail) rendered from `preset-index`, with a separate "Reset to defaults"; presets reload the settings after applying and disable while the game is running.
+Checks: main Release 129/129 (new `user_presets`; `perf_fit`, `setup_json` and the GUI `setup_theme` tests updated), launcher renderer id/syntax checks, dev launcher smoke including `preset-index`, and the packaged launcher smoke. The rebuilt mod package carries the new setup exe and the rebuilt launcher zip (150,701,761 bytes) matches it.
+Next exact action: open the rebuilt launcher's Options tab on a desktop when convenient; no game launch was made.
+]
+
+[
+### 4 Nov 2026 - Confirmations refined, FPS Unlock required, firewall removed, controls and test session improved
+Task ID / objective: refine all confirmation popups; gate FPS Unlock as a required dependency; remove firewall options (DSR Offline Mode replaces them); improve XR and desktop controls; make motion/kinetic/physical-interaction testing full, fast and operator-easy per run.
+Changes: Electron `window.confirm` calls (preset apply, uninstall, safe defaults) replaced with one styled in-page `confirmAction` dialog (title, plain body, Esc/backdrop cancel, focus starts on Cancel, focus restored); native `MakeConfirm` now honors `default_yes` with warning icon for destructive prompts; install/uninstall/chained-mod/FPS prompts rewritten in plain Yes/No language. Doctor emits `[FAIL]` when FPS Unlock is missing and START VR stays disabled until it is installed and chained; `status` JSON carries `fps_unlock_state.required:true`; native `LaunchGame` refuses with a message and returns to Game & mods. All firewall code removed (setup helpers, CLI/JSON verbs, GUI ids, Electron verbs and buttons, runner gate, preflight check) and replaced with Steam Offline plus the game's own Offline Mode, which makes no online connections until turned back on in the game. Launcher Controls page now documents every real path (menu/view chords, stick move/turn, squeeze/trigger attacks, block/parry, two-hand, stick D-pad, arm-swing sprint, reach envelope, desktop Home/F6/F7/F8/F9/arrows/mouse); the in-game Diagnostics footer lists the same. `docs/TESTING.md` gains a 35-minute one-headset-run table (preflight, boot, calibration, locomotion, bench-then-native combat, shield/hands/wheel/belt, comfort/lifecycle, shutdown) with predeclared thresholds and a three-identical-failures stop rule. `tests/test_setup_theme.cpp` covers the FPS launch gate and the new wording.
+Checks: offline gate 129/129 Release CTest green (setup_theme needed the gate/button-text/overlap fixes above); `node --check` on launcher JS; `DSVR-Setup.exe --json status/preset-index/settings-index/--help` verified (status shows `required:true`, firewall verbs gone). No game launch was made.
+Next exact action: run the new TESTING.md one-headset-run table with Steam Offline and in-game Offline Mode; tracked-swing proof still needs the equipment bind.
+]

@@ -8,10 +8,10 @@ namespace {
 std::mutex g_mutex;
 CombatNativeStatus g_status;
 
-// Qwen: this adapter reads equipment; it deliberately does not dispatch damage.
+// This adapter reads equipment; it deliberately does not dispatch damage.
 // 140322910 is a health setter, not melee. Its callers include zero/max-HP and
 // replicated-state paths. Even the split HP+delta paths still lack a qualified
-// delta producer/outcome contract. See docs/NATIVE_MELEE_CONTRACT.md; do not turn
+// delta producer/outcome contract. See docs/EVIDENCE.md; do not turn
 // a plausible EDX value into a new native-call signature.
 
 // Facts recovered from the pinned EXE and offline native corpus, not inferred

@@ -9,12 +9,8 @@
 
 namespace dsvr {
 
-// Pure, unit-tested combat numbers for the P5 slice. The runtime (H5) owns
-// hit-volume ownership and the game's damage dispatch; this module owns
-// the three mappings that must never be re-derived at the hit site:
-//   speed -> damage scale, blade capsule -> overlap, hit -> haptic pulse.
-// Damage fires only on measured overlap at speed (docs/ENGINEERING.md);
-// nothing here fires on a timer or an animation window.
+// Pure combat calculations: speed scale, diagnostic blade overlap and haptic
+// pulse. These calculations do not establish a native hit or dispatch damage.
 
 struct CombatParams {
   float full_speed = 4.0f;      // m/s at which the scale saturates
@@ -244,7 +240,7 @@ struct BladeKinematics {
   // relative to the head. Physical walking translates head and hands
   // together in the tracking space; that shared translation is
   // locomotion, not a swing, and must never become swing energy
-  // (docs/ENGINEERING.md D). Positions stay absolute so overlap and the
+  // (docs/ENGINEERING.md). Positions stay absolute so overlap and the
   // tip sweep still track the real blade. Only translation is removed:
   // turning in place still swings the tip around the head, as it should.
   // A space-epoch change (recenter / new reference space), a non-finite

@@ -11,7 +11,7 @@ namespace dsvr {
 // Read-only verification of the pinned native 140207F10 copy contract.
 // Native code alone applies this mapping/proportion operation. This verifier
 // must never be used as a replacement body writer or an avatar-scale setter.
-// Static bytes and the independent natural capture: docs/ARM_IK_EVIDENCE.md.
+// Static bytes and the dated natural capture are recorded in MODLOG.md.
 inline constexpr unsigned kPoseCopyCapacity = 80;
 struct PoseCopyLayout {
   unsigned source_count = 0, destination_count = 0;

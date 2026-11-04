@@ -1,7 +1,6 @@
-// Hardware-tier presets only choose eye-buffer scale and antialiasing.
+// Hardware-tier fit only chooses eye-buffer scale and antialiasing.
 // Frame rates remain headset/monitor-owned and are not preset.
 #include <cstdio>
-#include <string>
 
 #include "../src/core/perf_fit.h"
 
@@ -17,19 +16,21 @@ int main() {
   CHECK(TierForHardware({8, 0, 1}) == HardwareTier::kBalanced);
   CHECK(TierForHardware({8, 0, 0}) == HardwareTier::kPerformance);
 
-  const Preset smooth = PresetForTier(HardwareTier::kPerformance, true);
-  CHECK(std::string(smooth.id) == "auto-smooth" && smooth.render_scale_percent == 100);
-  const Preset res = PresetForTier(HardwareTier::kPerformance, false);
-  CHECK(std::string(res.id) == "auto-res" && res.render_scale_percent == 100);
-  const Preset quality_smooth = PresetForTier(HardwareTier::kQuality, true);
-  CHECK(quality_smooth.render_scale_percent == 100);
-  CHECK(quality_smooth.aa_mode == AaMode::kMsaa4x);
-  const Preset quality_res = PresetForTier(HardwareTier::kQuality, false);
-  CHECK(quality_res.render_scale_percent == 130);
-  CHECK(PresetForTier(HardwareTier::kBalanced, true).render_scale_percent == 100);
+  // The fit must stay inside the supported completed-image AA modes (0/1) and
+  // the render-scale range ConfigValid accepts; the old MSAA selection made a
+  // quality-tier preset fail validation.
+  const HardwareTier tiers[] = {HardwareTier::kPerformance,
+                                HardwareTier::kBalanced,
+                                HardwareTier::kQuality};
+  for (HardwareTier tier : tiers) {
+    const AutoFit fit = AutoFitForTier(tier);
+    CHECK(fit.aa_mode == 0 || fit.aa_mode == 1);
+    CHECK(fit.render_scale_percent >= 50 && fit.render_scale_percent <= 200);
+  }
+  CHECK(AutoFitForTier(HardwareTier::kPerformance).render_scale_percent == 80);
+  CHECK(AutoFitForTier(HardwareTier::kBalanced).render_scale_percent == 100);
+  CHECK(AutoFitForTier(HardwareTier::kQuality).render_scale_percent == 130);
 
-  CHECK(DefaultScaleForStereo(false) == 100);
-  CHECK(DefaultScaleForStereo(true) == 85);
   std::puts("test_perf_fit: PASS");
   return 0;
 }

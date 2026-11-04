@@ -49,6 +49,11 @@ namespace dsvr {
 bool ConfigLoad(const wchar_t*, Config& out) { out = fixture; return true; }
 bool ConfigSave(const wchar_t*, const Config& value) { fixture = value; ++saves; return true; }
 bool ConfigSaveDefaults(const wchar_t*) { return true; }
+// ApplyPreset validates the whole config before saving; the presets only touch
+// in-range fields, so mirror the real clamp here.
+bool ConfigValid(const Config& value) {
+  return value.render_scale_percent >= 50 && value.render_scale_percent <= 200;
+}
 int ReadLastHeadsetHz(const wchar_t*) { return stub_headset_hz; }
 bool WriteLastHeadsetHz(const wchar_t*, int) { return true; }
 std::wstring WideFromUtf8(const std::string& value) { return {value.begin(), value.end()}; }
@@ -333,10 +338,20 @@ int main() {
   // local test double: this test cannot launch a game or deploy anything.
   // Steam DRM: the launch routes through the Steam client (rungameid), not
   // the raw exe, so Steam init succeeds whether Steam is open or not.
+  // FPS Unlock is a required launch dependency, so the double reports it
+  // chained before any launch attempt.
+  fps_unlock_state.chain_present = fps_unlock_state.ini_present = fps_unlock_state.proxy_set = true;
   SendMessageW(g_main, WM_COMMAND, MAKEWPARAM(CTL_LAUNCH, BN_CLICKED), 0);
   CHECK(launches == 1);
   CHECK(launched_exe.find(L"Steam.exe") != std::wstring::npos);
   CHECK(launched_dir == L"C:\\DSVR-Theme-Test");
+  // Launch gate: with DSVR installed but the required dependency missing,
+  // launch is refused and the window returns to the Game & mods page.
+  fps_unlock_state.chain_present = fps_unlock_state.ini_present = fps_unlock_state.proxy_set = false;
+  SendMessageW(g_main, WM_COMMAND, MAKEWPARAM(CTL_LAUNCH, BN_CLICKED), 0);
+  CHECK(launches == 1 && g_page == SetupPage::Game);
+  // Back to absent: the dependency-button section below covers both states.
+  fps_unlock_state.chain_present = fps_unlock_state.ini_present = fps_unlock_state.proxy_set = false;
   install_state = {false, false};
   UpdateBrief();
   CHECK(GetText(g_launch) == L"Set up DSVR" && IsWindowEnabled(g_native_launch));
@@ -393,7 +408,7 @@ int main() {
   CHECK(fps_unlock_installs == 1);
   // A successful install reloads the game folder, which reports the dependency
   // state in the activity log.
-  CHECK(GetText(g_log).find(L"not installed - press Install FPS Unlock") != std::wstring::npos);
+  CHECK(GetText(g_log).find(L"Required FPS Unlock: missing - press Install required FPS Unlock before starting") != std::wstring::npos);
   fps_unlock_state.chain_present = fps_unlock_state.ini_present = fps_unlock_state.proxy_set = true;
   SendMessageW(g_main, WM_COMMAND, MAKEWPARAM(CTL_VERIFY, BN_CLICKED), 0);
   CHECK(!IsWindowEnabled(fps_btn));
@@ -401,15 +416,21 @@ int main() {
   SendMessageW(g_main, WM_COMMAND, MAKEWPARAM(CTL_FPS_UNLOCK, BN_CLICKED), 0);
   CHECK(fps_unlock_installs == 1);
   fps_unlock_state.chain_present = fps_unlock_state.ini_present = fps_unlock_state.proxy_set = false;
-  // Hardware auto-fit presets: probe stub reports 32 GB / 12 GB / discrete,
-  // so both presets land on the Quality tier mapping.
+  // Presets: the three style presets own comfort/turning and eye scale;
+  // "Match this PC" owns only eye scale and AA, inside the supported AA modes.
+  probed_hardware = {32, 12, true};
   SetText(g_log, L"");
-  SendMessageW(g_main, WM_COMMAND, MAKEWPARAM(CTL_DETECT_HW, BN_CLICKED), 0);
-  CHECK(GetText(g_log).find(L"tier Quality") != std::wstring::npos);
-  CHECK(GetText(g_log).find(L"Auto Smooth (") != std::wstring::npos);
-  SendMessageW(g_main, WM_COMMAND, MAKEWPARAM(CTL_PRESET_SMOOTH, BN_CLICKED), 0);
-  CHECK(fixture.frame_limit_fps == 80 && fixture.render_scale_percent == 100 &&
-        fixture.aa_mode == 3);
+  SendMessageW(g_main, WM_COMMAND, MAKEWPARAM(CTL_PRESET_COMFORT, BN_CLICKED), 0);
+  CHECK(fixture.frame_limit_fps == 80 && fixture.render_scale_percent == 90 &&
+        fixture.aa_mode == 1);
+  CHECK(fixture.comfort_vignette && fixture.snap_turn && !fixture.smooth_turn);
+  CHECK(GetText(g_log).find(L"Preset applied") != std::wstring::npos);
+  SendMessageW(g_main, WM_COMMAND, MAKEWPARAM(CTL_PRESET_MATCH, BN_CLICKED), 0);
+  CHECK(fixture.frame_limit_fps == 80 && fixture.render_scale_percent == 130 &&
+        fixture.aa_mode == 1);
+  // Match my PC must not flip the comfort choices the preset before it made.
+  CHECK(fixture.comfort_vignette && fixture.snap_turn && !fixture.smooth_turn);
+  CHECK(GetText(g_log).find(L"quality fit") != std::wstring::npos);
     // Instant-apply: ticking a checkbox writes the toml without Save.
     {
       const int saves_before = saves;
@@ -418,13 +439,12 @@ int main() {
       SendMessageW(g_motion, BM_CLICK, 0, 0);
       CHECK(saves == saves_before + 2);
     }
-  SendMessageW(g_main, WM_COMMAND, MAKEWPARAM(CTL_PRESET_RES, BN_CLICKED), 0);
-  CHECK(fixture.frame_limit_fps == 80 && fixture.render_scale_percent == 130);
   probed_hardware = {8, 4, false};
   SetText(g_log, L"");
-  SendMessageW(g_main, WM_COMMAND, MAKEWPARAM(CTL_PRESET_SMOOTH, BN_CLICKED), 0);
-  CHECK(fixture.frame_limit_fps == 80 && fixture.render_scale_percent == 100);
-  CHECK(GetText(g_log).find(L"tier Performance") != std::wstring::npos);
+  SendMessageW(g_main, WM_COMMAND, MAKEWPARAM(CTL_PRESET_MATCH, BN_CLICKED), 0);
+  CHECK(fixture.frame_limit_fps == 80 && fixture.render_scale_percent == 80 &&
+        fixture.aa_mode == 1);
+  CHECK(GetText(g_log).find(L"performance fit") != std::wstring::npos);
   probed_hardware = {32, 12, true};
   // Navigation opens focused pages and keeps the shared launch/header controls available.
   CHECK(GetDlgItem(g_main, CTL_NAV_HOME) != nullptr);

@@ -3,8 +3,7 @@
 
 namespace dsvr {
 
-// Pure, unit-tested stick turning (docs/TESTING.md: right stick
-// turns; snap by default, smooth optional). OpenXR action reading stays
+// Pure, unit-tested stick turning. OpenXR action reading stays
 // outside; this module owns the two decisions that feel broken when they
 // are wrong and cannot be tuned without a headset once wired:
 //   - a held stick must fire ONE snap, then stay silent until the stick

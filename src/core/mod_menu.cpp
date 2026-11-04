@@ -1076,9 +1076,13 @@ void DiagnosticsPanel() {
   ImGui::Text("Blur reads forced off: %llu / enable requests blocked: %llu",
               static_cast<unsigned long long>(blur.reads),
               static_cast<unsigned long long>(blur.blocked_enables));
-  ImGui::TextDisabled("Home: open / close     F6: recenter     F8: theater");
+  ImGui::TextDisabled("Home: menu     F6: recenter     F7: reload settings     F8: theater     F9: log marker");
   ImGui::TextWrapped(
-      "VR shortcut: hold left Menu + right grip. Use the left stick and A to navigate/select, or aim and pull the right trigger. B goes back.");
+      "Desktop: arrows/Enter/Esc navigate, mouse points. The F7 and F9 keys can be rebound in Options.");
+  ImGui::TextWrapped(
+      "Headset: left Menu + right grip (0.5 s) or both sticks (3 s) opens this menu; a quick both-stick tap recenters. "
+      "Left stick moves, right stick turns, weapon squeeze/trigger attacks, off-hand squeeze blocks, a flick parries. "
+      "Use the left stick and A to navigate/select, or aim and pull the right trigger. B goes back.");
   ImGui::TextWrapped("The game world continues while this menu is open.");
 }
 // Startup-selected frame-host values, frozen at install time (core.cpp) or

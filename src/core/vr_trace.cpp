@@ -1229,8 +1229,8 @@ static bool InstallTrace(bool enabled,bool combat_only,bool session_only=false) 
   const MH_STATUS status = MH_Initialize();
   if (status != MH_OK && status != MH_ERROR_ALREADY_INITIALIZED) return false;
   const bool full_trace = !combat_only && !session_only;
-  // Verified against pinned disk image on 2026-10-14; corpus provenance in
-  // MODDING_PLAN.md. These are observations, NOT patch shortcuts.
+  // Verified against pinned disk image on 2026-10-14. These are observations,
+  // NOT patch shortcuts.
   const unsigned char wait[]{0x48,0x89,0x74,0x24,0x18,0x57,0x48,0x83,0xec,0x20,
                               0x8b,0x41,0x60,0x8b,0xf2,0x48,0x8b,0xf9};
   const unsigned char render[]{0x40,0x55,0x53,0x56,0x57,0x41,0x54,0x41,0x55,

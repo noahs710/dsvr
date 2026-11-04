@@ -1,4 +1,4 @@
-// Electron main (docs/ELECTRON_LAUNCHER_PLAN.md phase 2). Deliberately dumb:
+// Electron main. Deliberately dumb:
 // locate the co-located DSVR-Setup.exe, hash-verify it, and answer renderer
 // IPC by verb name only. All logic lives in the C++ engine (engine.mjs just
 // spawns the allow-listed argv). --smoke runs the seam headless and exits.
@@ -75,7 +75,7 @@ async function runSmoke() {
   console.log(`engine status: ${JSON.stringify(engineStatus)}`);
   if (!engineStatus.ok) return app.exit(2);
   let failures = 0;
-  for (const verb of ["status", "verify", "doctor", "settings-index", "config-get"]) {
+  for (const verb of ["status", "verify", "doctor", "settings-index", "preset-index", "config-get"]) {
     const r = await callEngine(verb, engine.exe, undefined, gamePath);
     const brief = r.json
       ? JSON.stringify(r.json).slice(0, 160)

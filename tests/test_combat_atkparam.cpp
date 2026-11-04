@@ -9,7 +9,7 @@
 // id we name must decode back to the same row, the flag byte must survive
 // both directions, and a damage scale must land in the correction domain the
 // row actually stores. Every check below is a claim about the pinned research
-// cache (docs/SOULSMODDING_REFERENCE.md), not about our preference.
+// cache, not about our preference. See docs/EVIDENCE.md for its limits.
 int main() {
   int failures = 0;
   auto report = [&](int line, const char* what) {

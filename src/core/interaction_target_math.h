@@ -54,7 +54,7 @@ inline constexpr InteractionClassRange kInteractionClassRanges[] = {
 // lever rows differ (90, 110 and 60 raw; PARAMDEF labels centimetres).
 // This class-wide gate still refuses: selected native row, distance origin,
 // prompt/LOS and object lifetime are unbound. Do not substitute a default
-// or one class-wide guess. See docs/NATIVE_INTERACTION_CONTRACT.md.
+// or one class-wide guess. See docs/EVIDENCE.md.
     {InteractionClass::Lever, 0.0f,
      "unverified: refuses until H1 research-cache value cited"},
 };

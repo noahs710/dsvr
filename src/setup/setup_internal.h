@@ -38,11 +38,8 @@ InstallState InstallStateOf(const std::wstring& exe);
 
 dsvr::HardwareSpec ProbeHardware();  // fail-soft: unknown fields stay zero (lowest tier)
 
-bool FirewallSupported(const std::wstring& exe, const LogFn& log, bool add);
-bool FirewallBlocked();  // true when both DSVR block rules exist
-
 // ---------------------------------------------------------------------------
-// DSR-FPS-Unlock dependency (the chain-loaded frame-rate owner).
+// DSR-FPS-Unlock dependency (REQUIRED, the chain-loaded frame-rate owner).
 //
 // DSVR never caps the game itself; high-rate pacing belongs to this external
 // MIT dependency, loaded through the loader's chain_proxy. The pin below is the
@@ -64,12 +61,14 @@ const FpsUnlockPin& FpsUnlockPinInfo();
 // different path) is refused before a byte is fetched.
 bool FpsUnlockUrlAllowed(const std::wstring& url);
 
-// What the game folder holds for the dependency right now.
+// What the game folder holds for the dependency right now. FPS Unlock is a
+// required dependency: DSVR does not launch without it (see DoctorChecks).
 struct FpsUnlockState {
   bool chain_present = false;  // dinput8-chain.dll next to the exe
   bool ini_present = false;    // DSR-FPS-Unlock.ini next to the exe
   bool proxy_set = false;      // DSVR.toml chain_proxy names the chain file
   bool installed() const { return chain_present && ini_present && proxy_set; }
+  bool required() const { return true; }
 };
 FpsUnlockState FpsUnlockStateOf(const std::wstring& exe);
 

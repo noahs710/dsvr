@@ -36,6 +36,8 @@ def verify_engine(package: Path) -> dict[str, Path]:
     if not manifest.is_file():
         raise FileNotFoundError("package must contain DSVR-SHA256.txt")
     entries = manifest_entries(manifest.read_text(encoding="utf-8"))
+    if any(PurePosixPath(name).name.upper().endswith("PLAN.MD") for name in entries):
+        raise ValueError("launcher package must not include development plans")
     files = {name: package / name for name in ENGINE_FILES}
     missing = [name for name, path in files.items() if not path.is_file()]
     if missing:
@@ -52,10 +54,18 @@ def verify_engine(package: Path) -> dict[str, Path]:
 
 
 def copy_package_resources(package: Path, destination: Path) -> None:
-    """Copy and verify every file named by the staged package manifest."""
+    """Copy and verify every file named by the staged package manifest.
+
+    The destination is rebuilt from scratch: a leftover file from an older
+    package (a stale engine DLL, a dev ledger) must never ship beside the
+    current engine.
+    """
     manifest = package / "DSVR-SHA256.txt"
     entries = manifest_entries(manifest.read_text(encoding="utf-8"))
     root = package.resolve()
+    if destination.exists():
+        shutil.rmtree(destination)
+    destination.mkdir(parents=True, exist_ok=True)
     for relative, expected in entries.items():
         posix = PurePosixPath(relative)
         if posix.is_absolute() or not posix.parts or ".." in posix.parts:

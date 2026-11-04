@@ -1,52 +1,48 @@
-# DSVR development build
+# DSVR development snapshot
 
-DSVR is an unofficial, offline-only VR mod for the Windows Steam version of
-Dark Souls: Remastered. This package is a development snapshot, not a completed
-or formally qualified release. Native stereo, physical combat, and headset
-comfort remain under active qualification.
+DSVR is an unofficial, offline-only VR mod for the Windows Steam copy of Dark
+Souls: Remastered. This checkout is development work, not a qualified release.
+The code pins App 1.03.1 / Steam build 10943698 and the exact executable hash
+in `src/common/version.h`; other executable builds are refused.
 
-## This snapshot
-
-- Adds passive D3D11 render-path diagnostics for multisampled color/depth
-  targets, draw calls, clears, copies, and resolves.
-- Reports 2x/4x format support separately from observed render-path candidates.
-- Does not enable native MSAA or TAA. No game content or save files are included.
+The source contains an OpenXR path, first-person camera, theater presentation,
+calibration, arm IK, native Setup, and an optional Electron launcher. Native
+two-eye scene rendering, tracked-contact melee and shield damage, headset
+comfort, and campaign play have not passed acceptance. The launcher's Play tab
+shows a readiness checklist and a START VR button that starts the game through
+Steam; a headset-qualified release has not been shown. [The evidence snapshot](docs/EVIDENCE.md) distinguishes code from
+dated game and simulator observations.
 
 ## Requirements
 
-- Windows x64 and the Steam copy of Dark Souls: Remastered.
-- Supported game build: App 1.03.1 / Steam build 10943698.
-- A working OpenXR runtime. SteamVR and Meta Quest Link are supported host
-  options; select the runtime you intend to use before starting the game.
-- Offline play only. Do not use DSVR for online play.
+- Windows x64, the pinned Steam game build, and an OpenXR runtime.
+- DSR-FPS-Unlock (required dependency): install it from Setup before starting VR.
+- Offline play. Do not use this mod in online sessions. Put Steam in Offline
+  Mode and set Dark Souls to Offline Mode in the game; Offline Mode makes no
+  online connections until you turn it back on in the game.
+- The matching DSVR package and Setup executable; mixed build files are not a
+  valid install.
 
-## Install and remove
+## Install and remove a development package
 
-1. Close the game.
-2. Extract this archive and run `DSVR-Setup.exe`.
-3. Select the Dark Souls: Remastered install folder and follow Setup's prompts.
-4. Start the game through Steam. To remove DSVR, close the game and run Setup's
-   uninstall action; it restores files owned by the installer.
+Close the game. Extract one matching package and run `DSVR-Setup.exe`; use its
+game-folder selection and verification before installing. Start the game through
+Steam while offline. To remove the mod, close the game and use Setup's uninstall
+action. Keep Setup's backup files until removal and restoration are confirmed.
+Installation is not a headset or gameplay qualification.
 
-Keep the original archive so Setup can reinstall the same build. Do not delete
-backup files created by Setup while installation is active.
+`DSVR-Setup.exe --doctor` checks the installed state. `DSVR.log` in the game
+folder is the main runtime log. When reporting a problem, include the log,
+package version and selected runtime, but no saves or game files.
 
-## Troubleshooting
+## Development and attribution
 
-- Run `DSVR-Setup.exe --doctor` to check the install and pinned game build.
-- The runtime log is `DSVR.log` in the game folder. The new render observer
-  writes `DepthProbeFrame`, `DepthProbeTarget`, and `DepthProbeTransfer` entries.
-- Include the log, `DSVR-VERSION.txt`, and the selected OpenXR runtime when
-  reporting a launch or rendering issue. Do not send saves or game files.
+[PLAN.md](PLAN.md) is the only plan. [docs/ENGINEERING.md](docs/ENGINEERING.md)
+describes design boundaries; [docs/TESTING.md](docs/TESTING.md) covers protected
+runs and acceptance cases; `MODLOG.md` records dated results.
 
-## Credits and license
-
-DSVR source is MIT licensed; third-party dependency notices are in
-`THIRD_PARTY.md` and `licenses/`. Dark Souls: Remastered is owned by
-FromSoftware and Bandai Namco; DSVR includes no game assets.
-
-AI assistance: OpenAI Codex (GPT-6) contributed to code and documentation.
-This snapshot has not received final headset acceptance.
-
-See `docs/ENGINEERING.md`, `docs/TESTING.md`, and `docs/ATTRIBUTION.md` for
-architecture, verification policy, and asset scope.
+DSVR source is MIT licensed. Third-party notices are packaged with the code.
+The game and its assets belong to FromSoftware and Bandai Namco; DSVR packages
+no game assets. DSR-FPS-Unlock is a required third-party dependency, installed
+separately and hash-verified; see [docs/ATTRIBUTION.md](docs/ATTRIBUTION.md). OpenAI Codex
+contributed to this development snapshot.

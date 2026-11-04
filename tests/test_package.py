@@ -131,6 +131,54 @@ class Package(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(self.out.exists())
 
+    def test_launcher_package_refuses_development_plans(self):
+        # A launcher must never ship a development plan: the staged engine
+        # carried MODDING_PLAN.md once, and the guard is the only thing that
+        # keeps a future staging mistake out of the portable package.
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            'dsvr_package_launcher', ROOT / 'tools' / 'package_launcher.py')
+        launcher = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(launcher)
+        package = self.root / 'launcher-package'
+        package.mkdir()
+        manifest = []
+        for name in launcher.ENGINE_FILES:
+            (package / name).write_bytes(b'engine')
+            manifest.append(
+                f"{hashlib.sha256(b'engine').hexdigest()}  {name}")
+        with_plan = '\n'.join(manifest + ['0  MODDING_PLAN.md']) + '\n'
+        (package / 'DSVR-SHA256.txt').write_text(with_plan, encoding='utf-8')
+        with self.assertRaises(ValueError):
+            launcher.verify_engine(package)
+        (package / 'DSVR-SHA256.txt').write_text('\n'.join(manifest) + '\n',
+                                                 encoding='utf-8')
+        self.assertEqual(set(launcher.verify_engine(package)),
+                         set(launcher.ENGINE_FILES))
+
+    def test_launcher_staging_is_rebuilt_from_the_package(self):
+        # A stale file in the launcher staging must not survive the next copy:
+        # an old engine DLL and a dev ledger once shipped beside the current
+        # engine because the copy only added files.
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            'dsvr_package_launcher', ROOT / 'tools' / 'package_launcher.py')
+        launcher = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(launcher)
+        package = self.root / 'launcher-package'
+        package.mkdir()
+        (package / 'dinput8.dll').write_bytes(b'engine')
+        (package / 'DSVR-SHA256.txt').write_text(
+            f"{hashlib.sha256(b'engine').hexdigest()}  dinput8.dll\n",
+            encoding='utf-8')
+        staging = self.root / 'launcher-staging'
+        staging.mkdir()
+        (staging / 'MODLOG.md').write_bytes(b'stale dev ledger')
+        (staging / 'dinput8.dll').write_bytes(b'stale engine')
+        launcher.copy_package_resources(package, staging)
+        self.assertFalse((staging / 'MODLOG.md').exists())
+        self.assertEqual((staging / 'dinput8.dll').read_bytes(), b'engine')
+
     def run_latest(self, *extra):
         return subprocess.run(
             [sys.executable, '-B', str(ROOT / 'tools/package.py'),

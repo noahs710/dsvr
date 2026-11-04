@@ -3,11 +3,18 @@ const engineState = document.getElementById("engine-state");
 const launchButton = document.getElementById("launch");
 const gamePathInput = document.getElementById("game-path");
 const gameResult = document.getElementById("game-result");
+const checksEl = document.getElementById("checks");
+const checksSummary = document.getElementById("checks-summary");
+const recheckButton = document.getElementById("recheck");
+const startHint = document.getElementById("start-hint");
+const presetList = document.getElementById("preset-list");
 let gamePath = "";
 let engineReady = false;
+let checksLoaded = false;
+let presetsLoaded = false;
+let lastStatus = null;
 let settingsLoaded = false;
 let settingsControls = new Map();
-let installState = null;
 
 const enumChoices = {
   dominant_hand: ["right", "left"],
@@ -52,12 +59,48 @@ const actionCopy = {
   "uninstall-remove-settings": ["Uninstall DSVR", "Removing DSVR files and its settings.", "DSVR and its settings were removed."],
   verify: ["Verify game build", "Checking the installed game against supported builds.", "Game build check finished."],
   doctor: ["Run doctor", "Inspecting setup, runtime, and installation health.", "Doctor check finished."],
-  "fpsunlock-install": ["Install FPS Unlock", "Downloading and verifying the optional FPS Unlock mod.", "FPS Unlock setup finished."],
+  "fpsunlock-install": ["Install required FPS Unlock", "Downloading and hash-verifying the required FPS Unlock dependency.", "Required FPS Unlock setup finished."],
   "tpup-download": ["Download texture tools", "Downloading the tool package to your Downloads folder.", "Texture tools download finished."],
-  "firewall-block": ["Block game network", "Adding the reversible DSVR firewall rules.", "Firewall block action finished."],
-  "firewall-unblock": ["Remove network block", "Removing the DSVR firewall rules.", "Firewall unblock action finished."],
-  "firewall-status": ["Check network block", "Checking the current DSVR firewall rules.", "Firewall status check finished."],
 };
+
+// One styled in-page confirmation replaces every window.confirm. Returns a
+// promise: true = confirmed, false = cancelled (Esc, backdrop, or Cancel).
+// Focus starts on Cancel and returns to the caller afterwards.
+function confirmAction({ title, body, okLabel = "Confirm", danger = false }) {
+  const backdrop = document.getElementById("confirm-backdrop");
+  const titleEl = document.getElementById("confirm-title");
+  const bodyEl = document.getElementById("confirm-body");
+  const ok = document.getElementById("confirm-ok");
+  const cancel = document.getElementById("confirm-cancel");
+  titleEl.textContent = title;
+  bodyEl.textContent = body;
+  ok.textContent = okLabel;
+  ok.classList.toggle("danger", danger);
+  backdrop.hidden = false;
+  const previous = document.activeElement;
+  return new Promise((resolve) => {
+    const done = (value) => {
+      backdrop.hidden = true;
+      ok.removeEventListener("click", onOk);
+      cancel.removeEventListener("click", onCancel);
+      backdrop.removeEventListener("click", onBackdrop);
+      document.removeEventListener("keydown", onKey, true);
+      if (previous instanceof HTMLElement) previous.focus();
+      resolve(value);
+    };
+    const onOk = () => done(true);
+    const onCancel = () => done(false);
+    const onBackdrop = (event) => { if (event.target === backdrop) done(false); };
+    const onKey = (event) => {
+      if (event.key === "Escape") { event.preventDefault(); done(false); }
+    };
+    ok.addEventListener("click", onOk);
+    cancel.addEventListener("click", onCancel);
+    backdrop.addEventListener("click", onBackdrop);
+    document.addEventListener("keydown", onKey, true);
+    cancel.focus();
+  });
+}
 
 function logLine(message) {
   logEl.textContent += `${message}\n`;
@@ -99,7 +142,7 @@ function setOperation(verb, result, working = false) {
   heading.textContent = working ? `Working · ${title}` : ok ? title : `${title} needs attention`;
   const message = document.createElement("p");
   message.textContent = working
-    ? `${detail} Setup may open a Windows confirmation for offline mode, a chained mod, or firewall safety.`
+    ? `${detail} Setup may open one Windows confirmation for offline play, another mod, or the required FPS Unlock step.`
     : ok ? success : `Setup stopped with exit ${result?.exitCode ?? "?"}. Review the details before trying again.`;
   panel.append(heading, message);
   if (!working) {
@@ -118,6 +161,111 @@ function installVerb() {
   return document.getElementById("enable-vr-after").checked ? "install-vr" : "install";
 }
 
+// The doctor prints "[OK] …", "[WARN] …", "[FAIL] …" and "[INFO] …" lines.
+// Parse them so the checklist can show a status dot instead of raw output.
+function parseCheckLine(line) {
+  const match = /^\[(OK|WARN|FAIL|INFO)\]\s*(.*)$/.exec(line.trim());
+  if (match) return { status: match[1].toLowerCase(), text: match[2] };
+  if (line.trim().startsWith("===")) return null;
+  return { status: "info", text: line.trim() };
+}
+
+async function refreshChecks() {
+  if (!engineReady) return;
+  recheckButton.disabled = true;
+  const result = await window.dsvr.call("doctor");
+  const lines = Array.isArray(result.json?.checks) ? result.json.checks : [];
+  const rows = lines.map(parseCheckLine).filter(Boolean);
+  if (!rows.length) {
+    checksSummary.textContent = `Readiness unavailable: ${result.json?.error ?? result.error ?? "no doctor output"}`;
+    checksSummary.classList.add("attention");
+    checksEl.replaceChildren();
+    recheckButton.disabled = false;
+    return;
+  }
+  const attention = rows.filter((row) => row.status === "warn" || row.status === "fail").length;
+  const needsInstall = rows.some((row) => /^(?:DSVR not installed|Partial install)/.test(row.text));
+  checksSummary.textContent = needsInstall
+    ? "Install DSVR from the Install tab before starting."
+    : attention
+      ? `${attention} item${attention === 1 ? "" : "s"} need attention before a clean start.`
+      : "No problems found. Start when the headset is ready.";
+  checksSummary.classList.toggle("attention", needsInstall || attention > 0);
+  const fragment = document.createDocumentFragment();
+  for (const row of rows) {
+    const item = document.createElement("div");
+    item.className = `check-row check-${row.status}`;
+    const dot = document.createElement("span");
+    dot.className = "check-dot";
+    dot.setAttribute("aria-hidden", "true");
+    const text = document.createElement("span");
+    text.className = "check-text";
+    text.textContent = row.text;
+    item.append(dot, text);
+    fragment.appendChild(item);
+  }
+  checksEl.replaceChildren(fragment);
+  checksLoaded = true;
+  recheckButton.disabled = false;
+}
+
+recheckButton.addEventListener("click", () => { refreshChecks(); });
+
+// Presets come from the engine (core/user_presets.h), so the launcher and the
+// native setup UI can never disagree about what a preset does.
+function updatePresetEnablement() {
+  const gameRunning = Boolean(lastStatus?.game_running);
+  for (const card of presetList.querySelectorAll(".preset-card"))
+    card.disabled = !engineReady || gameRunning;
+}
+
+async function loadPresets() {
+  if (!engineReady || presetsLoaded) return;
+  const result = await window.dsvr.call("preset-index");
+  const presets = Array.isArray(result.json?.presets) ? result.json.presets : [];
+  if (!presets.length) {
+    presetList.replaceChildren();
+    const hint = document.createElement("p");
+    hint.className = "hint";
+    hint.textContent = "Presets are unavailable. Reinstall the launcher package.";
+    presetList.appendChild(hint);
+    return;
+  }
+  const fragment = document.createDocumentFragment();
+  for (const preset of presets) {
+    const card = document.createElement("button");
+    card.type = "button";
+    card.className = "preset-card";
+    card.dataset.preset = preset.id;
+    const label = document.createElement("strong");
+    label.textContent = preset.label;
+    const detail = document.createElement("span");
+    detail.textContent = preset.detail;
+    card.append(label, detail);
+    card.addEventListener("click", () => applyPreset(preset));
+    fragment.appendChild(card);
+  }
+  presetList.replaceChildren(fragment);
+  presetsLoaded = true;
+  updatePresetEnablement();
+}
+
+async function applyPreset(preset) {
+  if (!engineReady) return;
+  const confirmed = await confirmAction({
+    title: `Apply the ${preset.label} preset?`,
+    body: `The ${preset.label} preset is saved to DSVR.toml at once. Press F7 in game to reload settings.`,
+    okLabel: "Apply preset",
+  });
+  if (!confirmed) return;
+  const result = await runVerb(`preset-${preset.id}`);
+  if (result.ok && result.json?.ok !== false) {
+    logLine(`${preset.label} preset saved. Press F7 in game to reload settings.`);
+    settingsLoaded = false;
+    await loadSettings();
+  }
+}
+
 async function runGameAction(requestedVerb) {
   if (!engineReady) return;
   let verb = requestedVerb;
@@ -127,19 +275,26 @@ async function runGameAction(requestedVerb) {
     const settingsCopy = removesSettings
       ? "DSVR files and DSVR.toml settings will be removed."
       : "DSVR files will be removed; DSVR.toml settings will stay.";
-    if (!window.confirm(`Uninstall DSVR?\n\n${settingsCopy}\n\nThe game must be closed. Any preserved chained mod can be restored by the setup prompt.`)) return;
+    const confirmed = await confirmAction({
+      title: "Uninstall DSVR?",
+      body: `${settingsCopy} The game must be closed. Any preserved chained mod can be restored by the setup prompt.`,
+      okLabel: "Uninstall",
+      danger: true,
+    });
+    if (!confirmed) return;
     if (removesSettings) verb = "uninstall-remove-settings";
   }
-  const buttons = [...document.querySelectorAll("#page-game button")];
+  const buttons = [...document.querySelectorAll("#page-install button")];
   for (const button of buttons) button.disabled = true;
   setOperation(verb, null, true);
   const result = await runVerb(verb);
   setOperation(verb, result);
   for (const button of buttons) button.disabled = false;
   await refreshStatus();
+  await refreshChecks();
 }
 
-for (const button of document.querySelectorAll("#page-game button[data-verb]"))
+for (const button of document.querySelectorAll("#page-install button[data-verb]"))
   button.addEventListener("click", () => runGameAction(button.dataset.verb));
 document.getElementById("install-action").addEventListener("click", () => runGameAction("install"));
 document.getElementById("uninstall-action").addEventListener("click", () => runGameAction("uninstall"));
@@ -159,7 +314,7 @@ async function refreshStatus() {
     return;
   }
   const status = result.json;
-  installState = status;
+  lastStatus = status;
   const body = document.createElement("div");
   body.className = "card status-card";
   const heading = document.createElement("h2");
@@ -180,7 +335,7 @@ async function refreshStatus() {
   const partial = status.install_state.partial;
   const values = [
     ["DSVR", installed ? "Installed" : partial ? "Needs repair" : "Not installed"],
-    ["FPS Unlock", status.fps_unlock_state.installed ? "Installed" : "Optional"],
+    ["FPS Unlock", status.fps_unlock_state.installed ? "Installed" : "Required - missing"],
     ["Game", status.game_running ? "Running" : "Closed"],
     ["Headset refresh", status.headset_hz ? `${status.headset_hz} Hz` : "Not reported"],
   ];
@@ -204,16 +359,28 @@ async function refreshStatus() {
   installAction.disabled = !engineReady || status.game_running;
   document.getElementById("uninstall-action").disabled = !engineReady || status.game_running || (!installed && !partial);
   launchButton.disabled = !engineReady || status.game_running || !installed;
+  const fpsMissing = !status.fps_unlock_state.installed;
+  const statusCard = document.getElementById("status-card");
+  statusCard.classList.toggle("blocked", fpsMissing && installed);
+  startHint.textContent = !installed
+    ? "Install DSVR from the Install tab first."
+    : fpsMissing
+      ? "Install the required FPS Unlock from the Install tab before starting."
+      : status.game_running
+        ? "A session is already running. Close the game to start a new one."
+        : "Starts through Steam. Steam must be in Offline mode, with Dark Souls set to Offline Mode.";
+  launchButton.disabled = launchButton.disabled || !status.fps_unlock_state.installed;
   document.querySelector('[data-verb="fpsunlock-install"]').disabled =
     !engineReady || status.game_running || status.fps_unlock_state.installed;
-  for (const button of document.querySelectorAll('#page-game button[data-verb="verify"], #page-game button[data-verb="doctor"], #page-game button[data-verb="firewall-status"]'))
-    button.disabled = !engineReady;
-  for (const button of document.querySelectorAll('#page-game button[data-verb="tpup-download"], #page-game button[data-verb="firewall-block"], #page-game button[data-verb="firewall-unblock"]'))
+  if (fpsMissing && installed)
+    logLine("Required dependency missing: install FPS Unlock from the Install tab before START VR.");
+  for (const button of document.querySelectorAll('#page-install button[data-verb="verify"], #page-install button[data-verb="doctor"], #page-install button[data-verb="tpup-download"]'))
     button.disabled = !engineReady;
   document.getElementById("install-hint").textContent = installed
-    ? "The same action updates or reinstalls the files in place. Existing settings stay in DSVR.toml."
+    ? "The same action updates or reinstalls the files in place. Existing settings stay in DSVR.toml. FPS Unlock stays required even after install."
     : partial ? "Setup found an incomplete install. Repair replaces only the DSVR-owned files."
       : "Choose whether this installation should start with VR enabled.";
+  updatePresetEnablement();
 }
 
 document.getElementById("choose-game").addEventListener("click", async () => {
@@ -231,8 +398,9 @@ launchButton.addEventListener("click", async () => {
   launchButton.disabled = true;
   const result = await runVerb("launch");
   if (result.json?.ok) logLine(`Game started through Steam (process ${result.json.pid}).`);
-  else logLine("Game did not start. Review the status and setup details.");
+  else logLine("Game did not start. Review the checks and setup details.");
   await refreshStatus();
+  await refreshChecks();
 });
 
 function categoryFor(row) {
@@ -318,6 +486,7 @@ function makeSettingGroup(name, rows, initiallyOpen) {
 }
 
 async function loadSettings() {
+  await loadPresets();
   const list = document.getElementById("settings-list");
   list.replaceChildren();
   settingsControls = new Map();
@@ -439,19 +608,15 @@ document.addEventListener("keydown", async (event) => {
   }
 });
 
-for (const button of document.querySelectorAll("[data-preset]"))
-  button.addEventListener("click", async () => {
-    if (!engineReady || !window.confirm(`Apply the ${button.textContent} preset and save it to DSVR.toml?`)) return;
-    const result = await runVerb(`preset-${button.dataset.preset}`);
-    if (result.ok && result.json?.ok !== false) {
-      logLine("Preset saved. Press F7 in game to reload settings.");
-      settingsLoaded = false;
-      await loadSettings();
-    }
-  });
-
 document.getElementById("safe-defaults").addEventListener("click", async () => {
-  if (!engineReady || !window.confirm("Replace all DSVR settings with factory safe defaults?")) return;
+  if (!engineReady) return;
+  const confirmed = await confirmAction({
+    title: "Reset to factory safe defaults?",
+    body: "Every setting is replaced with the factory safe defaults and saved at once.",
+    okLabel: "Reset settings",
+    danger: true,
+  });
+  if (!confirmed) return;
   const result = await runVerb("safe-defaults");
   if (result.ok && result.json?.ok !== false) {
     logLine("Safe defaults saved. Press F7 in game to reload settings.");
@@ -461,17 +626,20 @@ document.getElementById("safe-defaults").addEventListener("click", async () => {
 });
 
 document.getElementById("clear-log").addEventListener("click", () => { logEl.textContent = ""; });
+// Coming back from the game (or from Steam) must not leave a stale
+// "Running" cell behind: the status read is cheap and read-only.
+window.addEventListener("focus", () => { if (engineReady) refreshStatus(); });
 document.getElementById("nav").addEventListener("click", async (event) => {
   const button = event.target.closest("button[data-page]");
   if (!button) return;
   for (const item of document.querySelectorAll("#nav button")) item.classList.toggle("active", item === button);
   for (const page of document.querySelectorAll(".page")) page.classList.toggle("active", page.id === `page-${button.dataset.page}`);
-  if (button.dataset.page === "settings" && !settingsLoaded) await loadSettings();
+  if (button.dataset.page === "options" && !settingsLoaded) await loadSettings();
+  if (button.dataset.page === "play" && engineReady && !checksLoaded) await refreshChecks();
 });
 
 document.getElementById("choose-game").disabled = !engineReady;
-for (const button of document.querySelectorAll("#page-game button")) button.disabled = !engineReady;
-for (const button of document.querySelectorAll("[data-preset]")) button.disabled = !engineReady;
+for (const button of document.querySelectorAll("#page-install button")) button.disabled = !engineReady;
 document.getElementById("safe-defaults").disabled = !engineReady;
 document.getElementById("dev-toggle").hidden = !engineReady;
 const startup = await window.dsvr.engineStatus();
@@ -480,11 +648,15 @@ engineState.textContent = startup.ok
   ? startup.dev ? "Development engine" : "Engine verified"
   : `Engine unavailable: ${startup.error}`;
 engineState.classList.toggle("error", !startup.ok);
+if (!startup.ok) {
+  checksSummary.textContent = "Checks need the setup engine. Reinstall the launcher package.";
+  checksSummary.classList.add("attention");
+}
 gamePath = (await window.dsvr.gamePath()) || "";
 gamePathInput.value = gamePath;
 document.getElementById("choose-game").disabled = !engineReady;
-for (const button of document.querySelectorAll("#page-game button")) button.disabled = !engineReady;
-for (const button of document.querySelectorAll("[data-preset]")) button.disabled = !engineReady;
+for (const button of document.querySelectorAll("#page-install button")) button.disabled = !engineReady;
 document.getElementById("safe-defaults").disabled = !engineReady;
 document.getElementById("dev-toggle").hidden = !engineReady;
 await refreshStatus();
+await refreshChecks();

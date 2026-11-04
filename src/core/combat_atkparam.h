@@ -12,11 +12,11 @@
 
 namespace dsvr {
 
-// The native damage contract, transcribed from the pinned research cache
-// (docs/SOULSMODDING_REFERENCE.md -> build/research/soulsmodding-20261024,
+// Diagnostic damage vocabulary, transcribed from the pinned research cache
+// (build/research/soulsmodding-20261024,
 // pages ds1-refmat:attack-animation-schema and ds1-refmat:param:atkparam).
 // This header owns no game memory: it is the vocabulary the tracked-blade
-// decision uses so a qualified contact can be expressed in the game's own
+// decision uses so a future qualified contact can be expressed in the game's own
 // terms (attack identity + hit slot + correction domain) instead of a
 // invented HP number. Nothing here dispatches damage; the native owner does.
 

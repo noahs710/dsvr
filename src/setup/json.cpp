@@ -1,5 +1,5 @@
 // Machine-readable stdout JSON for `DSVR-Setup.exe --json <verb>`
-// (docs/ELECTRON_LAUNCHER_PLAN.md phase 1). Everything here is pure string
+// Everything here is pure string
 // building over the structs setup_internal.h already exposes; the caller in
 // setup.cpp collects the live data, so the Electron shell (and the offline
 // test) see exactly one document per invocation with no human text mixed in.
@@ -12,6 +12,7 @@
 #include <optional>
 
 #include "../common/config.h"
+#include "../core/user_presets.h"
 
 namespace setup {
 
@@ -366,7 +367,8 @@ std::string StatusJson(const std::wstring& exe, bool game_running,
          ",\"fps_unlock_state\":{\"chain_present\":" + B(fps.chain_present) +
          ",\"ini_present\":" + B(fps.ini_present) +
          ",\"proxy_set\":" + B(fps.proxy_set) +
-         ",\"installed\":" + B(fps.installed()) + "}" +
+         ",\"installed\":" + B(fps.installed()) +
+         ",\"required\":true}" +
          ",\"headset_hz\":" + std::to_string(headset_hz) +
          ",\"version\":" + JsonString(dsvr::WideFromUtf8(version)) + "}";
 }
@@ -393,7 +395,7 @@ std::string VerifyJson(bool supported, const std::string& sha256) {
 
 const std::vector<SettingsRow>& SettingsIndex() {
   // Keep in sync with gui.cpp AdvancedSettingsIndex; that copy retires onto
-  // this table in phase 4 of docs/ELECTRON_LAUNCHER_PLAN.md. tests/
+  // this table when the launcher replaces the native settings UI. tests/
   // test_setup_json.cpp pins the row count, key uniqueness and store-facing
   // keys (play_style, theater_override, theater_floor_grid) so a drift here
   // fails offline, not on a headset.
@@ -513,6 +515,20 @@ std::string SettingsIndexJson() {
     out += "{\"group\":" + JsonString(rows[i].group) +
            ",\"label\":" + JsonString(rows[i].label) +
            ",\"key\":" + JsonString(rows[i].key) + "}";
+  }
+  out += "]}";
+  return out;
+}
+
+std::string PresetIndexJson() {
+  std::string out = "{\"presets\":[";
+  for (size_t i = 0; i < dsvr::kUserPresetCount; ++i) {
+    const dsvr::UserPresetInfo& preset = dsvr::kUserPresets[i];
+    if (i) out += ',';
+    out += "{\"id\":" + JsonString(dsvr::WideFromUtf8(preset.verb)) +
+           ",\"label\":" + JsonString(dsvr::WideFromUtf8(preset.label)) +
+           ",\"detail\":" + JsonString(dsvr::WideFromUtf8(preset.detail)) +
+           ",\"hardware_fit\":" + (preset.hardware_fit ? "true" : "false") + "}";
   }
   out += "]}";
   return out;
