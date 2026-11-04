@@ -60,6 +60,41 @@ Targeted GhidraMCP resolution: FUN_140322a9d lies immediately after CALL 0x14032
 
 The retained combat-cases.json proves the natural_hit window ended 0.9695959 s before the trace header. Cause: tools/run_combat_capture.ps1 called RunCasePlan immediately after process startup, before the observer had created a trace header (it starts after the local player appears). The runner now waits for a new, unclosed trace header whose PID matches the live, receipt-owned game process before starting any case QPC window, and journals the header filename/PID/QPC. Its delayed-header SelfTest fails on the old ordering and passes on the fixed ordering. This repairs case capture timing only; it creates no combat outcome and does not qualify the stale candidate.
 
+## 1 November offline weapon-data join for the retained hit
+
+Read-only extraction from the installed DSR files, using the local Soulstruct
+2.6.0 parser. The executable still matches the pinned SHA-256 above. The
+installed `GameParam.parambnd.dcx` hash is
+`cc4a81cc87f028534d965c908a8aa7dba2f9e235ac30f5e72ddf6bb45dc7b5ab`;
+`WP_A_0272.partsbnd.dcx` is
+`dc7bc3e142af3df7912264decde1759d01f8f13d25de92c21eb12873598a3b15`;
+`c0000.chrbnd.dcx` is
+`c6667a888bc654706facdca1d7811467c40cd8aa22d839b2c282ec2d0d8153ae`.
+
+The retained contact selected weapon `212000` and AtkParam `305`. In the
+installed tables, EquipParamWeapon `212000` maps to visual WeaponModel `272`
+and BehaviorVariationID `2301`; AtkParam_Pc `305` has hitbox 0 radius `0.7`,
+start model point `8`, and end model point `-1`. `c0000.flver` has dummy
+reference `8` attached to `Spine1` at local `(-0.0000000005, 1.2859898,
+-0.2132441)`. If that PARAM field resolves through the character FLVER dummy
+table, the observed hit shape is anchored to the body model, not to the sword
+mesh. That mapping still needs native confirmation.
+
+The visual `WP_A_0272.flver` mesh has raw file bounds
+`(-0.0618722, -0.2411650, -0.0246099)` to
+`(0.0640188, 0.1541125, 0.0252118)`, with its longest local axis along Y.
+Its FLVER dummy references are `100`, `110`, `120`, `130`, and `206`. These
+facts identify a model-specific visual shape candidate, not the native hit
+volume: the engine-unit conversion, attachment transform, blade/handle split,
+and any relation between those dummies and AtkParam `305` are unresolved.
+
+The LAB bench therefore remains diagnostic only: its current `0.9 m` local
+`-Z` segment is not qualified against this weapon, and none of these asset
+facts authorize a damage/contact call. C1/C3 and B1-B5 remain open. The next
+live capture must still bind its tracked hand stream to a footer-valid natural
+contact and confirm the operator's currently equipped weapon before changing
+production geometry.
+
 Evidence reference only; execution order belongs to the [cockpit plan](../MODDING_PLAN.md) (lanes B/C), operating policy to [TESTING](TESTING.md).
 
 Status: **unresolved**. No native damage binding is verified by this note. Static paths below come from the pinned Ghidra project; the first bounded native observation is separately classified with its loss limitation.
